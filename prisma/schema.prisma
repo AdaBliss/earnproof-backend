@@ -91,6 +91,7 @@ enum AuthEventType {
   CHALLENGE_EXPIRED
   CHALLENGE_REPLAYED
   RATE_LIMITED
+  ACCOUNT_INACTIVE
 }
 
 enum ApiKeyScope {
@@ -119,6 +120,8 @@ model User {
   walletHash         String          @unique
   role               UserRole        @default(WORKER)
   status             ResourceStatus  @default(ACTIVE)
+  /// Optional self-managed display label. The only profile field a user may edit.
+  displayName        String?         @db.VarChar(64)
   createdAt          DateTime        @default(now())
   updatedAt          DateTime        @updatedAt
   lastLoginAt        DateTime?

@@ -123,6 +123,7 @@ describe("Auth challenge replay and race-condition tests", () => {
             .mockResolvedValueOnce({ message, walletAddress: walletAddressA, networkPassphrase: "Test SDF Network ; September 2015", origin: "http://localhost:3000" }),
         },
         user: {
+          findUnique: jest.fn().mockResolvedValue(null),
           upsert: jest.fn().mockResolvedValue({
             id: "user_1",
             walletAddress: walletAddressA,
@@ -180,6 +181,7 @@ describe("Auth challenge replay and race-condition tests", () => {
             .mockResolvedValue({ message, walletAddress: walletAddressA, networkPassphrase: "Test SDF Network ; September 2015", origin: "http://localhost:3000" }),
         },
         user: {
+          findUnique: jest.fn().mockResolvedValue(null),
           upsert: jest.fn().mockResolvedValue({
             id: "user_1",
             walletAddress: walletAddressA,
@@ -257,6 +259,7 @@ describe("Auth challenge replay and race-condition tests", () => {
             .mockResolvedValue({ message, walletAddress: walletAddressA, networkPassphrase: "Test SDF Network ; September 2015", origin: "http://localhost:3000" }),
         },
         user: {
+          findUnique: jest.fn().mockResolvedValue(null),
           upsert: jest.fn().mockResolvedValue({
             id: "user_1",
             walletAddress: walletAddressA,
@@ -305,6 +308,7 @@ describe("Auth challenge replay and race-condition tests", () => {
           updateMany: jest.fn().mockResolvedValue({ count: 0 }), // No challenge found (expired)
         },
         user: {
+          findUnique: jest.fn().mockResolvedValue(null),
           upsert: jest.fn(),
         },
       };
@@ -338,6 +342,7 @@ describe("Auth challenge replay and race-condition tests", () => {
           }),
         },
         user: {
+          findUnique: jest.fn().mockResolvedValue(null),
           upsert: jest.fn().mockResolvedValue({
             id: "user_1",
             walletAddress: walletAddressA,
@@ -373,6 +378,7 @@ describe("Auth challenge replay and race-condition tests", () => {
           updateMany: jest.fn().mockResolvedValue({ count: 0 }), // No match because wallet mismatch
         },
         user: {
+          findUnique: jest.fn().mockResolvedValue(null),
           upsert: jest.fn(),
         },
       };
@@ -404,6 +410,7 @@ describe("Auth challenge replay and race-condition tests", () => {
           updateMany: jest.fn().mockResolvedValue({ count: 0 }), // No match (wallet mismatch)
         },
         user: {
+          findUnique: jest.fn().mockResolvedValue(null),
           upsert: jest.fn(),
         },
       };
@@ -439,6 +446,7 @@ describe("Auth challenge replay and race-condition tests", () => {
           }),
         },
         user: {
+          findUnique: jest.fn().mockResolvedValue(null),
           upsert: jest.fn(),
         },
       };
@@ -476,6 +484,7 @@ describe("Auth challenge replay and race-condition tests", () => {
           }),
         },
         user: {
+          findUnique: jest.fn().mockResolvedValue(null),
           upsert: jest.fn(),
         },
       };
@@ -514,6 +523,7 @@ describe("Auth challenge replay and race-condition tests", () => {
           }),
         },
         user: {
+          findUnique: jest.fn().mockResolvedValue(null),
           upsert: jest.fn(),
         },
       };
@@ -547,6 +557,7 @@ describe("Auth challenge replay and race-condition tests", () => {
           }),
         },
         user: {
+          findUnique: jest.fn().mockResolvedValue(null),
           upsert: jest.fn(),
         },
       };
@@ -579,6 +590,7 @@ describe("Auth challenge replay and race-condition tests", () => {
             .mockResolvedValueOnce({ count: 0 }), // nonexistent
         },
         user: {
+          findUnique: jest.fn().mockResolvedValue(null),
           upsert: jest.fn(),
         },
       };
@@ -633,6 +645,7 @@ describe("Auth challenge replay and race-condition tests", () => {
           }),
         },
         user: {
+          findUnique: jest.fn().mockResolvedValue(null),
           upsert: jest.fn().mockResolvedValue({
             id: "user_1",
             walletAddress: walletAddressA,
@@ -678,6 +691,7 @@ describe("Auth challenge replay and race-condition tests", () => {
           }),
         },
         user: {
+          findUnique: jest.fn().mockResolvedValue(null),
           upsert: jest.fn(),
         },
       };
@@ -720,6 +734,7 @@ describe("Auth challenge replay and race-condition tests", () => {
             }),
         },
         user: {
+          findUnique: jest.fn().mockResolvedValue(null),
           upsert: jest.fn(),
         },
       };

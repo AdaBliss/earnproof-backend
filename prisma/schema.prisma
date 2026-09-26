@@ -113,6 +113,13 @@ enum IdempotencyStatus {
   FAILED
 }
 
+enum WalletRotationStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
 model User {
   id                 String          @id @default(cuid())
   walletAddress      String          @unique
@@ -128,6 +135,7 @@ model User {
   proofs             Proof[]
   createdApiKeys     ApiKey[]
   sessions           AuthSession[]
+  walletRotations    WalletRotation[]
 
   @@index([walletHash])
   @@index([status])
@@ -157,6 +165,10 @@ model AuthSession {
   tokenHash   String    @unique
   userId      String
   user        User      @relation(fields: [userId], references: [id])
+  /// Wallet identity (User.walletHash) the session was issued to. A session
+  /// whose wallet no longer matches the account is refused. Null for sessions
+  /// issued before wallet rotation existed.
+  walletHash  String?
   createdAt   DateTime  @default(now())
   expiresAt   DateTime
   lastUsedAt  DateTime?
@@ -170,6 +182,36 @@ model AuthSession {
   @@index([userId])
   @@index([expiresAt])
   @@index([revokedAt])
+}
+
+/// One-time wallet address rotation.
+///
+/// Both the current and the replacement key sign distinct messages bound to
+/// the network, the application origin and a single-use nonce; the nonce's
+/// hash is unique across rotations. A rotation is consumed before its
+/// signatures are checked, so it can be attempted at most once; the account's
+/// identity changes only when both signatures verify.
+model WalletRotation {
+  id                   String               @id @default(cuid())
+  userId               String
+  user                 User                 @relation(fields: [userId], references: [id])
+  currentWalletAddress String
+  newWalletAddress     String
+  nonceHash            String               @unique
+  currentMessage       String
+  newMessage           String
+  networkPassphrase    String
+  origin               String
+  status               WalletRotationStatus @default(PENDING)
+  /// Bounded failure code; never a signature or raw error.
+  failureReason        String?
+  expiresAt            DateTime
+  consumedAt           DateTime?
+  completedAt          DateTime?
+  createdAt            DateTime             @default(now())
+
+  @@index([userId, status])
+  @@index([expiresAt])
 }
 
 model Organization {

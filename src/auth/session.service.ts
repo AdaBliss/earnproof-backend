@@ -13,6 +13,7 @@ const DEFAULT_TTL_SECONDS = 60 * 60 * 12;
 type SessionLookup = {
   id: string;
   userId: string;
+  walletHash: string | null;
   expiresAt: Date;
   revokedAt: Date | null;
 };
@@ -72,6 +73,7 @@ export class SessionService {
         id: sessionId,
         tokenHash,
         userId: user.id,
+        walletHash: user.walletHash,
         expiresAt,
       },
     });
@@ -88,11 +90,14 @@ export class SessionService {
    *  - expired sessions (`expiresAt` in the past)
    *  - revoked sessions (`revokedAt` is set)
    *
-   * On success updates `lastUsedAt` and returns the session id + userId.
+   * On success updates `lastUsedAt` and returns the session id, userId and
+   * the wallet identity the session was issued to (null for legacy sessions).
+   * Comparing that identity with the account's current wallet is the caller's
+   * job (`AuthGuard`), since only the caller loads the account.
    */
   async validate(
     token: string,
-  ): Promise<{ sessionId: string; userId: string }> {
+  ): Promise<{ sessionId: string; userId: string; walletHash: string | null }> {
     const tokenHash = this.hashToken(token);
     if (!tokenHash) {
       throw new UnauthorizedException("Malformed session token");
@@ -123,7 +128,11 @@ export class SessionService {
         // in-flight requests.
       });
 
-    return { sessionId: session.id, userId: session.userId };
+    return {
+      sessionId: session.id,
+      userId: session.userId,
+      walletHash: session.walletHash ?? null,
+    };
   }
 
   /**
@@ -205,6 +214,7 @@ export class SessionService {
           id: newSessionId,
           tokenHash,
           userId: user.id,
+          walletHash: user.walletHash,
           expiresAt,
         },
       });
@@ -296,6 +306,7 @@ export class SessionService {
       select: {
         id: true,
         userId: true,
+        walletHash: true,
         expiresAt: true,
         revokedAt: true,
       },

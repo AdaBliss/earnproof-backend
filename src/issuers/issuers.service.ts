@@ -74,6 +74,24 @@ export class IssuersService {
       );
     }
 
+    // An address that another issuer is rotating onto, or that an issuer used
+    // to hold, stays reserved: registering it would either collide with a
+    // rotation in flight or make historical attestations ambiguous.
+    const reserved =
+      (await this.prisma.issuerAddressRotation.findUnique({
+        where: { openTargetKey: input.stellarAddress },
+        select: { id: true },
+      })) ??
+      (await this.prisma.issuerAddressHistory.findFirst({
+        where: { stellarAddress: input.stellarAddress },
+        select: { id: true },
+      }));
+    if (reserved) {
+      throw new ConflictException(
+        "This Stellar address is reserved by an issuer address rotation",
+      );
+    }
+
     // Validate Stellar address format (basic check)
     if (!this.isValidStellarAddress(input.stellarAddress)) {
       throw new BadRequestException("Invalid Stellar public key format");
@@ -122,6 +140,7 @@ export class IssuersService {
         publicMetadata,
         contractSyncState: "PENDING",
         contractSyncError: null,
+        revision: { increment: 1 },
       },
     });
 
@@ -160,6 +179,7 @@ export class IssuersService {
       status: input.status,
       contractSyncState: "PENDING",
       contractSyncError: null,
+      revision: { increment: 1 },
     };
 
     // Update timestamp fields based on transition
@@ -416,6 +436,7 @@ export class IssuersService {
       contractSyncState: issuer.contractSyncState,
       contractTransactionHash: issuer.contractTransactionHash,
       contractSyncedAt: issuer.contractSyncedAt,
+      revision: issuer.revision,
       verifiedAt: issuer.verifiedAt,
       suspendedAt: issuer.suspendedAt,
       revokedAt: issuer.revokedAt,

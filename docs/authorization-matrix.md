@@ -16,6 +16,7 @@ user or organization is answered as `404`, identical to an absent resource.
 | `GET /organizations`, `GET/PATCH /organizations/:id` | bearer | creator; ADMIN exception | 401/404 |
 | `POST /organizations`, issuer create/update/sync and `/issuers/admin*` | bearer `ADMIN` | global admin exception | 401/403 |
 | `GET /issuers*` | public for published issuer data; bearer for admin views | published vs admin view | 401/403/404 |
+| `POST/GET /issuers/:id/address-rotations`, `POST /issuers/:id/address-rotations/:rotationId/reconcile` | bearer `ADMIN` | global admin; a rotation id is only resolved under its own issuer | 400/401/403/404/409/422/503 |
 | `GET/POST/DELETE /api-keys*`, rotate/revoke | bearer organization creator or ADMIN | organization-scoped query | 401/403/404 |
 | `GET /integrations/auth-context` | API key + `ORG_READ` | key organization selected by `X-Organization-Id` | 401 invalid/cross-org, 403 scope |
 | `GET /health/diagnostics` | API key + `ORG_ADMIN` | key organization | 401/403 |

@@ -35,6 +35,10 @@ describe("OrganizationsService", () => {
     createdById: mockUser.id,
     createdAt: new Date("2026-01-01"),
     updatedAt: new Date("2026-01-01"),
+    archivedAt: null,
+    legalHoldAt: null,
+    legalHoldReference: null,
+    deletedAt: null,
   };
 
   beforeEach(async () => {

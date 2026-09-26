@@ -11,6 +11,7 @@ import {
   UseGuards,
   ForbiddenException,
   BadRequestException,
+  ConflictException,
 } from "@nestjs/common";
 import {
   ApiBearerAuth,
@@ -207,6 +208,7 @@ export class ApiKeysController {
     const organizationId = await this.getAuthorizedOrganizationId(
       user,
       query.organizationId,
+      { allowArchived: true },
     );
     if (!organizationId) {
       throw new ForbiddenException(
@@ -385,6 +387,7 @@ export class ApiKeysController {
     const organizationId = await this.getAuthorizedOrganizationId(
       user,
       query.organizationId,
+      { allowArchived: true },
     );
     if (!organizationId) {
       throw new ForbiddenException(
@@ -430,6 +433,7 @@ export class ApiKeysController {
   private async getAuthorizedOrganizationId(
     user: AuthenticatedUser,
     requestedOrganizationId?: string,
+    options: { allowArchived?: boolean } = {},
   ): Promise<string | null> {
     const accessWhere =
       user.role === "ADMIN" ? {} : { createdById: user.id };
@@ -438,20 +442,23 @@ export class ApiKeysController {
       const org = await this.prisma.organization.findFirst({
         where: {
           id: requestedOrganizationId,
+          deletedAt: null,
           ...accessWhere,
         },
         select: {
           id: true,
+          archivedAt: true,
         },
       });
 
-      return org?.id || null;
+      return this.usableOrganizationId(org, options);
     }
 
     const organizations = await this.prisma.organization.findMany({
-      where: accessWhere,
+      where: { deletedAt: null, ...accessWhere },
       select: {
         id: true,
+        archivedAt: true,
       },
       orderBy: {
         createdAt: "asc",
@@ -460,10 +467,29 @@ export class ApiKeysController {
     });
 
     if (organizations.length === 0) return null;
-    if (organizations.length === 1) return organizations[0]?.id ?? null;
+    if (organizations.length === 1) {
+      return this.usableOrganizationId(organizations[0], options);
+    }
 
     throw new BadRequestException(
       "organizationId is required when you can manage more than one organization",
     );
+  }
+
+  /**
+   * An archived organization may still list and revoke its keys, so it can be
+   * wound down, but may not issue or rotate one.
+   */
+  private usableOrganizationId(
+    org: { id: string; archivedAt?: Date | null } | null | undefined,
+    options: { allowArchived?: boolean },
+  ): string | null {
+    if (!org) return null;
+    if (org.archivedAt && !options.allowArchived) {
+      throw new ConflictException(
+        "Organization is archived; API keys cannot be issued or rotated",
+      );
+    }
+    return org.id;
   }
 }

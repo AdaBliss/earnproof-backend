@@ -436,7 +436,7 @@ export class WebhooksController {
       where: { id: user.id },
       select: {
         organizations: {
-          where: { status: "ACTIVE" },
+          where: { status: "ACTIVE", archivedAt: null },
           select: { id: true },
           take: 1,
         },

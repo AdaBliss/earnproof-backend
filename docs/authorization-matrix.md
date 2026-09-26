@@ -15,6 +15,7 @@ user or organization is answered as `404`, identical to an absent resource.
 | `GET/POST/PATCH/DELETE /webhooks*`, delivery replay | bearer `DEVELOPER` or `ADMIN` | caller's organization | 401/403/404 |
 | `GET /organizations`, `GET/PATCH /organizations/:id` | bearer | creator; ADMIN exception | 401/404 |
 | `POST /organizations`, issuer create/update/sync and `/issuers/admin*` | bearer `ADMIN` | global admin exception | 401/403 |
+| `POST /organizations/:id/archive,/restore`, `PUT/DELETE /organizations/:id/legal-hold`, `GET /organizations/:id/deletion-eligibility`, `DELETE /organizations/:id` | bearer `ADMIN` | global admin only, never the creator | 401/403/404/409 |
 | `GET /issuers*` | public for published issuer data; bearer for admin views | published vs admin view | 401/403/404 |
 | `GET/POST/DELETE /api-keys*`, rotate/revoke | bearer organization creator or ADMIN | organization-scoped query | 401/403/404 |
 | `GET /integrations/auth-context` | API key + `ORG_READ` | key organization selected by `X-Organization-Id` | 401 invalid/cross-org, 403 scope |

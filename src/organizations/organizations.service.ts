@@ -11,6 +11,7 @@ import { CreateOrganizationDto } from "./dto/create-organization.dto";
 import { ListOrganizationsDto } from "./dto/list-organizations.dto";
 import { OrganizationResponseDto } from "./dto/organization-response.dto";
 import { UpdateOrganizationDto } from "./dto/update-organization.dto";
+import { lifecycleStateOf } from "./organization-lifecycle.policy";
 
 @Injectable()
 export class OrganizationsService {
@@ -60,7 +61,12 @@ export class OrganizationsService {
     organizationId: string,
     input: UpdateOrganizationDto,
   ): Promise<OrganizationResponseDto> {
-    await this.getVisibleOrganization(user, organizationId);
+    const current = await this.getVisibleOrganization(user, organizationId);
+    if (current.archivedAt || current.deletedAt) {
+      throw new ConflictException(
+        "Organization is archived; restore it before changing its profile",
+      );
+    }
 
     const updated = await this.prisma.organization.update({
       where: { id: organizationId },
@@ -189,6 +195,13 @@ export class OrganizationsService {
       createdById: org.createdById,
       createdAt: org.createdAt,
       updatedAt: org.updatedAt,
+      lifecycleState: lifecycleStateOf({
+        archivedAt: org.archivedAt ?? null,
+        deletedAt: org.deletedAt ?? null,
+      }),
+      archivedAt: org.archivedAt ?? null,
+      legalHold: Boolean(org.legalHoldAt),
+      deletedAt: org.deletedAt ?? null,
     };
   }
 

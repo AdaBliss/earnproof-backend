@@ -113,6 +113,8 @@ export class WebhookDeliveryService implements OnModuleInit {
       where: { id: userId },
       select: {
         organizations: {
+          // An archived organization receives no new events.
+          where: { archivedAt: null },
           select: { id: true },
         },
       },
@@ -292,6 +294,7 @@ export class WebhookDeliveryService implements OnModuleInit {
             url: true,
             secretEncrypted: true,
             status: true,
+            organization: { select: { archivedAt: true } },
           },
         },
       },
@@ -299,6 +302,18 @@ export class WebhookDeliveryService implements OnModuleInit {
 
     if (!delivery) {
       this.logger.warn(`Delivery ${deliveryId} not found; skipping`);
+      return;
+    }
+
+    // A retry scheduled before the organization was archived is not sent.
+    if (delivery.webhook.organization?.archivedAt) {
+      await this.prisma.webhookDelivery.update({
+        where: { id: deliveryId },
+        data: {
+          status: WebhookDeliveryStatus.FAILED,
+          failureReason: "organization archived before delivery",
+        },
+      });
       return;
     }
 

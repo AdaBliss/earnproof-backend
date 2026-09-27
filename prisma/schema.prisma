@@ -112,6 +112,8 @@ enum OrganizationMemberRole {
   ADMIN
   MEMBER
   VIEWER
+}
+
 enum IdempotencyStatus {
   PENDING
   COMPLETED
@@ -133,7 +135,7 @@ model User {
   proofs             Proof[]
   createdApiKeys     ApiKey[]
   sessions           AuthSession[]
-  organizationMemberships OrganizationMember[]
+  organizationMemberships OrganizationMember[] @relation("organizationMemberships")
 
   @@index([walletHash])
   @@index([status])
@@ -219,6 +221,8 @@ model OrganizationMember {
   @@index([organizationId])
   @@index([userId])
   @@index([status])
+}
+
 /// Stores idempotency records to prevent duplicate mutations within an organization.
 /// Indexed by (organizationId, idempotencyKey) to enforce uniqueness and enable O(1) lookup.
 /// The requestFingerprint is checked on incoming requests; if the key exists but fingerprint
@@ -299,6 +303,8 @@ model Payment {
   assetIssuer            String?
   amountEncrypted        String?
   occurredAt             DateTime
+  /// Versioned memo (v2): {version, type, ciphertext} or {version, type: "none", omitted?}.
+  /// Plaintext is never stored. See src/payments/payment-memo.ts and docs/payment-memos.md.
   memo                   Json?
   classification         PaymentClassification  @default(UNKNOWN)
   isEligible             Boolean                @default(false)
@@ -602,6 +608,8 @@ model RequestNonce {
   createdAt    DateTime @default(now())
 
   @@index([apiKeyId, expiresAt])
+}
+
 /// Acknowledgement for an expected / planned contract configuration drift.
 /// Allows operators to suppress blocking drift during upgrades for a bounded window.
 model ContractDriftAcknowledgement {
@@ -617,6 +625,8 @@ model ContractDriftAcknowledgement {
   createdAt   DateTime @default(now())
 
   @@index([driftKey, expiresAt])
+}
+
 /// Short-lived, action-bound assertion issued after wallet re-verification.
 /// Consumed (single-use) when the destructive operation succeeds.
 /// Bound to: userId, action, resourceId (or "*"), origin, network.

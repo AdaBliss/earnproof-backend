@@ -9,8 +9,9 @@ import {
 import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
 import { PrismaService } from "../database/prisma.service";
 import { StellarService } from "../stellar/stellar.service";
-import { normalizeMemo } from "../stellar/memo-normalizer";
+import { normalizeMemoDetailed } from "../stellar/memo-normalizer";
 import { NormalizedMemo } from "../stellar/stellar.types";
+import { StoredMemo, decodeStoredMemo, encodeStoredMemo } from "./payment-memo";
 
 @Injectable()
 export class PaymentsService {
@@ -48,7 +49,10 @@ export class PaymentsService {
     let updated = 0;
     let skipped = 0;
     let enrichmentErrors = 0;
-    const memoCache = new Map<string, NormalizedMemo>();
+    // Keyed by transaction: every operation in a transaction shares its memo,
+    // and caching the encoded form keeps the stored value identical for all
+    // of them.
+    const memoCache = new Map<string, StoredMemo>();
 
     // Batch the "does this payment already exist" check into a single query
     // ahead of the loop, instead of one findUnique per incoming payment.
@@ -87,10 +91,16 @@ export class PaymentsService {
           if (!transaction) {
             enrichmentErrors += 1;
           }
-          memoContext = normalizeMemo(transaction);
+          memoContext = encodeStoredMemo(
+            normalizeMemoDetailed(transaction),
+            this.paymentEncryptionKeyring,
+          );
         } catch {
           enrichmentErrors += 1;
-          memoContext = { type: "none" };
+          memoContext = encodeStoredMemo(
+            { memo: { type: "none" } },
+            this.paymentEncryptionKeyring,
+          );
         }
         memoCache.set(payment.stellarTransactionHash, memoContext);
       }
@@ -251,30 +261,6 @@ export class PaymentsService {
   }
 
   private readMemoContext(memo: Prisma.JsonValue | null): NormalizedMemo {
-    if (!memo || typeof memo !== "object" || Array.isArray(memo)) {
-      return { type: "none" };
-    }
-
-    const stored = memo as Record<string, Prisma.JsonValue>;
-    if (stored.type === "none") {
-      return { type: "none" };
-    }
-
-    if (typeof stored.type !== "string" || typeof stored.value !== "string") {
-      return { type: "none" };
-    }
-
-    if (stored.type === "text") {
-      return {
-        type: "text",
-        value: Array.from(stored.value).slice(0, 500).join(""),
-        truncated: stored.truncated === true,
-      };
-    }
-
-    return normalizeMemo({
-      memo_type: stored.type === "return_hash" ? "return" : stored.type,
-      memo: stored.value,
-    });
+    return decodeStoredMemo(memo, this.paymentEncryptionKeyring);
   }
 }

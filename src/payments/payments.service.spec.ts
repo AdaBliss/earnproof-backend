@@ -1,4 +1,6 @@
 import { PaymentClassification, ResourceStatus } from "@prisma/client";
+import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
+import { decodeStoredMemo, encodeStoredMemo } from "./payment-memo";
 import { PaymentsService } from "./payments.service";
 
 describe("PaymentsService", () => {
@@ -10,6 +12,7 @@ describe("PaymentsService", () => {
       return values[key];
     }),
   };
+  const keyring = () => new PaymentEncryptionKeyringService(config as never);
 
   it("syncs incoming payments idempotently", async () => {
     const prisma = {
@@ -71,13 +74,20 @@ describe("PaymentsService", () => {
           isEligible: true,
           amountEncrypted: expect.stringMatching(/^enc:v0:/),
           memo: {
+            version: 2,
             type: "text",
-            value: "Salary June",
-            truncated: false,
+            ciphertext: expect.stringMatching(/^enc:v0:/),
           },
         }),
       }),
     );
+    const stored = prisma.payment.upsert.mock.calls[0][0].create.memo;
+    expect(JSON.stringify(stored)).not.toContain("Salary June");
+    expect(decodeStoredMemo(stored, keyring())).toEqual({
+      type: "text",
+      value: "Salary June",
+      truncated: false,
+    });
   });
 
   it("deduplicates transaction memo lookups within one sync", async () => {
@@ -161,7 +171,9 @@ describe("PaymentsService", () => {
     ).resolves.toMatchObject({ created: 1, enrichmentErrors: 1 });
     expect(prisma.payment.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        create: expect.objectContaining({ memo: { type: "none" } }),
+        create: expect.objectContaining({
+          memo: { version: 2, type: "none" },
+        }),
       }),
     );
   });
@@ -230,7 +242,10 @@ describe("PaymentsService", () => {
       assetIssuer: null,
       amountEncrypted: "enc:v1:private",
       occurredAt: new Date("2026-07-13T00:00:00Z"),
-      memo: { type: "text", value: "Salary June", truncated: false },
+      memo: encodeStoredMemo(
+        { memo: { type: "text", value: "Salary June", truncated: false } },
+        keyring(),
+      ) as unknown,
       classification: PaymentClassification.INCOME,
       isEligible: true,
       createdAt: new Date("2026-07-13T00:00:00Z"),
@@ -251,8 +266,9 @@ describe("PaymentsService", () => {
     const [listed] = await service.listPayments("user_1", {});
     const detail = await service.getPayment("user_1", "payment_1");
 
-    expect(listed.memoContext).toEqual(payment.memo);
-    expect(detail.memoContext).toEqual(payment.memo);
+    const expected = { type: "text", value: "Salary June", truncated: false };
+    expect(listed.memoContext).toEqual(expected);
+    expect(detail.memoContext).toEqual(expected);
     expect(listed).not.toHaveProperty("memo");
     expect(listed).not.toHaveProperty("amountEncrypted");
     expect(prisma.payment.findFirst).toHaveBeenCalledWith({
@@ -302,5 +318,42 @@ describe("PaymentsService", () => {
         classification: PaymentClassification.INCOME,
       },
     });
+  });
+
+  it.each([
+    ["a legacy plaintext row", { type: "text", value: "Salary June", truncated: false }],
+    ["an unversioned object", { type: "id", value: "42" }],
+    ["a JSON string", "Salary June"],
+    ["a JSON array", ["text", "Salary June"]],
+    ["a version-2 row with extra fields", { version: 2, type: "none", note: "x" }],
+    ["a ciphertext under an unknown key", { version: 2, type: "text", ciphertext: "enc:v9:a:b:c" }],
+  ])("reports %s as no memo", async (_label, memo) => {
+    const payment = {
+      id: "payment_1",
+      userId: "user_1",
+      operationId: "op_1",
+      stellarTransactionHash: "tx_1",
+      sourceAddress: "GA",
+      destinationAddress: "GB",
+      assetCode: "XLM",
+      assetIssuer: null,
+      amountEncrypted: null,
+      occurredAt: new Date("2026-07-13T00:00:00Z"),
+      memo,
+      classification: PaymentClassification.INCOME,
+      isEligible: true,
+      createdAt: new Date("2026-07-13T00:00:00Z"),
+      updatedAt: new Date("2026-07-13T00:00:00Z"),
+    };
+    const service = new PaymentsService(
+      { payment: { findFirst: jest.fn().mockResolvedValue(payment) } } as never,
+      {} as never,
+      config as never,
+    );
+
+    const detail = await service.getPayment("user_1", "payment_1");
+
+    expect(detail.memoContext).toEqual({ type: "none" });
+    expect(JSON.stringify(detail)).not.toContain("Salary June");
   });
 });

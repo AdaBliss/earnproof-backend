@@ -1,5 +1,6 @@
 import { CreateChallengeDto } from "../../src/auth/dto/create-challenge.dto";
 import { VerifyChallengeDto } from "../../src/auth/dto/verify-challenge.dto";
+import { CreatePaymentBackfillDto } from "../../src/payments/dto/create-payment-backfill.dto";
 import { CreatePaymentReceiptProofDto } from "../../src/proofs/dto/create-payment-receipt-proof.dto";
 import { CreateMinimumIncomeProofDto } from "../../src/proofs/dto/create-minimum-income-proof.dto";
 import {
@@ -255,6 +256,46 @@ describe("CreateRecurringIncomeProofDto validation contract", () => {
 
   it("rejects an unknown field", async () => {
     const violations = await validateDto(CreateRecurringIncomeProofDto, {
+      ...valid,
+      ...COMMON_UNKNOWN_FIELD,
+    });
+    expect(violations.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CreatePaymentBackfillDto
+// ---------------------------------------------------------------------------
+
+describe("CreatePaymentBackfillDto validation contract", () => {
+  const valid = { userId: "user_123", startLedger: 100, endLedger: 200 };
+
+  it("accepts a well-formed request and ledger boundaries", async () => {
+    expect(await isValidDto(CreatePaymentBackfillDto, valid)).toBe(true);
+    expect(
+      await isValidDto(CreatePaymentBackfillDto, {
+        ...valid,
+        startLedger: 2,
+        endLedger: 2_147_483_647,
+      }),
+    ).toBe(true);
+  });
+
+  it.each([
+    ["missing userId", { ...valid, userId: undefined }],
+    ["empty userId", { ...valid, userId: "" }],
+    ["missing startLedger", { ...valid, startLedger: undefined }],
+    ["genesis startLedger", { ...valid, startLedger: 1 }],
+    ["fractional endLedger", { ...valid, endLedger: 200.5 }],
+    ["string ledger", { ...valid, startLedger: "100" }],
+    ["endLedger beyond INTEGER", { ...valid, endLedger: 2_147_483_648 }],
+  ])("rejects a request with %s", async (_label, plain) => {
+    const violations = await validateDto(CreatePaymentBackfillDto, plain);
+    expect(violations.length).toBeGreaterThan(0);
+  });
+
+  it("rejects an unknown field", async () => {
+    const violations = await validateDto(CreatePaymentBackfillDto, {
       ...valid,
       ...COMMON_UNKNOWN_FIELD,
     });

@@ -6,6 +6,8 @@ import {
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
+  AscendingPageOptions,
+  AscendingPaymentsPage,
   HorizonClient,
   HorizonCancelledError,
   HorizonReadOptions,
@@ -69,6 +71,29 @@ export class StellarService {
       // Cancellation is the caller's own decision, not a dependency failure;
       // reporting it as one would make a client disconnect look like a Horizon
       // outage on the dashboards.
+      if (error instanceof HorizonCancelledError) throw error;
+
+      throw new ServiceUnavailableException(
+        "Stellar Horizon is temporarily unavailable",
+      );
+    }
+  }
+
+  /**
+   * One ascending page of an account's payments after `options.cursor`, for
+   * ledger-range backfills. Failures collapse to one dependency error, as for
+   * the forward read.
+   */
+  async readPaymentsPageAscending(
+    walletAddress: string,
+    options: AscendingPageOptions,
+  ): Promise<AscendingPaymentsPage> {
+    try {
+      return await this.horizon.readPaymentsPageAscending(
+        walletAddress,
+        options,
+      );
+    } catch (error) {
       if (error instanceof HorizonCancelledError) throw error;
 
       throw new ServiceUnavailableException(

@@ -99,6 +99,33 @@ export interface HorizonReadResult {
   stopReason: StopReason;
 }
 
+/** One record of an ascending page, keyed by its Horizon paging token. */
+export interface AscendingPaymentRecord {
+  /**
+   * The record's paging token as a TOID (ledger << 32 | tx << 12 | op), or
+   * null when Horizon returned a non-numeric id. TOIDs order records by
+   * ledger, which is what makes a ledger-bounded scan possible.
+   */
+  toid: bigint | null;
+  /** The normalized incoming payment, or null for any other record. */
+  payment: NormalizedPayment | null;
+}
+
+export interface AscendingPaymentsPage {
+  records: AscendingPaymentRecord[];
+  /** Cursor for the following page; null when Horizon offers none. */
+  nextCursor: string | null;
+  attempts: number;
+}
+
+export interface AscendingPageOptions {
+  /** Exclusive lower bound: records strictly after this paging token. */
+  cursor: string;
+  pageLimit?: number;
+  maxAttemptsPerPage?: number;
+  signal?: AbortSignal;
+}
+
 export interface HorizonClientOptions {
   horizonUrl: string;
   transport?: HorizonTransport;
@@ -168,6 +195,52 @@ export class HorizonClient {
 
     this.inFlight.set(key, started);
     return started;
+  }
+
+  /**
+   * Reads exactly one page of an account's payments in ascending order,
+   * starting strictly after `cursor`.
+   *
+   * Used by ledger-range backfills, which walk history oldest-first from
+   * their own checkpoint. It is deliberately separate from
+   * {@link listIncomingPayments}: it never coalesces, never walks further
+   * than one page, and shares no cursor with the forward sync.
+   */
+  async readPaymentsPageAscending(
+    address: string,
+    options: AscendingPageOptions,
+  ): Promise<AscendingPaymentsPage> {
+    const url = this.pageUrl(
+      address,
+      options.pageLimit ?? DEFAULT_PAGE_LIMIT,
+      options.cursor,
+      "asc",
+    );
+    let attempts = 0;
+    const page = await this.fetchPage(
+      url,
+      options.maxAttemptsPerPage ?? DEFAULT_MAX_ATTEMPTS,
+      options.signal,
+      (used) => {
+        attempts += used;
+      },
+    );
+
+    const records = page.records.map((record): AscendingPaymentRecord => {
+      const id =
+        record && typeof record === "object" && !Array.isArray(record)
+          ? (record as { id?: unknown }).id
+          : undefined;
+      const toid =
+        typeof id === "string" && /^\d{1,20}$/.test(id) ? BigInt(id) : null;
+      const normalized = normalizeRecord(record, address);
+      return {
+        toid,
+        payment: typeof normalized === "object" ? normalized : null,
+      };
+    });
+
+    return { records, nextCursor: page.nextCursor, attempts };
   }
 
   private async read(
@@ -363,12 +436,17 @@ export class HorizonClient {
     throw lastFault ?? new HorizonFault("network_error", faultMessage("network_error"));
   }
 
-  private pageUrl(address: string, limit: number, cursor?: string): string {
+  private pageUrl(
+    address: string,
+    limit: number,
+    cursor?: string,
+    order: "asc" | "desc" = "desc",
+  ): string {
     const url = new URL(
       `${this.horizonUrl}/accounts/${encodeURIComponent(address)}/payments`,
     );
     url.searchParams.set("limit", String(limit));
-    url.searchParams.set("order", "desc");
+    url.searchParams.set("order", order);
     if (cursor) url.searchParams.set("cursor", cursor);
     return url.toString();
   }

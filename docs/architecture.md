@@ -118,9 +118,9 @@ Horizon synchronization and payment classification.
 
 | | |
 |---|---|
-| **Public interface** | `POST /payments/sync`, `GET /payments`, `PATCH /payments/:id/classification` |
-| **Owned tables** | `Payment`, `SupportedAsset` |
-| **Key files** | [`payments.service.ts`](../src/payments/payments.service.ts) |
+| **Public interface** | `POST /payments/sync`, `GET /payments`, `PATCH /payments/:id/classification`, `/payment-backfills` (ADMIN, [details](payment-backfills.md)) |
+| **Owned tables** | `Payment`, `SupportedAsset`, `PaymentBackfillJob` |
+| **Key files** | [`payments.service.ts`](../src/payments/payments.service.ts), [`payment-backfill.service.ts`](../src/payments/payment-backfill.service.ts) |
 | **Must not depend on** | `proofs`, `credentials`, `webhooks` |
 
 Payments are read by `proofs` but never written by it. Amounts are stored
@@ -181,8 +181,8 @@ Scheduled background work.
 | | |
 |---|---|
 | **Public interface** | none — no controller |
-| **Owned tables** | none; operates on `AnchoringIntent` |
-| **Key files** | [`anchoring-worker.service.ts`](../src/jobs/anchoring-worker.service.ts), [`anchoring-reconciler.service.ts`](../src/jobs/anchoring-reconciler.service.ts) |
+| **Owned tables** | none; operates on `AnchoringIntent` and `PaymentBackfillJob` |
+| **Key files** | [`anchoring-worker.service.ts`](../src/jobs/anchoring-worker.service.ts), [`anchoring-reconciler.service.ts`](../src/jobs/anchoring-reconciler.service.ts), [`payment-backfill-worker.service.ts`](../src/jobs/payment-backfill-worker.service.ts) |
 | **Must not depend on** | HTTP request context |
 
 Jobs have no request and therefore no user. Anything that reads

@@ -112,6 +112,8 @@ enum OrganizationMemberRole {
   ADMIN
   MEMBER
   VIEWER
+}
+
 enum IdempotencyStatus {
   PENDING
   COMPLETED
@@ -133,7 +135,8 @@ model User {
   proofs             Proof[]
   createdApiKeys     ApiKey[]
   sessions           AuthSession[]
-  organizationMemberships OrganizationMember[]
+  organizationMemberships OrganizationMember[] @relation("organizationMemberships")
+  paymentBackfillJobs PaymentBackfillJob[]
 
   @@index([walletHash])
   @@index([status])
@@ -219,6 +222,8 @@ model OrganizationMember {
   @@index([organizationId])
   @@index([userId])
   @@index([status])
+}
+
 /// Stores idempotency records to prevent duplicate mutations within an organization.
 /// Indexed by (organizationId, idempotencyKey) to enforce uniqueness and enable O(1) lookup.
 /// The requestFingerprint is checked on incoming requests; if the key exists but fingerprint
@@ -309,6 +314,48 @@ model Payment {
   @@index([sourceAddress])
   @@index([assetCode, assetIssuer])
   @@index([classification])
+}
+
+enum PaymentBackfillStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  CANCELLED
+  FAILED
+}
+
+/// Operator-requested rescan of one user's incoming payments over a bounded,
+/// inclusive ledger range. Independent of normal synchronization: it keeps its
+/// own checkpoint and only ever inserts payments that do not exist yet.
+/// See src/payments/payment-backfill.service.ts and docs/payment-backfills.md.
+model PaymentBackfillJob {
+  id                String                @id @default(cuid())
+  userId            String
+  user              User                  @relation(fields: [userId], references: [id])
+  /// Operator who requested the job.
+  requestedById     String
+  startLedger       Int
+  endLedger         Int
+  status            PaymentBackfillStatus @default(PENDING)
+  /// Horizon paging token of the last record committed. Only moves forward.
+  checkpointCursor  String?
+  pagesProcessed    Int                   @default(0)
+  recordsSeen       Int                   @default(0)
+  paymentsCreated   Int                   @default(0)
+  duplicatesSkipped Int                   @default(0)
+  /// Consecutive claims without a committed page; reset on progress.
+  attempts          Int                   @default(0)
+  leaseOwner        String?
+  leaseExpiresAt    DateTime?
+  cancelRequestedAt DateTime?
+  /// Fault category only; never a raw upstream message.
+  lastErrorSafe     String?
+  completedAt       DateTime?
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  @@index([userId, status])
+  @@index([status, leaseExpiresAt])
 }
 
 model TrustedSource {
@@ -602,6 +649,8 @@ model RequestNonce {
   createdAt    DateTime @default(now())
 
   @@index([apiKeyId, expiresAt])
+}
+
 /// Acknowledgement for an expected / planned contract configuration drift.
 /// Allows operators to suppress blocking drift during upgrades for a bounded window.
 model ContractDriftAcknowledgement {
@@ -617,6 +666,8 @@ model ContractDriftAcknowledgement {
   createdAt   DateTime @default(now())
 
   @@index([driftKey, expiresAt])
+}
+
 /// Short-lived, action-bound assertion issued after wallet re-verification.
 /// Consumed (single-use) when the destructive operation succeeds.
 /// Bound to: userId, action, resourceId (or "*"), origin, network.

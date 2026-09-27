@@ -1,5 +1,6 @@
 import { CreateChallengeDto } from "../../src/auth/dto/create-challenge.dto";
 import { VerifyChallengeDto } from "../../src/auth/dto/verify-challenge.dto";
+import { CreateEmployerPaymentProofDto } from "../../src/proofs/dto/create-employer-payment-proof.dto";
 import { CreatePaymentReceiptProofDto } from "../../src/proofs/dto/create-payment-receipt-proof.dto";
 import { CreateMinimumIncomeProofDto } from "../../src/proofs/dto/create-minimum-income-proof.dto";
 import {
@@ -255,6 +256,69 @@ describe("CreateRecurringIncomeProofDto validation contract", () => {
 
   it("rejects an unknown field", async () => {
     const violations = await validateDto(CreateRecurringIncomeProofDto, {
+      ...valid,
+      ...COMMON_UNKNOWN_FIELD,
+    });
+    expect(violations.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CreateEmployerPaymentProofDto
+// ---------------------------------------------------------------------------
+
+describe("CreateEmployerPaymentProofDto validation contract", () => {
+  const valid = {
+    trustedSourceId: "ts_123",
+    assetCode: "USDC",
+    periodStart: "2026-08-01T00:00:00.000Z",
+    periodEnd: "2026-09-01T00:00:00.000Z",
+  };
+
+  it("accepts the minimal valid request (all optionals omitted)", async () => {
+    expect(await isValidDto(CreateEmployerPaymentProofDto, valid)).toBe(true);
+  });
+
+  it("accepts every optional field populated at its boundary", async () => {
+    expect(
+      await isValidDto(CreateEmployerPaymentProofDto, {
+        ...valid,
+        assetIssuer: VALID_WALLET,
+        expiresInDays: 365,
+      }),
+    ).toBe(true);
+  });
+
+  it.each([
+    ["missing trustedSourceId", { ...valid, trustedSourceId: undefined }],
+    ["empty trustedSourceId", { ...valid, trustedSourceId: "" }],
+    ["oversized trustedSourceId", { ...valid, trustedSourceId: "x".repeat(65) }],
+    ["missing assetCode", { ...valid, assetCode: undefined }],
+    ["oversized assetCode", { ...valid, assetCode: "A".repeat(13) }],
+    ["oversized assetIssuer", { ...valid, assetIssuer: "G".repeat(57) }],
+    ["non-date periodStart", { ...valid, periodStart: "yesterday" }],
+    ["missing periodEnd", { ...valid, periodEnd: undefined }],
+    ["expiresInDays above maximum (366)", { ...valid, expiresInDays: 366 }],
+    ["expiresInDays below minimum (0)", { ...valid, expiresInDays: 0 }],
+  ])("rejects a request with %s", async (_label, plain) => {
+    const violations = await validateDto(CreateEmployerPaymentProofDto, plain);
+    expect(violations.length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ["paymentId", { paymentId: "pay_1" }],
+    ["operationId", { operationId: "123" }],
+    ["memo", { memo: "salary" }],
+  ])("rejects a caller-chosen %s (claim selection is server-side)", async (_label, extra) => {
+    const violations = await validateDto(CreateEmployerPaymentProofDto, {
+      ...valid,
+      ...extra,
+    });
+    expect(violations.length).toBeGreaterThan(0);
+  });
+
+  it("rejects an unknown field", async () => {
+    const violations = await validateDto(CreateEmployerPaymentProofDto, {
       ...valid,
       ...COMMON_UNKNOWN_FIELD,
     });

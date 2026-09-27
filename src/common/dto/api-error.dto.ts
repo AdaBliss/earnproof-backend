@@ -40,6 +40,11 @@ export enum ApiErrorCode {
   PAYMENT_NOT_ELIGIBLE = "PAYMENT_NOT_ELIGIBLE",
   PAYMENT_EXCLUDED = "PAYMENT_EXCLUDED",
 
+  // 422 - employer-payment proof cannot be issued from the selected source
+  EMPLOYER_SOURCE_UNTRUSTED = "EMPLOYER_SOURCE_UNTRUSTED",
+  EMPLOYER_SOURCE_AMBIGUOUS = "EMPLOYER_SOURCE_AMBIGUOUS",
+  EMPLOYER_PAYMENT_NOT_FOUND = "EMPLOYER_PAYMENT_NOT_FOUND",
+
   // 409 – request conflicts with current state
   CONFLICT = "CONFLICT",
 

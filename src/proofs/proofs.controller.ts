@@ -27,6 +27,7 @@ import {
 import { Idempotent } from "../common/decorators/idempotent.decorator";
 import { ApiErrorDto } from "../common/dto/api-error.dto";
 import { AuthGuard } from "../common/guards/auth.guard";
+import { CreateEmployerPaymentProofDto } from "./dto/create-employer-payment-proof.dto";
 import { CreateMinimumIncomeProofDto } from "./dto/create-minimum-income-proof.dto";
 import { CreatePaymentReceiptProofDto } from "./dto/create-payment-receipt-proof.dto";
 import { CreateRecurringIncomeProofDto } from "./dto/create-recurring-income-proof.dto";
@@ -261,6 +262,66 @@ export class ProofsController {
   }
 
   @ApiOperation({
+    summary: "Create an employer-payment proof",
+    description:
+      "Issues a minimal credential stating that the authenticated wallet received at least one eligible income " +
+      "payment from a verified employer during a bounded period. The employer is identified by an active issuer " +
+      "linked to one of the caller's trusted sources, and the issuer must corroborate the payer address. " +
+      "The credential never contains the amount, sender, memo, transaction or payment date.",
+  })
+  @ApiBearerAuth()
+  @ApiResponse({
+    status: HttpStatus.CREATED,
+    description: "Employer-payment proof created.",
+    type: ProofCreatedDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description:
+      "The period is invalid, longer than 366 days, or ends in the future.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: "Trusted source does not exist or belongs to another user.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    description:
+      "The source is untrusted, revoked or ambiguous (EMPLOYER_SOURCE_UNTRUSTED, EMPLOYER_SOURCE_AMBIGUOUS), " +
+      "no eligible payment falls inside the period (EMPLOYER_PAYMENT_NOT_FOUND), or request validation failed.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Bearer token is missing, malformed, invalid, or expired.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description: "Idempotency key was used with a different request payload.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.REQUEST_TIMEOUT,
+    description: "Previous idempotent request is still being processed.",
+    type: ApiErrorDto,
+  })
+  @UseGuards(AuthGuard)
+  @SkipThrottle({ default: true, verification: true })
+  @Throttle({ strict: {} })
+  @Idempotent({ headerName: "idempotency-key", required: true })
+  @Post("employer-payment")
+  @AuthenticatedRoute({ ownership: "user" })
+  createEmployerPaymentProof(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: CreateEmployerPaymentProofDto,
+  ) {
+    return this.proofsService.createEmployerPaymentProof(user, body);
+  }
+
+  @ApiOperation({
     summary: "Revoke a proof",
     description:
       "Marks the proof as REVOKED and records a revocation timestamp. " +
@@ -321,8 +382,6 @@ export class ProofsController {
   @Throttle({ verification: {} })
   @Get(":id/verify")
   @PublicRoute()
-  verifyProof(@Param("id") id: string) {
-    return this.proofsService.verifyProof(id);
   verifyProof(@Param("id") id: string, @Req() request: Request) {
     return this.proofsService.verifyProof(id, { ip: request.ip });
   }

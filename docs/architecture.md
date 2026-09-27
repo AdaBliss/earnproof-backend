@@ -132,7 +132,7 @@ The core domain. Issuance, verification, revocation, and anchoring intent.
 
 | | |
 |---|---|
-| **Public interface** | `/proofs/minimum-income`, `/proofs/recurring-income`, `/proofs/payment-receipt`, `GET /proofs`, `/proofs/:id/verify`, `/proofs/:id/revoke` |
+| **Public interface** | `/proofs/minimum-income`, `/proofs/recurring-income`, `/proofs/payment-receipt`, `/proofs/employer-payment` ([policy](employer-payment-proof.md)), `GET /proofs`, `/proofs/:id/verify`, `/proofs/:id/revoke` |
 | **Owned tables** | `Proof`, `ProofClaim`, `AnchoringIntent`, `VerificationEvent` |
 | **Key files** | [`proofs.service.ts`](../src/proofs/proofs.service.ts), [`contract-anchoring.service.ts`](../src/proofs/contract-anchoring.service.ts) |
 | **Must not depend on** | `auth` internals, `api-keys` internals |

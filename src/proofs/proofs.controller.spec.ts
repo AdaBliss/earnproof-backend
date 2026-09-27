@@ -2,6 +2,8 @@ import { BadRequestException, ForbiddenException, NotFoundException } from "@nes
 import { AuthenticatedUser } from "../auth/auth.types";
 import { ProofsController } from "./proofs.controller";
 import { ListProofsDto } from "./dto/list-proofs.dto";
+import { buildAuthorizationMatrix } from "../common/guards/authorization-policy.registry";
+import { CreateEmployerPaymentProofDto } from "./dto/create-employer-payment-proof.dto";
 import { CreateMinimumIncomeProofDto } from "./dto/create-minimum-income-proof.dto";
 import { CreatePaymentReceiptProofDto } from "./dto/create-payment-receipt-proof.dto";
 import { CreateRecurringIncomeProofDto } from "./dto/create-recurring-income-proof.dto";
@@ -20,6 +22,7 @@ type ProofsServiceMock = {
   createPaymentReceiptProof: jest.Mock;
   createMinimumIncomeProof: jest.Mock;
   createRecurringIncomeProof: jest.Mock;
+  createEmployerPaymentProof: jest.Mock;
   revokeProof: jest.Mock;
   verifyProof: jest.Mock;
   getVerificationStats: jest.Mock;
@@ -45,6 +48,7 @@ describe("ProofsController", () => {
       createPaymentReceiptProof: jest.fn(),
       createMinimumIncomeProof: jest.fn(),
       createRecurringIncomeProof: jest.fn(),
+      createEmployerPaymentProof: jest.fn(),
       revokeProof: jest.fn(),
       verifyProof: jest.fn(),
       getVerificationStats: jest.fn(),
@@ -375,6 +379,50 @@ describe("ProofsController", () => {
     });
   });
 
+  describe("createEmployerPaymentProof", () => {
+    const body: CreateEmployerPaymentProofDto = {
+      trustedSourceId: "ts_1",
+      assetCode: "USDC",
+      periodStart: "2026-08-01T00:00:00.000Z",
+      periodEnd: "2026-09-01T00:00:00.000Z",
+    };
+
+    it("delegates to the service with the authenticated user", async () => {
+      const created = { proofId, status: "ACTIVE" };
+      proofsService.createEmployerPaymentProof.mockResolvedValueOnce(created);
+
+      await expect(
+        controller.createEmployerPaymentProof(authenticatedUser, body),
+      ).resolves.toEqual(created);
+      expect(proofsService.createEmployerPaymentProof).toHaveBeenCalledWith(
+        authenticatedUser,
+        body,
+      );
+    });
+
+    it("propagates service refusals unchanged", async () => {
+      proofsService.createEmployerPaymentProof.mockRejectedValueOnce(
+        new NotFoundException("Trusted source not found"),
+      );
+
+      await expect(
+        controller.createEmployerPaymentProof(authenticatedUser, body),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it("is an authenticated, owner-scoped POST route", () => {
+      const route = buildAuthorizationMatrix([ProofsController]).find(
+        (entry) => entry.method === "createEmployerPaymentProof",
+      );
+
+      expect(route).toMatchObject({
+        path: "/proofs/employer-payment",
+        httpMethod: "POST",
+        policy: { access: "authenticated", ownership: "user" },
+      });
+    });
+  });
+
   describe("createRecurringIncomeProof", () => {
     it("should create a recurring-income proof", async () => {
       const proof: ProofCreatedDto = {
@@ -504,6 +552,8 @@ describe("ProofsController", () => {
   });
 
   describe("verifyProof (public)", () => {
+    const request = { ip: "203.0.113.7" } as never;
+
     it("should verify a proof without authentication", async () => {
       const verification: VerifyProofResponseDto = {
         id: proofId,
@@ -519,10 +569,12 @@ describe("ProofsController", () => {
       };
       proofsService.verifyProof.mockResolvedValueOnce(verification);
 
-      const result = await controller.verifyProof(proofId);
+      const result = await controller.verifyProof(proofId, request);
 
       expect(result).toEqual(verification);
-      expect(proofsService.verifyProof).toHaveBeenCalledWith(proofId);
+      expect(proofsService.verifyProof).toHaveBeenCalledWith(proofId, {
+        ip: "203.0.113.7",
+      });
     });
 
     it("should return valid=false for tampered proof", async () => {
@@ -533,7 +585,7 @@ describe("ProofsController", () => {
       };
       proofsService.verifyProof.mockResolvedValueOnce(verification);
 
-      const result = await controller.verifyProof(proofId);
+      const result = await controller.verifyProof(proofId, request);
 
       expect(result.valid).toBe(false);
     });
@@ -543,7 +595,7 @@ describe("ProofsController", () => {
         new NotFoundException("Proof not found"),
       );
 
-      await expect(controller.verifyProof("nonexistent")).rejects.toThrow(
+      await expect(controller.verifyProof("nonexistent", request)).rejects.toThrow(
         NotFoundException,
       );
     });

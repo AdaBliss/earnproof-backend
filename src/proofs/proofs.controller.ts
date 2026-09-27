@@ -28,6 +28,7 @@ import { Idempotent } from "../common/decorators/idempotent.decorator";
 import { ApiErrorDto } from "../common/dto/api-error.dto";
 import { AuthGuard } from "../common/guards/auth.guard";
 import { CreateEmployerPaymentProofDto } from "./dto/create-employer-payment-proof.dto";
+import { CreateEmploymentContinuityProofDto } from "./dto/create-employment-continuity-proof.dto";
 import { CreateMinimumIncomeProofDto } from "./dto/create-minimum-income-proof.dto";
 import { CreatePaymentReceiptProofDto } from "./dto/create-payment-receipt-proof.dto";
 import { CreateRecurringIncomeProofDto } from "./dto/create-recurring-income-proof.dto";
@@ -319,6 +320,66 @@ export class ProofsController {
     @Body() body: CreateEmployerPaymentProofDto,
   ) {
     return this.proofsService.createEmployerPaymentProof(user, body);
+  }
+
+  @ApiOperation({
+    summary: "Create an employment-continuity proof",
+    description:
+      "Issues a credential stating that corroborated income payments from one verified employer source cover " +
+      "a completed window of consecutive UTC calendar months, allowing at most one missing month and requiring " +
+      "the first and last months to be covered. The credential commits only to the continuity result and the " +
+      "policy version and parameters it was evaluated under.",
+  })
+  @ApiBearerAuth()
+  @ApiResponse({
+    status: HttpStatus.CREATED,
+    description: "Employment-continuity proof created.",
+    type: ProofCreatedDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description:
+      "periodStart is not the first instant of a UTC month, observedPeriods is out of range, or the window has not ended.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: "Trusted source does not exist or belongs to another user.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    description:
+      "The source is untrusted, revoked or ambiguous, the continuity rule is not met (CONTINUITY_NOT_SATISFIED), " +
+      "the window holds too many payments (CONTINUITY_LIMIT_EXCEEDED), or request validation failed.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Bearer token is missing, malformed, invalid, or expired.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description: "Idempotency key was used with a different request payload.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.REQUEST_TIMEOUT,
+    description: "Previous idempotent request is still being processed.",
+    type: ApiErrorDto,
+  })
+  @UseGuards(AuthGuard)
+  @SkipThrottle({ default: true, verification: true })
+  @Throttle({ strict: {} })
+  @Idempotent({ headerName: "idempotency-key", required: true })
+  @Post("employment-continuity")
+  @AuthenticatedRoute({ ownership: "user" })
+  createEmploymentContinuityProof(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: CreateEmploymentContinuityProofDto,
+  ) {
+    return this.proofsService.createEmploymentContinuityProof(user, body);
   }
 
   @ApiOperation({

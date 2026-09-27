@@ -38,6 +38,7 @@ import {
 } from "../common/rate-limit/proof-verification-abuse.service";
 import { ContractAnchoringService } from "./contract-anchoring.service";
 import { CreateEmployerPaymentProofDto } from "./dto/create-employer-payment-proof.dto";
+import { CreateEmploymentContinuityProofDto } from "./dto/create-employment-continuity-proof.dto";
 import { CreateMinimumIncomeProofDto } from "./dto/create-minimum-income-proof.dto";
 import { CreatePaymentReceiptProofDto } from "./dto/create-payment-receipt-proof.dto";
 import {
@@ -56,11 +57,24 @@ import {
   selectEmployerPayment,
   validateEmployerPaymentPeriod,
 } from "./employer-payment.policy";
+import {
+  CONTINUITY_PERIOD_UNIT,
+  ContinuityWindowViolation,
+  EMPLOYMENT_CONTINUITY_POLICY_VERSION,
+  MAX_CONTINUITY_PAYMENTS,
+  MAX_CONTINUITY_PERIODS,
+  MAX_MISSING_CONTINUITY_PERIODS,
+  MIN_CONTINUITY_PERIODS,
+  buildContinuityWindow,
+  evaluateContinuity,
+} from "./employment-continuity.policy";
 
 const SCHEMA_VERSION = "earnproof.minimum-income.v1";
 const PAYMENT_RECEIPT_SCHEMA_VERSION = "earnproof.payment-receipt.v1";
 const RECURRING_INCOME_SCHEMA_VERSION = "earnproof.recurring-income.v1";
 const EMPLOYER_PAYMENT_SCHEMA_VERSION = "earnproof.employer-payment.v1";
+const EMPLOYMENT_CONTINUITY_SCHEMA_VERSION =
+  "earnproof.employment-continuity.v1";
 const DEFAULT_EXPIRY_DAYS = 30;
 
 const EMPLOYER_PERIOD_MESSAGES: Record<EmployerPaymentPeriodViolation, string> =
@@ -70,6 +84,14 @@ const EMPLOYER_PERIOD_MESSAGES: Record<EmployerPaymentPeriodViolation, string> =
     too_long: `The period must not exceed ${MAX_EMPLOYER_PAYMENT_PERIOD_DAYS} days`,
     ends_in_future: "periodEnd must not be in the future",
   };
+
+const CONTINUITY_WINDOW_MESSAGES: Record<ContinuityWindowViolation, string> = {
+  invalid_date: "periodStart must be a valid date",
+  not_period_aligned:
+    "periodStart must be the first instant of a UTC calendar month",
+  invalid_period_count: `observedPeriods must be an integer between ${MIN_CONTINUITY_PERIODS} and ${MAX_CONTINUITY_PERIODS}`,
+  window_not_complete: "The observed window must have ended",
+};
 
 type MinimumIncomeCredential = {
   id: string;
@@ -166,11 +188,41 @@ type EmployerPaymentCredential = {
   expiresAt: string;
 };
 
+type EmploymentContinuityCredential = {
+  id: string;
+  type: "EarnProofEmploymentContinuityCredential";
+  schemaVersion: "earnproof.employment-continuity.v1";
+  issuer: "earnproof-backend";
+  subject: { walletHash: string };
+  claim: {
+    employerIssuerId: string;
+    assetCode: string;
+    assetIssuer: string | null;
+    periodStart: string;
+    periodEnd: string;
+    periodUnit: string;
+    observedPeriods: number;
+    toleratedMissingPeriods: number;
+    continuous: true;
+    policyVersion: string;
+  };
+  privacy: {
+    amountHidden: true;
+    senderHidden: true;
+    memoHidden: true;
+    sourceTransactionsHidden: true;
+    paymentDatesHidden: true;
+  };
+  issuedAt: string;
+  expiresAt: string;
+};
+
 type EarnProofCredential =
   | MinimumIncomeCredential
   | PaymentReceiptCredential
   | RecurringIncomeCredential
-  | EmployerPaymentCredential;
+  | EmployerPaymentCredential
+  | EmploymentContinuityCredential;
 
 type EmployerSourceLockRow = {
   sourceStatus: ResourceStatus;
@@ -181,6 +233,7 @@ type EmployerSourceLockRow = {
 };
 
 type AttestationLockRow = {
+  id?: string;
   status: ResourceStatus;
   revokedAt: Date | null;
   expiresAt: Date | null;
@@ -796,39 +849,10 @@ export class ProofsService {
       });
     }
 
-    const source = await this.prisma.trustedSource.findFirst({
-      where: { id: input.trustedSourceId, userId: user.id },
-      select: {
-        id: true,
-        sourceAddress: true,
-        status: true,
-        issuerId: true,
-        issuer: {
-          select: {
-            id: true,
-            status: true,
-            stellarAddress: true,
-            organization: { select: { status: true } },
-          },
-        },
-      },
-    });
-    if (!source) {
-      // Unknown and non-owned sources are indistinguishable.
-      throw new NotFoundException({
-        code: ApiErrorCode.NOT_FOUND,
-        message: "Trusted source not found",
-      });
-    }
-
-    const addressOwner = await this.prisma.issuer.findUnique({
-      where: { stellarAddress: source.sourceAddress },
-      select: { id: true },
-    });
-    const resolution = resolveEmployerSource(source, addressOwner?.id ?? null);
-    if (!resolution.ok) {
-      throw this.employerSourceError(resolution.reason);
-    }
+    const { sourceId, resolution } = await this.resolveTrustedEmployer(
+      user.id,
+      input.trustedSourceId,
+    );
 
     const assetIssuer = input.assetIssuer ?? null;
     const candidates = await this.prisma.payment.findMany({
@@ -853,37 +877,14 @@ export class ProofsService {
       });
     }
 
-    const attestationByReference = new Map<string, string>();
-    if (!resolution.isIssuerAccount) {
-      const attestations = await this.prisma.attestation.findMany({
-        where: {
-          issuerId: resolution.issuerId,
-          subjectWalletHash: user.walletHash,
-          type: AttestationType.PAYMENT,
-          status: ResourceStatus.ACTIVE,
-          revokedAt: null,
-          paymentReferenceHash: {
-            in: candidates.map((candidate) =>
-              this.paymentReferenceHash(candidate.operationId),
-            ),
-          },
-          OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
-        },
-        select: { id: true, paymentReferenceHash: true },
-        orderBy: { id: "asc" },
-      });
-      for (const attestation of attestations) {
-        if (
-          attestation.paymentReferenceHash &&
-          !attestationByReference.has(attestation.paymentReferenceHash)
-        ) {
-          attestationByReference.set(
-            attestation.paymentReferenceHash,
-            attestation.id,
-          );
-        }
-      }
-    }
+    const attestationByReference = resolution.isIssuerAccount
+      ? new Map<string, string>()
+      : await this.findPaymentAttestations(
+          resolution.issuerId,
+          user.walletHash,
+          candidates,
+          now,
+        );
 
     const selection = selectEmployerPayment(
       candidates,
@@ -927,32 +928,7 @@ export class ProofsService {
     const commitment = `sha256:${sha256(credentialHash)}`;
 
     const proof = await this.prisma.$transaction(async (tx) => {
-      // FOR SHARE blocks a concurrent status change until this transaction
-      // ends, and waits for one already in flight, so the checks below see
-      // the latest committed trust state.
-      const [locked] = await tx.$queryRaw<EmployerSourceLockRow[]>`
-        SELECT
-          ts."status" AS "sourceStatus",
-          ts."sourceAddress" AS "sourceAddress",
-          ts."issuerId" AS "issuerId",
-          i."status" AS "issuerStatus",
-          o."status" AS "organizationStatus"
-        FROM "TrustedSource" ts
-        JOIN "Issuer" i ON i."id" = ts."issuerId"
-        JOIN "Organization" o ON o."id" = i."organizationId"
-        WHERE ts."id" = ${source.id} AND ts."userId" = ${user.id}
-        FOR SHARE OF ts, i, o
-      `;
-      if (
-        !locked ||
-        locked.sourceStatus !== ResourceStatus.ACTIVE ||
-        locked.issuerStatus !== ResourceStatus.ACTIVE ||
-        locked.organizationStatus !== ResourceStatus.ACTIVE ||
-        locked.issuerId !== resolution.issuerId ||
-        locked.sourceAddress !== resolution.sourceAddress
-      ) {
-        throw this.employerSourceError("source_inactive");
-      }
+      await this.assertEmployerStillTrusted(tx, sourceId, user.id, resolution);
 
       if (attestationId) {
         const [attestation] = await tx.$queryRaw<AttestationLockRow[]>`
@@ -1024,6 +1000,238 @@ export class ProofsService {
                 senderHidden: true,
                 memoHidden: true,
                 sourceTransactionsHidden: true,
+              },
+            },
+          },
+        },
+        include: { claim: true },
+      });
+
+      if (this.anchoringEnabled) {
+        await tx.anchoringIntent.create({
+          data: {
+            proofId: created.id,
+            operation: AnchoringOperation.REGISTER,
+            status: AnchoringStatus.PENDING,
+          },
+        });
+      }
+
+      return created;
+    });
+
+    this.emitProofCreated(user.id, proof);
+    return {
+      proofId: proof.id,
+      status: proof.status,
+      verificationUrl: `/api/v1/proofs/${proof.id}/verify`,
+      credential: this.signCredential(credential),
+      anchoring: this.anchoringEnabled
+        ? { anchored: false as const, reason: "pending" as const }
+        : { anchored: false as const, reason: "disabled" as const },
+    };
+  }
+
+  /**
+   * Issues an employment-continuity proof (earnproof-backend#166).
+   *
+   * Payments are bucketed into UTC calendar months over a completed window.
+   * Only payments from one trusted employer source count, under the same
+   * issuer corroboration rule as employer-payment proofs. The credential
+   * commits only to the continuity result and the policy it was evaluated
+   * under; it carries no payment dates, amounts or identifiers.
+   */
+  async createEmploymentContinuityProof(
+    user: AuthenticatedUser,
+    input: CreateEmploymentContinuityProofDto,
+  ) {
+    const now = new Date();
+    const built = buildContinuityWindow(
+      new Date(input.periodStart),
+      input.observedPeriods,
+      now,
+    );
+    if ("violation" in built) {
+      throw new BadRequestException({
+        code: ApiErrorCode.INVALID_INPUT,
+        message: CONTINUITY_WINDOW_MESSAGES[built.violation],
+      });
+    }
+    const { window } = built;
+
+    const { sourceId, resolution } = await this.resolveTrustedEmployer(
+      user.id,
+      input.trustedSourceId,
+    );
+
+    const assetIssuer = input.assetIssuer ?? null;
+    const payments = await this.prisma.payment.findMany({
+      where: {
+        userId: user.id,
+        sourceAddress: resolution.sourceAddress,
+        assetCode: input.assetCode,
+        assetIssuer,
+        classification: PaymentClassification.INCOME,
+        isEligible: true,
+        occurredAt: { gte: window.start, lt: window.end },
+      },
+      select: { id: true, operationId: true, occurredAt: true },
+      orderBy: [{ occurredAt: "asc" }, { operationId: "asc" }],
+      take: MAX_CONTINUITY_PAYMENTS + 1,
+    });
+    if (payments.length > MAX_CONTINUITY_PAYMENTS) {
+      throw new UnprocessableEntityException({
+        code: ApiErrorCode.CONTINUITY_LIMIT_EXCEEDED,
+        message: `The window contains more than ${MAX_CONTINUITY_PAYMENTS} payments; request a shorter window`,
+      });
+    }
+
+    const attestationByReference = resolution.isIssuerAccount
+      ? new Map<string, string>()
+      : await this.findPaymentAttestations(
+          resolution.issuerId,
+          user.walletHash,
+          payments,
+          now,
+        );
+    const attestationFor = (payment: { operationId: string }) =>
+      attestationByReference.get(this.paymentReferenceHash(payment.operationId));
+
+    const evaluation = evaluateContinuity(
+      payments.filter(
+        (payment) =>
+          resolution.isIssuerAccount || attestationFor(payment) !== undefined,
+      ),
+      window,
+    );
+    if (!evaluation.continuous) {
+      throw this.continuityNotSatisfied();
+    }
+
+    const expiresAt = new Date(
+      now.getTime() +
+        (input.expiresInDays ?? DEFAULT_EXPIRY_DAYS) * 24 * 60 * 60 * 1000,
+    );
+    const proofId = randomUUID();
+    const credential = this.buildEmploymentContinuityCredential({
+      id: proofId,
+      walletHash: user.walletHash,
+      employerIssuerId: resolution.issuerId,
+      assetCode: input.assetCode,
+      assetIssuer,
+      periodStart: window.start,
+      periodEnd: window.end,
+      periodUnit: CONTINUITY_PERIOD_UNIT,
+      observedPeriods: window.periods,
+      toleratedMissingPeriods: MAX_MISSING_CONTINUITY_PERIODS,
+      policyVersion: EMPLOYMENT_CONTINUITY_POLICY_VERSION,
+      issuedAt: now,
+      expiresAt,
+    });
+    const credentialHash = `sha256:${sha256(canonicalize(credential))}`;
+    const commitment = `sha256:${sha256(credentialHash)}`;
+
+    const proof = await this.prisma.$transaction(async (tx) => {
+      await this.assertEmployerStillTrusted(tx, sourceId, user.id, resolution);
+
+      // Re-read every counted payment (and its attestation) under a shared
+      // lock, drop any that stopped qualifying, and re-evaluate: the proof is
+      // only committed if the rule still holds on the locked rows.
+      const included = evaluation.includedPayments;
+      const lockedPayments = await tx.$queryRaw<
+        Array<{
+          id: string;
+          classification: PaymentClassification;
+          isEligible: boolean;
+        }>
+      >`
+        SELECT "id", "classification", "isEligible"
+        FROM "Payment"
+        WHERE "id" IN (${Prisma.join(included.map((payment) => payment.id))})
+          AND "userId" = ${user.id}
+        FOR SHARE
+      `;
+      const qualifyingPaymentIds = new Set(
+        lockedPayments
+          .filter(
+            (row) =>
+              row.classification === PaymentClassification.INCOME &&
+              row.isEligible,
+          )
+          .map((row) => row.id),
+      );
+
+      let validAttestationIds: Set<string> | null = null;
+      if (!resolution.isIssuerAccount) {
+        const lockedAttestations = await tx.$queryRaw<AttestationLockRow[]>`
+          SELECT "id", "status", "revokedAt", "expiresAt"
+          FROM "Attestation"
+          WHERE "id" IN (${Prisma.join(
+            included.map((payment) => attestationFor(payment) as string),
+          )})
+          FOR SHARE
+        `;
+        validAttestationIds = new Set(
+          lockedAttestations
+            .filter(
+              (row) =>
+                row.status === ResourceStatus.ACTIVE &&
+                row.revokedAt === null &&
+                (row.expiresAt === null || row.expiresAt > now),
+            )
+            .map((row) => row.id as string),
+        );
+      }
+
+      const stillQualifying = included.filter(
+        (payment) =>
+          qualifyingPaymentIds.has(payment.id) &&
+          (validAttestationIds === null ||
+            validAttestationIds.has(attestationFor(payment) as string)),
+      );
+      const locked = evaluateContinuity(stillQualifying, window);
+      if (!locked.continuous) {
+        throw this.continuityNotSatisfied();
+      }
+
+      const created = await tx.proof.create({
+        data: {
+          id: proofId,
+          userId: user.id,
+          proofType: ProofType.EMPLOYMENT_CONTINUITY,
+          schemaVersion: EMPLOYMENT_CONTINUITY_SCHEMA_VERSION,
+          status: ProofStatus.ACTIVE,
+          network: this.stellarNetwork,
+          assetCode: input.assetCode,
+          assetIssuer,
+          periodStart: window.start,
+          periodEnd: window.end,
+          expiresAt,
+          createdAt: now,
+          credentialHash,
+          commitment,
+          claim: {
+            create: {
+              operator: "employment_continuity",
+              frequency: CONTINUITY_PERIOD_UNIT,
+              result: true,
+              disclosurePolicy: {
+                policyVersion: EMPLOYMENT_CONTINUITY_POLICY_VERSION,
+                employerIssuerId: resolution.issuerId,
+                periodUnit: CONTINUITY_PERIOD_UNIT,
+                observedPeriods: window.periods,
+                toleratedMissingPeriods: MAX_MISSING_CONTINUITY_PERIODS,
+                // Keyed digest of the counted operation ids, for audit only.
+                includedPaymentsDigest: this.keyedDigest(
+                  locked.includedPayments
+                    .map((payment) => payment.operationId)
+                    .join("\n"),
+                ),
+                amountHidden: true,
+                senderHidden: true,
+                memoHidden: true,
+                sourceTransactionsHidden: true,
+                paymentDatesHidden: true,
               },
             },
           },
@@ -1161,7 +1369,12 @@ export class ProofsService {
     const policy = this.jsonPolicy(proof.claim.disclosurePolicy);
     const cadence = this.revealCadence(proof.claim.frequency);
     const credential: EarnProofCredential =
-      proof.proofType === ProofType.EMPLOYER_PAYMENT
+      proof.proofType === ProofType.EMPLOYMENT_CONTINUITY
+        ? this.rebuildEmploymentContinuityCredential({
+            ...proof,
+            claim: proof.claim,
+          })
+        : proof.proofType === ProofType.EMPLOYER_PAYMENT
         ? this.rebuildEmployerPaymentCredential({
             ...proof,
             claim: proof.claim,
@@ -1457,6 +1670,98 @@ export class ProofsService {
     };
   }
 
+  private buildEmploymentContinuityCredential(input: {
+    id: string;
+    walletHash: string;
+    employerIssuerId: string;
+    assetCode: string;
+    assetIssuer: string | null;
+    periodStart: Date;
+    periodEnd: Date;
+    periodUnit: string;
+    observedPeriods: number;
+    toleratedMissingPeriods: number;
+    policyVersion: string;
+    issuedAt: Date;
+    expiresAt: Date;
+  }): EmploymentContinuityCredential {
+    return {
+      id: input.id,
+      type: "EarnProofEmploymentContinuityCredential",
+      schemaVersion: EMPLOYMENT_CONTINUITY_SCHEMA_VERSION,
+      issuer: "earnproof-backend",
+      subject: { walletHash: input.walletHash },
+      claim: {
+        employerIssuerId: input.employerIssuerId,
+        assetCode: input.assetCode,
+        assetIssuer: input.assetIssuer,
+        periodStart: input.periodStart.toISOString(),
+        periodEnd: input.periodEnd.toISOString(),
+        periodUnit: input.periodUnit,
+        observedPeriods: input.observedPeriods,
+        toleratedMissingPeriods: input.toleratedMissingPeriods,
+        continuous: true,
+        policyVersion: input.policyVersion,
+      },
+      privacy: {
+        amountHidden: true,
+        senderHidden: true,
+        memoHidden: true,
+        sourceTransactionsHidden: true,
+        paymentDatesHidden: true,
+      },
+      issuedAt: input.issuedAt.toISOString(),
+      expiresAt: input.expiresAt.toISOString(),
+    };
+  }
+
+  /**
+   * Rebuilds a continuity credential purely from what was stored at issuance,
+   * including the policy parameters. The current policy constants are never
+   * consulted, so a later policy version cannot change what an issued proof
+   * asserts; a tampered stored claim fails the canonical hash check.
+   */
+  private rebuildEmploymentContinuityCredential(proof: {
+    id: string;
+    assetCode: string;
+    assetIssuer: string | null;
+    createdAt: Date;
+    expiresAt: Date;
+    periodStart: Date | null;
+    periodEnd: Date | null;
+    user: { walletHash: string };
+    claim: { disclosurePolicy: Prisma.JsonValue };
+  }) {
+    const policy = this.jsonPolicy(proof.claim.disclosurePolicy);
+    const text = (key: string) =>
+      typeof policy[key] === "string" ? (policy[key] as string) : "";
+    const count = (key: string) =>
+      typeof policy[key] === "number" ? (policy[key] as number) : -1;
+    return this.buildEmploymentContinuityCredential({
+      id: proof.id,
+      walletHash: proof.user.walletHash,
+      employerIssuerId: text("employerIssuerId"),
+      assetCode: proof.assetCode,
+      assetIssuer: proof.assetIssuer,
+      periodStart: proof.periodStart ?? proof.createdAt,
+      periodEnd: proof.periodEnd ?? proof.createdAt,
+      periodUnit: text("periodUnit"),
+      observedPeriods: count("observedPeriods"),
+      toleratedMissingPeriods: count("toleratedMissingPeriods"),
+      policyVersion: text("policyVersion"),
+      issuedAt: proof.createdAt,
+      expiresAt: proof.expiresAt,
+    });
+  }
+
+  private continuityNotSatisfied() {
+    return new UnprocessableEntityException({
+      code: ApiErrorCode.CONTINUITY_NOT_SATISFIED,
+      message:
+        "Corroborated payments from this employer source do not satisfy the continuity policy for the requested window",
+    });
+  }
+
   private buildEmployerPaymentCredential(input: {
     id: string;
     walletHash: string;
@@ -1539,6 +1844,128 @@ export class ProofsService {
       issuedAt: proof.createdAt,
       expiresAt: proof.expiresAt,
     });
+  }
+
+  /**
+   * Loads one of the caller's trusted sources and resolves the employer
+   * identity behind it. Unknown and non-owned sources are indistinguishable.
+   */
+  private async resolveTrustedEmployer(userId: string, trustedSourceId: string) {
+    const source = await this.prisma.trustedSource.findFirst({
+      where: { id: trustedSourceId, userId },
+      select: {
+        id: true,
+        sourceAddress: true,
+        status: true,
+        issuerId: true,
+        issuer: {
+          select: {
+            id: true,
+            status: true,
+            stellarAddress: true,
+            organization: { select: { status: true } },
+          },
+        },
+      },
+    });
+    if (!source) {
+      throw new NotFoundException({
+        code: ApiErrorCode.NOT_FOUND,
+        message: "Trusted source not found",
+      });
+    }
+
+    const addressOwner = await this.prisma.issuer.findUnique({
+      where: { stellarAddress: source.sourceAddress },
+      select: { id: true },
+    });
+    const resolution = resolveEmployerSource(source, addressOwner?.id ?? null);
+    if (!resolution.ok) {
+      throw this.employerSourceError(resolution.reason);
+    }
+    return { sourceId: source.id, resolution };
+  }
+
+  /**
+   * Re-reads source, issuer and organization under FOR SHARE inside the
+   * issuing transaction. The shared lock blocks a concurrent status change
+   * until the transaction ends, and waits for one already in flight, so the
+   * check sees the latest committed trust state.
+   */
+  private async assertEmployerStillTrusted(
+    tx: Prisma.TransactionClient,
+    sourceId: string,
+    userId: string,
+    resolution: Extract<EmployerSourceResolution, { ok: true }>,
+  ) {
+    const [locked] = await tx.$queryRaw<EmployerSourceLockRow[]>`
+      SELECT
+        ts."status" AS "sourceStatus",
+        ts."sourceAddress" AS "sourceAddress",
+        ts."issuerId" AS "issuerId",
+        i."status" AS "issuerStatus",
+        o."status" AS "organizationStatus"
+      FROM "TrustedSource" ts
+      JOIN "Issuer" i ON i."id" = ts."issuerId"
+      JOIN "Organization" o ON o."id" = i."organizationId"
+      WHERE ts."id" = ${sourceId} AND ts."userId" = ${userId}
+      FOR SHARE OF ts, i, o
+    `;
+    if (
+      !locked ||
+      locked.sourceStatus !== ResourceStatus.ACTIVE ||
+      locked.issuerStatus !== ResourceStatus.ACTIVE ||
+      locked.organizationStatus !== ResourceStatus.ACTIVE ||
+      locked.issuerId !== resolution.issuerId ||
+      locked.sourceAddress !== resolution.sourceAddress
+    ) {
+      throw this.employerSourceError("source_inactive");
+    }
+  }
+
+  /**
+   * Active PAYMENT attestations from `issuerId` for the subject, keyed by the
+   * payment reference hash they cover. When several cover the same payment
+   * the lowest id wins, so the mapping is deterministic.
+   */
+  private async findPaymentAttestations(
+    issuerId: string,
+    subjectWalletHash: string,
+    payments: ReadonlyArray<{ operationId: string }>,
+    now: Date,
+  ) {
+    const attestationByReference = new Map<string, string>();
+    if (payments.length === 0) return attestationByReference;
+
+    const attestations = await this.prisma.attestation.findMany({
+      where: {
+        issuerId,
+        subjectWalletHash,
+        type: AttestationType.PAYMENT,
+        status: ResourceStatus.ACTIVE,
+        revokedAt: null,
+        paymentReferenceHash: {
+          in: payments.map((payment) =>
+            this.paymentReferenceHash(payment.operationId),
+          ),
+        },
+        OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+      },
+      select: { id: true, paymentReferenceHash: true },
+      orderBy: { id: "asc" },
+    });
+    for (const attestation of attestations) {
+      if (
+        attestation.paymentReferenceHash &&
+        !attestationByReference.has(attestation.paymentReferenceHash)
+      ) {
+        attestationByReference.set(
+          attestation.paymentReferenceHash,
+          attestation.id,
+        );
+      }
+    }
+    return attestationByReference;
   }
 
   private employerSourceError(

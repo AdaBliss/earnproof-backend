@@ -45,6 +45,10 @@ export enum ApiErrorCode {
   EMPLOYER_SOURCE_AMBIGUOUS = "EMPLOYER_SOURCE_AMBIGUOUS",
   EMPLOYER_PAYMENT_NOT_FOUND = "EMPLOYER_PAYMENT_NOT_FOUND",
 
+  // 422 - employment-continuity rule is not met or cannot be evaluated
+  CONTINUITY_NOT_SATISFIED = "CONTINUITY_NOT_SATISFIED",
+  CONTINUITY_LIMIT_EXCEEDED = "CONTINUITY_LIMIT_EXCEEDED",
+
   // 409 – request conflicts with current state
   CONFLICT = "CONFLICT",
 

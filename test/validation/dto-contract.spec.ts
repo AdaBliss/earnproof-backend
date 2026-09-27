@@ -1,6 +1,7 @@
 import { CreateChallengeDto } from "../../src/auth/dto/create-challenge.dto";
 import { VerifyChallengeDto } from "../../src/auth/dto/verify-challenge.dto";
 import { CreateEmployerPaymentProofDto } from "../../src/proofs/dto/create-employer-payment-proof.dto";
+import { CreateEmploymentContinuityProofDto } from "../../src/proofs/dto/create-employment-continuity-proof.dto";
 import { CreatePaymentReceiptProofDto } from "../../src/proofs/dto/create-payment-receipt-proof.dto";
 import { CreateMinimumIncomeProofDto } from "../../src/proofs/dto/create-minimum-income-proof.dto";
 import {
@@ -321,6 +322,68 @@ describe("CreateEmployerPaymentProofDto validation contract", () => {
     const violations = await validateDto(CreateEmployerPaymentProofDto, {
       ...valid,
       ...COMMON_UNKNOWN_FIELD,
+    });
+    expect(violations.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CreateEmploymentContinuityProofDto
+// ---------------------------------------------------------------------------
+
+describe("CreateEmploymentContinuityProofDto validation contract", () => {
+  const valid = {
+    trustedSourceId: "ts_123",
+    assetCode: "USDC",
+    periodStart: "2026-01-01T00:00:00.000Z",
+    observedPeriods: 6,
+  };
+
+  it("accepts the minimal valid request (all optionals omitted)", async () => {
+    expect(await isValidDto(CreateEmploymentContinuityProofDto, valid)).toBe(
+      true,
+    );
+  });
+
+  it("accepts observedPeriods at both boundaries", async () => {
+    for (const observedPeriods of [3, 24]) {
+      expect(
+        await isValidDto(CreateEmploymentContinuityProofDto, {
+          ...valid,
+          observedPeriods,
+          assetIssuer: VALID_WALLET,
+          expiresInDays: 365,
+        }),
+      ).toBe(true);
+    }
+  });
+
+  it.each([
+    ["missing trustedSourceId", { ...valid, trustedSourceId: undefined }],
+    ["empty trustedSourceId", { ...valid, trustedSourceId: "" }],
+    ["missing assetCode", { ...valid, assetCode: undefined }],
+    ["non-date periodStart", { ...valid, periodStart: "January" }],
+    ["observedPeriods below minimum (2)", { ...valid, observedPeriods: 2 }],
+    ["observedPeriods above maximum (25)", { ...valid, observedPeriods: 25 }],
+    ["non-integer observedPeriods", { ...valid, observedPeriods: 3.5 }],
+    ["string observedPeriods", { ...valid, observedPeriods: "6" }],
+    ["expiresInDays above maximum (366)", { ...valid, expiresInDays: 366 }],
+  ])("rejects a request with %s", async (_label, plain) => {
+    const violations = await validateDto(
+      CreateEmploymentContinuityProofDto,
+      plain,
+    );
+    expect(violations.length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ["selectedPaymentIds", { selectedPaymentIds: ["pay_1"] }],
+    ["toleratedMissingPeriods", { toleratedMissingPeriods: 5 }],
+    ["policyVersion", { policyVersion: "v0" }],
+  ])("rejects a caller-chosen %s (policy is server-side)", async (_label, extra) => {
+    const violations = await validateDto(CreateEmploymentContinuityProofDto, {
+      ...valid,
+      ...extra,
     });
     expect(violations.length).toBeGreaterThan(0);
   });

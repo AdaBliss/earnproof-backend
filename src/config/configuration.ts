@@ -30,6 +30,23 @@ export const configuration = () => ({
     networkPassphrase:
       process.env.STELLAR_NETWORK_PASSPHRASE ??
       "Test SDF Network ; September 2015",
+    // Per-network circuit breaker around Horizon transport calls. Defaults are
+    // conservative: five consecutive transient failures open the circuit for
+    // 30s, then a single probe must succeed twice to close it.
+    circuitBreaker: {
+      failureThreshold: Number(
+        process.env.HORIZON_CIRCUIT_FAILURE_THRESHOLD ?? 5,
+      ),
+      openDurationMs: Number(
+        process.env.HORIZON_CIRCUIT_OPEN_DURATION_MS ?? 30_000,
+      ),
+      halfOpenMaxProbes: Number(
+        process.env.HORIZON_CIRCUIT_HALF_OPEN_MAX_PROBES ?? 1,
+      ),
+      successThreshold: Number(
+        process.env.HORIZON_CIRCUIT_SUCCESS_THRESHOLD ?? 2,
+      ),
+    },
   },
   sessionSecret: process.env.SESSION_SECRET,
   credentialSigningSecret: process.env.CREDENTIAL_SIGNING_SECRET,
@@ -82,6 +99,24 @@ export const configuration = () => ({
     proofRegistryContractId: process.env.PROOF_REGISTRY_CONTRACT_ID,
     issuerAddress: process.env.EARNPROOF_ISSUER_ADDRESS,
     schemaVersion: Number(process.env.EARNPROOF_SCHEMA_VERSION ?? 1),
+    // Per-network, per-operation circuit breaker around contract invocation.
+    // Slightly more tolerant than Horizon's: a contract call is heavier and its
+    // transient failures noisier, so the circuit waits for more of them and
+    // cools off longer before probing.
+    circuitBreaker: {
+      failureThreshold: Number(
+        process.env.CONTRACT_CIRCUIT_FAILURE_THRESHOLD ?? 5,
+      ),
+      openDurationMs: Number(
+        process.env.CONTRACT_CIRCUIT_OPEN_DURATION_MS ?? 60_000,
+      ),
+      halfOpenMaxProbes: Number(
+        process.env.CONTRACT_CIRCUIT_HALF_OPEN_MAX_PROBES ?? 1,
+      ),
+      successThreshold: Number(
+        process.env.CONTRACT_CIRCUIT_SUCCESS_THRESHOLD ?? 2,
+      ),
+    },
   },
   health: {
     // Probe timeout. Must stay below the orchestrator's own probe timeout, or a
@@ -98,6 +133,21 @@ export const configuration = () => ({
     stellarCliPath: process.env.STELLAR_CLI_PATH ?? "stellar",
     source: process.env.STELLAR_CLI_SOURCE,
     contractId: process.env.ISSUER_REGISTRY_CONTRACT_ID,
+  },
+  organizations: {
+    export: {
+      // AES-256 key (hex or base64) for encrypting export archives at rest.
+      // Absent means the export worker stays idle rather than writing plaintext.
+      encryptionKey: process.env.ORGANIZATION_EXPORT_ENCRYPTION_KEY,
+      // Where encrypted archives are staged; defaults under the OS temp dir.
+      tempDir: process.env.ORGANIZATION_EXPORT_TEMP_DIR,
+      // How long a job (and its artifact) lives before the expiry sweep removes it.
+      jobTtlHours: Number(process.env.ORGANIZATION_EXPORT_JOB_TTL_HOURS ?? 24),
+      // How long a single-use download handoff token is valid.
+      downloadTtlMinutes: Number(
+        process.env.ORGANIZATION_EXPORT_DOWNLOAD_TTL_MINUTES ?? 10,
+      ),
+    },
   },
   retention: {
     walletChallengeDays: Number(

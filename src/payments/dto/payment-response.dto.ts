@@ -72,6 +72,12 @@ export class PaymentResponseDto {
   classification!: PaymentClassification;
 
   @ApiProperty({
+    description: "Classification revision number for tracking changes.",
+    example: 1,
+  })
+  classificationRevision!: number;
+
+  @ApiProperty({
     description:
       "Whether this payment's asset is on the supported-asset list and therefore eligible to be used in proofs.",
     example: true,

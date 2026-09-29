@@ -419,6 +419,14 @@ Assign only the scopes your integration actually needs. If your service only ver
 
 ---
 
+| Scope | Grants |
+|---|---|
+| `ORG_READ` | Read organization context. Required by `GET /api/v1/integrations/auth-context`. |
+| `ORG_ADMIN` | Organization administration and operational visibility. Required by `GET /api/v1/health/diagnostics` and `GET /api/v1/jobs/executions`. |
+| `PROOF_READ` | Read proofs belonging to the organization. |
+| `PROOF_VERIFY` | Verify proofs and credentials on the organization's behalf. |
+| `PAYMENT_READ` | Read indexed payments. |
+| `PAYMENT_WRITE` | Create or reclassify payments. |
 ## Rate Limiting
 
 ### How Rate Limits Work

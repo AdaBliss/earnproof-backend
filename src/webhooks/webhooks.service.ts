@@ -8,9 +8,11 @@ import { ResourceStatus } from "@prisma/client";
 import { randomBytes } from "crypto";
 import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
 import { PrismaService } from "../database/prisma.service";
+import { ConflictException } from "../common/exceptions/domain.exceptions";
 import { CreateWebhookDto } from "./dto/create-webhook.dto";
 import { UpdateWebhookEventsDto } from "./dto/update-webhook-events.dto";
 import { WebhookDeliveryService } from "./webhook-delivery.service";
+import { WebhookCircuitBreakerService } from "./webhook-circuit-breaker.service";
 
 /** Signing secret length in bytes (produces a 64-char hex string). */
 const SECRET_BYTES = 32;
@@ -22,6 +24,7 @@ export class WebhooksService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly deliveryService: WebhookDeliveryService,
+    private readonly circuitBreaker: WebhookCircuitBreakerService,
     configService: ConfigService,
   ) {
     this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
@@ -49,15 +52,20 @@ export class WebhooksService {
         secretEncrypted,
         events,
         status: ResourceStatus.ACTIVE,
+        revision: 0,
       },
       select: {
         id: true,
         url: true,
         events: true,
         status: true,
+        revision: true,
         createdAt: true,
       },
     });
+
+    // Initialize circuit breaker for new webhook
+    await this.circuitBreaker.initializeCircuit(webhook.id);
 
     return {
       ...webhook,
@@ -76,6 +84,7 @@ export class WebhooksService {
         url: true,
         events: true,
         status: true,
+        revision: true,
         createdAt: true,
         updatedAt: true,
       },
@@ -92,6 +101,7 @@ export class WebhooksService {
         url: true,
         events: true,
         status: true,
+        revision: true,
         createdAt: true,
         updatedAt: true,
       },
@@ -109,14 +119,17 @@ export class WebhooksService {
    * attempt, since they re-decrypt at execution time).
    */
   async rotateSecret(organizationId: string, webhookId: string) {
-    await this.assertOwnedWebhook(organizationId, webhookId);
+    const webhook = await this.assertOwnedWebhook(organizationId, webhookId);
 
     const newRawSecret = randomBytes(SECRET_BYTES).toString("hex");
     const newSecretEncrypted = this.paymentEncryptionKeyring.encrypt(newRawSecret);
 
     await this.prisma.webhook.update({
       where: { id: webhookId },
-      data: { secretEncrypted: newSecretEncrypted },
+      data: {
+        secretEncrypted: newSecretEncrypted,
+        revision: webhook.revision + 1,
+      },
     });
 
     return {
@@ -133,46 +146,77 @@ export class WebhooksService {
     webhookId: string,
     dto: UpdateWebhookEventsDto,
   ) {
-    await this.assertOwnedWebhook(organizationId, webhookId);
+    const webhook = await this.assertOwnedWebhook(organizationId, webhookId);
     const events = [...new Set(dto.events)];
 
-    return this.prisma.webhook.update({
+    // Attempt optimistic update with revision check
+    const updated = await this.prisma.webhook.updateMany({
+      where: {
+        id: webhookId,
+        revision: dto.expectedRevision,
+      },
+      data: {
+        events,
+        revision: dto.expectedRevision + 1,
+      },
+    });
+
+    // If no records were updated, the revision didn't match
+    if (updated.count === 0) {
+      throw new ConflictException(
+        "Webhook has been modified by another request. Please refresh and retry.",
+        webhook.revision,
+      );
+    }
+
+    return this.prisma.webhook.findUnique({
       where: { id: webhookId },
-      data: { events },
-      select: { id: true, url: true, events: true, status: true, updatedAt: true },
+      select: { id: true, url: true, events: true, status: true, revision: true, updatedAt: true },
     });
   }
 
   /** Disable (suspend) a webhook endpoint without deleting it. */
   async disable(organizationId: string, webhookId: string) {
-    await this.assertOwnedWebhook(organizationId, webhookId);
+    const webhook = await this.assertOwnedWebhook(organizationId, webhookId);
 
     return this.prisma.webhook.update({
       where: { id: webhookId },
-      data: { status: ResourceStatus.SUSPENDED },
-      select: { id: true, status: true, updatedAt: true },
+      data: {
+        status: ResourceStatus.SUSPENDED,
+        revision: webhook.revision + 1,
+      },
+      select: { id: true, status: true, revision: true, updatedAt: true },
     });
   }
 
   /** Re-enable a previously disabled webhook endpoint. */
   async enable(organizationId: string, webhookId: string) {
-    await this.assertOwnedWebhook(organizationId, webhookId);
+    const webhook = await this.assertOwnedWebhook(organizationId, webhookId);
 
     return this.prisma.webhook.update({
       where: { id: webhookId },
-      data: { status: ResourceStatus.ACTIVE },
-      select: { id: true, status: true, updatedAt: true },
+      data: {
+        status: ResourceStatus.ACTIVE,
+        revision: webhook.revision + 1,
+      },
+      select: { id: true, status: true, revision: true, updatedAt: true },
     });
   }
 
   /** Soft-delete (mark DELETED) a webhook endpoint. */
   async delete(organizationId: string, webhookId: string) {
-    await this.assertOwnedWebhook(organizationId, webhookId);
+    const webhook = await this.assertOwnedWebhook(organizationId, webhookId);
 
     await this.prisma.webhook.update({
       where: { id: webhookId },
-      data: { status: ResourceStatus.DELETED },
+      data: {
+        status: ResourceStatus.DELETED,
+        revision: webhook.revision + 1,
+      },
     });
+
+    // Clean up circuit breaker state
+    await this.circuitBreaker.deleteCircuitState(webhookId);
 
     return { deleted: true, webhookId };
   }
@@ -272,7 +316,7 @@ export class WebhooksService {
   private async assertOwnedWebhook(organizationId: string, webhookId: string) {
     const webhook = await this.prisma.webhook.findUnique({
       where: { id: webhookId },
-      select: { id: true, organizationId: true, status: true },
+      select: { id: true, organizationId: true, status: true, revision: true },
     });
     this.assertOwnership(webhook, organizationId, webhookId);
     return webhook!;

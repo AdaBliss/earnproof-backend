@@ -14,6 +14,7 @@ import { AuthAuditService } from "./auth-audit.service";
 import { AuthRateLimiterService } from "./auth-rate-limiter.service";
 import { SessionService } from "./session.service";
 import { canAuthenticate } from "./account-status.policy";
+import type { SessionDeviceHeaders } from "./session-device-metadata";
 import {
   normalizeOrigin,
   OriginValidationError,
@@ -111,6 +112,7 @@ export class AuthService {
     walletAddress: string;
     signature: string;
     clientMetadata?: string;
+  }, headers?: SessionDeviceHeaders) {
     requestOrigin?: string;
   }) {
     this.assertValidPublicKey(input.walletAddress);
@@ -302,7 +304,7 @@ export class AuthService {
       walletAddress: user.walletAddress,
       walletHash: user.walletHash,
       role: user.role,
-    });
+    }, undefined, headers);
 
     // Record successful verification
     await this.auditService.recordEvent(

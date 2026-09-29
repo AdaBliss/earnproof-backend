@@ -1,4 +1,4 @@
-import { ApiKeyScope, ResourceStatus } from "@prisma/client";
+﻿import { ApiKeyScope, ResourceStatus } from "@prisma/client";
 import { ApiKeyService } from "./api-key.service";
 
 describe("ApiKeyService", () => {
@@ -20,7 +20,10 @@ describe("ApiKeyService", () => {
 
   beforeEach(() => {
     prismaService = mockPrisma();
-    service = new ApiKeyService(prismaService);
+    service = new ApiKeyService(prismaService, {
+      freezeOnRevocation: jest.fn().mockResolvedValue(undefined),
+      recordUsage: jest.fn().mockResolvedValue(undefined),
+    } as never);
   });
 
   describe("generateSecret", () => {

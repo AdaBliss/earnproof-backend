@@ -161,6 +161,7 @@ describe("ProofsService", () => {
   });
 
   it("returns an unknown public verification state for missing proofs", async () => {
+    (mockVerificationEventService.recordEvent as jest.Mock).mockClear();
     const prisma = {
       proof: {
         findUnique: jest.fn().mockResolvedValue(null),
@@ -175,6 +176,7 @@ describe("ProofsService", () => {
       result: VerificationResult.UNKNOWN_PROOF,
       status: "unknown",
     });
+    expect(mockVerificationEventService.recordEvent).not.toHaveBeenCalled();
   });
 
   it("returns a revoked public verification state", async () => {
@@ -233,9 +235,6 @@ describe("ProofsService", () => {
 
     expect(result.result).toBe(VerificationResult.REVOKED);
     expect(result.status).toBe("revoked");
-    expect(prisma.verificationEvent.create).toHaveBeenCalledWith({
-      data: { proofId: "proof_1", result: VerificationResult.REVOKED },
-    });
   });
 
   it("revokes anchored proofs by enqueuing REVOKE intent in same transaction", async () => {

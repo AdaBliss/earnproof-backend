@@ -23,12 +23,17 @@ import { createHmac, randomUUID } from "crypto";
 import { VerificationEventService } from "../audit/verification-event.service";
 import { AuthenticatedUser } from "../auth/auth.types";
 import { canonicalize } from "../common/crypto/canonicalize";
+import { CredentialVerificationKeyService } from "../common/crypto/credential-verification-key.service";
 import { sha256 } from "../common/crypto/hash";
 import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
 import { ApiErrorCode } from "../common/dto/api-error.dto";
 import { PrismaService } from "../database/prisma.service";
 import { AttestationsService } from "../attestations/attestations.service";
 import { WebhookDeliveryService } from "../webhooks/webhook-delivery.service";
+import {
+  ProofVerificationAbuseService,
+  VerificationClientContext,
+} from "../common/rate-limit/proof-verification-abuse.service";
 import { ContractAnchoringService } from "./contract-anchoring.service";
 import { CreateMinimumIncomeProofDto } from "./dto/create-minimum-income-proof.dto";
 import { CreatePaymentReceiptProofDto } from "./dto/create-payment-receipt-proof.dto";
@@ -133,6 +138,9 @@ export class ProofsService {
     private readonly contractAnchoringService?: ContractAnchoringService,
     @Optional()
     private readonly webhookDeliveryService?: WebhookDeliveryService,
+    @Optional()
+    private readonly credentialVerificationKeyService?: CredentialVerificationKeyService,
+    private readonly verificationAbuseService?: ProofVerificationAbuseService,
   ) {
     this.signingSecret = configService.getOrThrow<string>(
       "credentialSigningSecret",
@@ -760,7 +768,11 @@ export class ProofsService {
     };
   }
 
-  async verifyProof(proofId: string) {
+  async verifyProof(
+    proofId: string,
+    clientContext?: VerificationClientContext,
+  ) {
+    this.verificationAbuseService?.checkClientCardinality(clientContext, proofId);
     const proof = await this.prisma.proof.findUnique({
       where: {
         id: proofId,
@@ -775,20 +787,15 @@ export class ProofsService {
       },
     });
 
-    if (!proof || !proof.claim) {
-      // Fail-open policy: record event asynchronously
-      // If event recording fails, the verification response is still returned.
-      // This ensures verification availability over audit completeness.
-      this.verificationEventService
-        .recordEvent(VerificationOutcome.UNKNOWN, proofId, {
-          outcome: "UNKNOWN",
-          timestamp: new Date(),
-        })
-        .catch(() => {
-          // Error already logged by the service
-          // Verification continues unblocked
-        });
+    this.verificationAbuseService?.checkVerification(
+      clientContext,
+      proofId,
+      Boolean(proof?.claim),
+    );
 
+    if (!proof || !proof.claim) {
+      // Unknown probes deliberately do not create audit rows: the identifier
+      // is untrusted and could otherwise create an unbounded data sink.
       return {
         result: VerificationResult.UNKNOWN_PROOF,
         status: "unknown",
@@ -849,6 +856,19 @@ export class ProofsService {
       result = VerificationResult.INVALID_SIGNATURE;
     }
 
+    const contractStatus = proof.contractTransactionHash
+      ? await this.contractAnchoringService?.getProofStatus(proof.id)
+      : undefined;
+
+    // Fail closed: authoritative on-chain invalidity overrides stale local state
+    if (contractStatus?.checked) {
+      if (contractStatus.revoked) {
+        result = VerificationResult.REVOKED;
+      } else if (result === VerificationResult.VALID && !contractStatus.valid) {
+        result = VerificationResult.INVALID_SIGNATURE;
+      }
+    }
+
     // If required anchoring is enabled and this proof has not yet been
     // confirmed on-chain, return UNVERIFIED_ISSUER to signal that the proof
     // is not yet verifiable via the contract. Optional anchoring (or no
@@ -861,18 +881,6 @@ export class ProofsService {
       result = VerificationResult.UNVERIFIED_ISSUER;
     }
 
-    const contractStatus = proof.contractTransactionHash
-      ? await this.contractAnchoringService?.getProofStatus(proof.id)
-      : undefined;
-
-    if (contractStatus?.checked) {
-      if (contractStatus.revoked) {
-        result = VerificationResult.REVOKED;
-      } else if (result === VerificationResult.VALID && !contractStatus.valid) {
-        result = VerificationResult.INVALID_SIGNATURE;
-      }
-    }
-
     // Convert VerificationResult to VerificationOutcome for event recording
     const outcome = this.mapResultToOutcome(result);
 
@@ -880,22 +888,27 @@ export class ProofsService {
     // If event recording fails, the verification response is still returned.
     // This ensures verification availability over audit completeness.
     // Event recording errors are caught and logged by the service.
-    this.verificationEventService
-      .recordEvent(outcome, proof.id, {
-        outcome: outcome,
-        timestamp: new Date(),
-      })
-      .catch(() => {
-        // Error already logged by the service
-        // Verification continues unblocked
-      });
+    const verificationEventService = this.verificationEventService as VerificationEventService & {
+      tryConsumePrivacyBudget?: (proofId: string) => boolean;
+    };
+    if (verificationEventService.tryConsumePrivacyBudget?.(proof.id) ?? true) {
+      this.verificationEventService
+        .recordEvent(outcome, proof.id, {
+          outcome: outcome,
+          timestamp: new Date(),
+        })
+        .catch(() => {
+          // Error already logged by the service
+          // Verification continues unblocked
+        });
 
-    await this.prisma.verificationEvent.create({
-      data: {
-        proofId: proof.id,
-        result,
-      },
-    });
+      await this.prisma.verificationEvent.create({
+        data: {
+          proofId: proof.id,
+          result,
+        },
+      });
+    }
 
     this.emitWebhook(proof.userId, "proof.verified", {
       proofId: proof.id,
@@ -920,6 +933,48 @@ export class ProofsService {
           reason: "disabled",
         },
       },
+    };
+  }
+
+  /**
+   * Verify a bounded batch of proof IDs, returning one ordered result per
+   * submitted ID.
+   *
+   * Each distinct ID runs through the exact single-proof {@link verifyProof}
+   * path — same public (unauthenticated) access, same privacy envelope, same
+   * event recording — so a batch reveals nothing a sequence of single calls
+   * would not. Duplicate IDs are coalesced: the proof is looked up once (one
+   * storage read, one anchoring check) and its verdict is returned at every
+   * position it occupies, so a caller cannot multiply the fan-out by repeating
+   * an ID. The four outcomes a relying party must distinguish — missing,
+   * revoked, expired, and dependency-unavailable — are preserved per item via
+   * `result` and `contractStatus`.
+   */
+  async verifyProofsBatch(proofIds: string[]) {
+    const distinct = [...new Set(proofIds)];
+    const byId = new Map<
+      string,
+      Awaited<ReturnType<ProofsService["verifyProof"]>>
+    >();
+    await Promise.all(
+      distinct.map(async (id) => {
+        byId.set(id, await this.verifyProof(id));
+      }),
+    );
+
+    return {
+      results: proofIds.map((id) => {
+        const verified = byId.get(id)!;
+        return {
+          id,
+          result: verified.result,
+          status: verified.status,
+          contractStatus: verified.proof?.contractStatus ?? {
+            checked: false,
+            reason: "unknown" as const,
+          },
+        };
+      }),
     };
   }
 
@@ -1186,6 +1241,13 @@ export class ProofsService {
   }
 
   private signCredential<T extends EarnProofCredential>(credential: T) {
+    if (this.credentialVerificationKeyService) {
+      return {
+        ...credential,
+        proof: this.credentialVerificationKeyService.signCredential(credential),
+      };
+    }
+
     const canonicalPayload = canonicalize(credential);
     return {
       ...credential,

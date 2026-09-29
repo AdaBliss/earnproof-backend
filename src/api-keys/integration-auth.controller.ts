@@ -10,6 +10,7 @@ import {
 } from "@nestjs/swagger";
 import { ApiKeyScope } from "@prisma/client";
 import { CurrentApiKey } from "../common/decorators/current-api-key.decorator";
+import { AuthenticatedRoute } from "../common/decorators/authorization-policy.decorator";
 import { RequireScopes } from "../common/decorators/require-scopes.decorator";
 import { ApiErrorDto } from "../common/dto/api-error.dto";
 import { ApiKeyGuard } from "../common/guards/api-key.guard";
@@ -29,6 +30,7 @@ import { IntegrationAuthContextDto } from "./dto/integration-auth-context.dto";
  * against a real resource and without a scope the caller may not hold.
  */
 @ApiTags("integrations")
+@AuthenticatedRoute()
 @ApiBearerAuth(API_KEY_AUTH_SCHEME)
 @ApiHeader(ORGANIZATION_ID_HEADER)
 @Controller("integrations")

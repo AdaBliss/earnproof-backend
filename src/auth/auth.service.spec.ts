@@ -471,6 +471,82 @@ describe("AuthService.verifyChallenge", () => {
       svc.verifyChallenge({ challengeId: "bad", walletAddress, signature: "sig" }),
     ).rejects.toThrow("Challenge is expired or unavailable");
   });
+
+  it("handles concurrent challenge consumption attempts - first wins, second fails", async () => {
+    // Regression test for challenge consumption edge case where multiple concurrent
+    // requests attempt to consume the same challenge. The atomic updateMany with
+    // usedAt: null guard ensures only one succeeds. This test verifies that:
+    // 1. The first call consumes the challenge successfully
+    // 2. The second concurrent call fails with challenge replay detection
+    // 3. Both audit events are recorded correctly
+
+    const prisma = makePrismaMock();
+    (prisma as Record<string, unknown>).authSession = {
+      create: jest.fn().mockResolvedValue({}),
+    };
+
+    // First verification: successful consumption
+    prisma.walletChallenge.updateMany.mockResolvedValueOnce({ count: 1 });
+    // Finds the challenge after atomic update
+    prisma.walletChallenge.findUnique.mockResolvedValueOnce(challenge);
+
+    const sessionSvc = new SessionService(prisma as never, config);
+    const auditSvc = makeAuditServiceMock();
+    const rateLimiter = makeRateLimiterMock();
+    const svc = new AuthService(
+      prisma as never,
+      sessionSvc,
+      auditSvc as never,
+      rateLimiter as never,
+      config,
+    );
+
+    const signature = keypair
+      .sign(sep53MessageHash(challenge.message))
+      .toString("base64");
+
+    // First verification succeeds
+    const result = await svc.verifyChallenge({
+      challengeId: challenge.id,
+      walletAddress,
+      signature,
+    });
+
+    expect(result.user.id).toBe("user_1");
+    expect(auditSvc.recordEvent).toHaveBeenCalledWith(
+      AuthEventType.CHALLENGE_VERIFIED,
+      walletAddress,
+      expect.objectContaining({ success: true }),
+    );
+
+    // Reset mocks for second attempt
+    auditSvc.recordEvent.mockClear();
+
+    // Second verification: consumption fails (challenge already used)
+    // The updateMany matches 0 rows because usedAt is no longer null
+    prisma.walletChallenge.updateMany.mockResolvedValueOnce({ count: 0 });
+    // The replay detection lookup finds the challenge with usedAt set
+    const usedChallenge = { ...challenge, usedAt: new Date() };
+    prisma.walletChallenge.findFirst.mockResolvedValueOnce(usedChallenge);
+
+    // Second verification should fail with replay detection
+    await expect(
+      svc.verifyChallenge({
+        challengeId: challenge.id,
+        walletAddress,
+        signature,
+      }),
+    ).rejects.toThrow("Challenge is expired or unavailable");
+
+    expect(auditSvc.recordEvent).toHaveBeenCalledWith(
+      AuthEventType.CHALLENGE_REPLAYED,
+      walletAddress,
+      expect.objectContaining({
+        success: false,
+        failureReason: "Challenge already used",
+      }),
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

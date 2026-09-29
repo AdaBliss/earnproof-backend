@@ -1,6 +1,5 @@
 import {
   BadRequestException,
-  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -10,6 +9,7 @@ import { createHash } from "crypto";
 import { AuthenticatedUser } from "../auth/auth.types";
 import { sha256 } from "../common/crypto/hash";
 import { PrismaService } from "../database/prisma.service";
+import { ConflictException } from "../common/exceptions/domain.exceptions";
 import { IssuerRegistryService } from "./issuer-registry.service";
 import { CreateIssuerDto } from "./dto/create-issuer.dto";
 import {
@@ -28,6 +28,9 @@ const VALID_TRANSITIONS: Record<ResourceStatus, ResourceStatus[]> = {
   [ResourceStatus.SUSPENDED]: [ResourceStatus.ACTIVE, ResourceStatus.REVOKED],
   [ResourceStatus.REVOKED]: [],
   [ResourceStatus.DELETED]: [],
+  // Issuers never take EXPIRED (it is an attestation-only effective status);
+  // listed here to keep the transition map total over ResourceStatus.
+  [ResourceStatus.EXPIRED]: [],
 };
 
 @Injectable()
@@ -69,7 +72,7 @@ export class IssuersService {
     });
 
     if (existing) {
-      throw new ConflictException(
+      throw new ForbiddenException(
         `Issuer with Stellar address "${input.stellarAddress}" already exists`,
       );
     }
@@ -103,6 +106,7 @@ export class IssuersService {
         organizationId: input.organizationId,
         stellarAddress: input.stellarAddress,
         status: ResourceStatus.PENDING,
+        revision: 0,
         publicMetadata,
         metadataHash: Object.keys(publicMetadata).length
           ? this.hashMetadata(publicMetadata)
@@ -133,15 +137,32 @@ export class IssuersService {
     const publicMetadata = this.allowlistedMetadata(input.publicMetadata);
     const metadataHash = this.hashMetadata(publicMetadata);
 
-    const updated = await this.prisma.issuer.update({
-      where: { id: issuerId },
+    // Attempt optimistic update with revision check
+    const updated = await this.prisma.issuer.updateMany({
+      where: {
+        id: issuerId,
+        revision: input.expectedRevision,
+      },
       data: {
         metadataHash,
         publicMetadata,
         contractSyncState: "PENDING",
         contractSyncError: null,
         revision: { increment: 1 },
+        revision: input.expectedRevision + 1,
       },
+    });
+
+    // If no records were updated, the revision didn't match
+    if (updated.count === 0) {
+      throw new ConflictException(
+        "Issuer has been modified by another request. Please refresh and retry.",
+        issuer.revision,
+      );
+    }
+
+    const result = await this.prisma.issuer.findUniqueOrThrow({
+      where: { id: issuerId },
     });
 
     // Log audit event
@@ -149,9 +170,10 @@ export class IssuersService {
       previousMetadataHash: issuer.metadataHash,
       newMetadataHash: metadataHash,
       publicMetadata,
+      revision: result.revision,
     });
 
-    return this.toResponseDto(updated);
+    return this.toResponseDto(result);
   }
 
   async updateIssuerStatus(
@@ -180,6 +202,7 @@ export class IssuersService {
       contractSyncState: "PENDING",
       contractSyncError: null,
       revision: { increment: 1 },
+      revision: input.expectedRevision + 1,
     };
 
     // Update timestamp fields based on transition
@@ -197,9 +220,25 @@ export class IssuersService {
       updateData.revokedAt = now;
     }
 
-    const updated = await this.prisma.issuer.update({
-      where: { id: issuerId },
+    // Attempt optimistic update with revision check
+    const updated = await this.prisma.issuer.updateMany({
+      where: {
+        id: issuerId,
+        revision: input.expectedRevision,
+      },
       data: updateData,
+    });
+
+    // If no records were updated, the revision didn't match
+    if (updated.count === 0) {
+      throw new ConflictException(
+        "Issuer has been modified by another request. Please refresh and retry.",
+        issuer.revision,
+      );
+    }
+
+    const result = await this.prisma.issuer.findUniqueOrThrow({
+      where: { id: issuerId },
     });
 
     // Log audit event
@@ -207,9 +246,10 @@ export class IssuersService {
       previousStatus: issuer.status,
       newStatus: input.status,
       timestamp: now.toISOString(),
+      revision: result.revision,
     });
 
-    return this.toResponseDto(updated);
+    return this.toResponseDto(result);
   }
 
   async getIssuer(issuerId: string): Promise<IssuerResponseDto> {
@@ -431,6 +471,7 @@ export class IssuersService {
       organizationId: issuer.organizationId,
       stellarAddress: issuer.stellarAddress,
       status: issuer.status,
+      revision: issuer.revision,
       metadataHash: issuer.metadataHash,
       publicMetadata: this.allowlistedMetadata(issuer.publicMetadata),
       contractSyncState: issuer.contractSyncState,

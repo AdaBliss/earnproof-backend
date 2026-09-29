@@ -1,4 +1,4 @@
-import { ApiProperty } from "@nestjs/swagger";
+import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { ResourceStatus } from "@prisma/client";
 
 export class OrganizationResponseDto {
@@ -20,6 +20,12 @@ export class OrganizationResponseDto {
   })
   status: ResourceStatus;
 
+  @ApiProperty({
+    description:
+      "Revision number for optimistic concurrency control. Incremented on each update.",
+  })
+  revision: number;
+
   @ApiProperty({ description: "ID of user who created the organization" })
   createdById: string;
 
@@ -33,7 +39,7 @@ export class OrganizationResponseDto {
   })
   updatedAt: Date;
 
-  @ApiProperty({
+  @ApiPropertyOptional({
     description: "Number of issuers in this organization",
     type: Number,
   })

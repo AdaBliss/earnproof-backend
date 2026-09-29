@@ -15,6 +15,12 @@ import {
 } from "./horizon-client";
 import { HorizonTransactionRecord, NormalizedPayment } from "./stellar.types";
 import { HorizonException } from "../common/exceptions/domain.exceptions";
+import { FetchHorizonTransport } from "./horizon-transport";
+import { CircuitHorizonTransport } from "./horizon-circuit-transport";
+import { CircuitBreakerRegistry } from "../common/resilience/circuit-breaker.registry";
+
+/** Prefix for the per-network Horizon circuit name, kept stable for diagnostics. */
+export const HORIZON_CIRCUIT_PREFIX = "horizon";
 
 @Injectable()
 export class StellarService {
@@ -28,12 +34,56 @@ export class StellarService {
      * sleep. Production builds its own client from configuration.
      */
     @Optional() horizonClient?: HorizonClient,
+    /**
+     * Optional so the test constructor (which injects a ready-made client)
+     * need not provide it. Production resolves the shared registry, so the
+     * Horizon circuit is the same instance the health diagnostics reads.
+     */
+    @Optional() registry?: CircuitBreakerRegistry,
   ) {
     this.horizonUrl = configService
       .getOrThrow<string>("stellar.horizonUrl")
       .replace(/\/$/, "");
 
-    this.horizon = horizonClient ?? new HorizonClient({ horizonUrl: this.horizonUrl });
+    if (horizonClient) {
+      this.horizon = horizonClient;
+      return;
+    }
+
+    // One circuit per network: testnet being down says nothing about mainnet,
+    // and a shared circuit would let one network's outage refuse the other's
+    // traffic. The transport wrapper is skipped when no registry is available
+    // (only in tests that inject their own client), so the client still works
+    // without resilience wiring.
+    const baseTransport = new FetchHorizonTransport();
+    const network = registry
+      ? configService.get<string>("stellar.network") ?? "testnet"
+      : "testnet";
+    const transport = registry
+      ? new CircuitHorizonTransport(
+          baseTransport,
+          registry.getOrCreate({
+            name: `${HORIZON_CIRCUIT_PREFIX}:${network}`,
+            failureThreshold: configService.get<number>(
+              "stellar.circuitBreaker.failureThreshold",
+            ),
+            openDurationMs: configService.get<number>(
+              "stellar.circuitBreaker.openDurationMs",
+            ),
+            halfOpenMaxProbes: configService.get<number>(
+              "stellar.circuitBreaker.halfOpenMaxProbes",
+            ),
+            successThreshold: configService.get<number>(
+              "stellar.circuitBreaker.successThreshold",
+            ),
+          }),
+        )
+      : baseTransport;
+
+    this.horizon = new HorizonClient({
+      horizonUrl: this.horizonUrl,
+      transport,
+    });
   }
 
   /**

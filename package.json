@@ -32,6 +32,7 @@
     "prisma:studio": "prisma studio",
     "seed:demo": "ts-node prisma/seed-demo.ts",
     "db:reset": "ts-node prisma/reset.ts",
+    "backfill:payment-identity": "ts-node scripts/backfill-payment-identity.ts",
     "drill:verify": "ts-node scripts/backup/verify-backup-format.ts",
     "webhook:conformance": "ts-node scripts/webhook-receiver/conformance.ts",
     "credential:conformance": "ts-node scripts/credential-verifier/conformance.ts",

@@ -7,6 +7,7 @@ import {
   HealthService,
 } from "./health.service";
 import { DependencyResult, DependencyStatus } from "./health.types";
+import { CircuitBreakerRegistry } from "../common/resilience/circuit-breaker.registry";
 
 interface ConfigOverrides {
   [key: string]: unknown;
@@ -432,6 +433,55 @@ describe("HealthService", () => {
         service.beginShutdown();
         service.beginShutdown();
       }).not.toThrow();
+    });
+  });
+
+  describe("circuit breaker diagnostics", () => {
+    it("reports NOT_CONFIGURED when no registry is wired", async () => {
+      const service = new HealthService(buildPrisma(), buildConfig());
+      const result = await service.checkDiagnostics();
+      const circuits = findDependency(result, "circuit_breakers");
+      expect(circuits.status).toBe(DependencyStatus.NOT_CONFIGURED);
+      expect(circuits.reason).toBe("registry_absent");
+    });
+
+    it("reports OK with per-circuit detail when every circuit is closed", async () => {
+      const registry = new CircuitBreakerRegistry();
+      registry.getOrCreate({ name: "horizon:testnet" });
+      const service = new HealthService(buildPrisma(), buildConfig(), registry);
+
+      const result = await service.checkDiagnostics();
+      const circuits = findDependency(result, "circuit_breakers");
+
+      expect(circuits.status).toBe(DependencyStatus.OK);
+      expect(circuits.circuits).toEqual([
+        expect.objectContaining({ name: "horizon:testnet", state: "closed" }),
+      ]);
+    });
+
+    it("reports DEGRADED and names the tripped circuits, never a payload", async () => {
+      const registry = new CircuitBreakerRegistry();
+      const breaker = registry.getOrCreate({
+        name: "horizon:testnet",
+        failureThreshold: 1,
+        openDurationMs: 60_000,
+      });
+      await breaker
+        .execute(() => Promise.reject(new Error("down")), () => "trip")
+        .catch(() => undefined);
+
+      const service = new HealthService(buildPrisma(), buildConfig(), registry);
+      const result = await service.checkDiagnostics();
+      const circuits = findDependency(result, "circuit_breakers");
+
+      expect(circuits.status).toBe(DependencyStatus.DEGRADED);
+      expect(circuits.reason).toBe("tripped:horizon:testnet");
+      // Detail is counts and states only.
+      expect(circuits.circuits?.[0]).toMatchObject({
+        name: "horizon:testnet",
+        state: "open",
+        openCount: 1,
+      });
     });
   });
 });

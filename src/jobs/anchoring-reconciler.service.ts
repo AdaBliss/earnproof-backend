@@ -1,4 +1,4 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, Logger, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Interval } from "@nestjs/schedule";
 import {
@@ -9,6 +9,12 @@ import {
 import { StructuredLogger } from "../common/logger";
 import { PrismaService } from "../database/prisma.service";
 import { ContractAnchoringService } from "../proofs/contract-anchoring.service";
+import { JobExecutionService } from "./execution/job-execution.service";
+import { workerIdentity } from "./execution/worker-identity";
+
+/** Job identity recorded in the execution history for this synchronization job. */
+const RECONCILER_JOB_NAME = "anchoring-reconciler";
+const RECONCILER_JOB_VERSION = "1";
 
 /**
  * Maximum number of proofs to reconcile per cycle to bound execution time.
@@ -45,6 +51,12 @@ export class AnchoringReconcilerService {
     private readonly prisma: PrismaService,
     private readonly anchoring: ContractAnchoringService,
     private readonly config: ConfigService,
+    /**
+     * Optional so the existing unit tests that construct the reconciler with
+     * three arguments keep working. When present, each reconcile cycle is
+     * recorded in the durable execution history (issue #201).
+     */
+    @Optional() private readonly executions?: JobExecutionService,
   ) {}
 
   @Interval(5 * 60_000)
@@ -53,6 +65,25 @@ export class AnchoringReconcilerService {
       return;
     }
 
+    // Record the run so a missed or overlapping synchronization cycle is
+    // diagnosable after the fact. The work is unchanged when no execution
+    // service is wired.
+    if (this.executions) {
+      await this.executions.track(
+        {
+          jobName: RECONCILER_JOB_NAME,
+          jobVersion: RECONCILER_JOB_VERSION,
+          leaseOwner: workerIdentity(),
+        },
+        () => this.runReconcile(),
+      );
+      return;
+    }
+
+    await this.runReconcile();
+  }
+
+  private async runReconcile(): Promise<void> {
     const proofs = await this.prisma.proof.findMany({
       where: {
         contractTransactionHash: { not: null },

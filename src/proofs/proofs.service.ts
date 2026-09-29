@@ -856,6 +856,19 @@ export class ProofsService {
       result = VerificationResult.INVALID_SIGNATURE;
     }
 
+    const contractStatus = proof.contractTransactionHash
+      ? await this.contractAnchoringService?.getProofStatus(proof.id)
+      : undefined;
+
+    // Fail closed: authoritative on-chain invalidity overrides stale local state
+    if (contractStatus?.checked) {
+      if (contractStatus.revoked) {
+        result = VerificationResult.REVOKED;
+      } else if (result === VerificationResult.VALID && !contractStatus.valid) {
+        result = VerificationResult.INVALID_SIGNATURE;
+      }
+    }
+
     // If required anchoring is enabled and this proof has not yet been
     // confirmed on-chain, return UNVERIFIED_ISSUER to signal that the proof
     // is not yet verifiable via the contract. Optional anchoring (or no
@@ -866,18 +879,6 @@ export class ProofsService {
       !proof.contractTransactionHash
     ) {
       result = VerificationResult.UNVERIFIED_ISSUER;
-    }
-
-    const contractStatus = proof.contractTransactionHash
-      ? await this.contractAnchoringService?.getProofStatus(proof.id)
-      : undefined;
-
-    if (contractStatus?.checked) {
-      if (contractStatus.revoked) {
-        result = VerificationResult.REVOKED;
-      } else if (result === VerificationResult.VALID && !contractStatus.valid) {
-        result = VerificationResult.INVALID_SIGNATURE;
-      }
     }
 
     // Convert VerificationResult to VerificationOutcome for event recording
@@ -932,6 +933,48 @@ export class ProofsService {
           reason: "disabled",
         },
       },
+    };
+  }
+
+  /**
+   * Verify a bounded batch of proof IDs, returning one ordered result per
+   * submitted ID.
+   *
+   * Each distinct ID runs through the exact single-proof {@link verifyProof}
+   * path — same public (unauthenticated) access, same privacy envelope, same
+   * event recording — so a batch reveals nothing a sequence of single calls
+   * would not. Duplicate IDs are coalesced: the proof is looked up once (one
+   * storage read, one anchoring check) and its verdict is returned at every
+   * position it occupies, so a caller cannot multiply the fan-out by repeating
+   * an ID. The four outcomes a relying party must distinguish — missing,
+   * revoked, expired, and dependency-unavailable — are preserved per item via
+   * `result` and `contractStatus`.
+   */
+  async verifyProofsBatch(proofIds: string[]) {
+    const distinct = [...new Set(proofIds)];
+    const byId = new Map<
+      string,
+      Awaited<ReturnType<ProofsService["verifyProof"]>>
+    >();
+    await Promise.all(
+      distinct.map(async (id) => {
+        byId.set(id, await this.verifyProof(id));
+      }),
+    );
+
+    return {
+      results: proofIds.map((id) => {
+        const verified = byId.get(id)!;
+        return {
+          id,
+          result: verified.result,
+          status: verified.status,
+          contractStatus: verified.proof?.contractStatus ?? {
+            checked: false,
+            reason: "unknown" as const,
+          },
+        };
+      }),
     };
   }
 

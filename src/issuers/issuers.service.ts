@@ -28,6 +28,9 @@ const VALID_TRANSITIONS: Record<ResourceStatus, ResourceStatus[]> = {
   [ResourceStatus.SUSPENDED]: [ResourceStatus.ACTIVE, ResourceStatus.REVOKED],
   [ResourceStatus.REVOKED]: [],
   [ResourceStatus.DELETED]: [],
+  // Issuers never take EXPIRED (it is an attestation-only effective status);
+  // listed here to keep the transition map total over ResourceStatus.
+  [ResourceStatus.EXPIRED]: [],
 };
 
 @Injectable()

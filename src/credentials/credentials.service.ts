@@ -38,6 +38,17 @@ export interface VerifyCredentialResponse {
   result: VerifyCredentialResult;
 }
 
+/** One item's outcome in a batch verification. */
+export interface BatchCredentialItemResult {
+  index: number;
+  result?: VerifyCredentialResult;
+  error?: string;
+}
+
+export interface VerifyCredentialsBatchResponse {
+  results: BatchCredentialItemResult[];
+}
+
 // ---------------------------------------------------------------------------
 // Zod schema for minimum-income credential shape
 // ---------------------------------------------------------------------------
@@ -119,6 +130,90 @@ export class CredentialsService {
     this.signingSecret = configService.getOrThrow<string>(
       "credentialSigningSecret",
     );
+  }
+
+  /**
+   * Verify a bounded batch of credentials, returning one ordered result per
+   * item.
+   *
+   * Each item runs through the exact single-credential path — same size, depth,
+   * schema, signature and reconciliation checks — so a batch can never accept a
+   * credential the single route would reject, or vice versa. The two failure
+   * modes are kept distinct on purpose:
+   *
+   *   - A whole-batch problem (too many items, aggregate body too large) is a
+   *     4xx rejected by the DTO before this method runs.
+   *   - A single unusable item (not an object, oversized, too deep) is caught
+   *     here and reported against its own index, so one bad item never hides
+   *     another item's verdict.
+   *
+   * Identical items are coalesced: a credential submitted twice is verified once
+   * and its verdict copied to every position it occupies, so a duplicate cannot
+   * multiply the database or contract lookups it triggers.
+   */
+  async verifyCredentialsBatch(
+    credentials: Record<string, unknown>[],
+  ): Promise<VerifyCredentialsBatchResponse> {
+    const results = new Array<BatchCredentialItemResult>(credentials.length);
+    const byKey = new Map<string, Promise<BatchCredentialItemResult>>();
+
+    await Promise.all(
+      credentials.map(async (credential, index) => {
+        const key = this.coalescingKey(credential);
+        let pending = key === null ? null : byKey.get(key);
+        if (!pending) {
+          pending = this.verifyOne(credential);
+          if (key !== null) byKey.set(key, pending);
+        }
+        // Copy the shared outcome onto this position; index is per-item.
+        const outcome = await pending;
+        results[index] = { ...outcome, index };
+      }),
+    );
+
+    return { results };
+  }
+
+  /** Verify one item, converting a rejection into an item-level error. */
+  private async verifyOne(
+    credential: Record<string, unknown>,
+  ): Promise<BatchCredentialItemResult> {
+    try {
+      const { result } = await this.verifyCredential(credential);
+      return { index: -1, result };
+    } catch (error) {
+      if (error instanceof BadRequestException) {
+        return { index: -1, error: this.rejectionMessage(error) };
+      }
+      throw error;
+    }
+  }
+
+  /** The human-readable reason from a per-item rejection. */
+  private rejectionMessage(error: BadRequestException): string {
+    const response = error.getResponse();
+    if (typeof response === "string") return response;
+    if (
+      response &&
+      typeof response === "object" &&
+      typeof (response as { message?: unknown }).message === "string"
+    ) {
+      return (response as { message: string }).message;
+    }
+    return error.message;
+  }
+
+  /**
+   * A stable key for coalescing identical items, or null when the item cannot
+   * be keyed (unserialisable). A null key is verified independently rather than
+   * shared, so an odd item never contaminates another's result.
+   */
+  private coalescingKey(credential: Record<string, unknown>): string | null {
+    try {
+      return canonicalize(credential);
+    } catch {
+      return null;
+    }
   }
 
   async verifyCredential(

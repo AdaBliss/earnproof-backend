@@ -22,13 +22,17 @@ import {
 } from "@nestjs/swagger";
 import { AuthenticatedUser } from "../auth/auth.types";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
+import { AuthenticatedRoute } from "../common/decorators/authorization-policy.decorator";
 import { AuthGuard } from "../common/guards/auth.guard";
 import { PrismaService } from "../database/prisma.service";
 import { ApiErrorDto } from "../common/dto/api-error.dto";
 import { SESSION_AUTH_SCHEME } from "../common/swagger/security-schemes";
 import { CreateWebhookDto } from "./dto/create-webhook.dto";
 import { UpdateWebhookEventsDto } from "./dto/update-webhook-events.dto";
+import { UpdateWebhookCircuitConfigDto } from "./dto/webhook-circuit-config.dto";
+import { WebhookCircuitStatsDto } from "./dto/webhook-circuit-stats.dto";
 import { WebhooksService } from "./webhooks.service";
+import { WebhookCircuitBreakerService } from "./webhook-circuit-breaker.service";
 
 /**
  * Resolves the organisation ID from the current authenticated user.
@@ -38,6 +42,7 @@ import { WebhooksService } from "./webhooks.service";
  * as a path or query param — kept simple here per scope constraints.
  */
 @ApiTags("webhooks")
+@AuthenticatedRoute({ ownership: "user" })
 @ApiBearerAuth(SESSION_AUTH_SCHEME)
 @ApiUnauthorizedResponse({
   description: "Missing, invalid, or expired session token.",
@@ -54,6 +59,7 @@ import { WebhooksService } from "./webhooks.service";
 export class WebhooksController {
   constructor(
     private readonly webhooksService: WebhooksService,
+    private readonly circuitBreakerService: WebhookCircuitBreakerService,
     private readonly prisma: PrismaService,
   ) {}
 
@@ -374,6 +380,74 @@ export class WebhooksController {
   async listDeliveries(@CurrentUser() user: AuthenticatedUser, @Param("id") id: string) {
     const orgId = await this.requireOrgId(user);
     return this.webhooksService.listDeliveries(orgId, id);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Circuit breaker management
+  // ---------------------------------------------------------------------------
+
+  @Get(":id/circuit")
+  @ApiOperation({
+    summary: "Get webhook circuit breaker statistics",
+    description: "Returns current circuit state and failure statistics for monitoring.",
+  })
+  @ApiParam({
+    name: "id",
+    description: "Webhook endpoint identifier.",
+    example: "ckv8v6h2b0002qzrm7t4k9xza",
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Circuit breaker statistics.",
+    type: WebhookCircuitStatsDto,
+  })
+  @ApiNotFoundResponse({
+    description: "No such endpoint in the caller's organisation.",
+    type: ApiErrorDto,
+  })
+  async getCircuitStats(@CurrentUser() user: AuthenticatedUser, @Param("id") id: string) {
+    const orgId = await this.requireOrgId(user);
+    // Verify webhook ownership
+    await this.webhooksService.getForOrg(orgId, id);
+    
+    const stats = await this.circuitBreakerService.getCircuitStats(id);
+    if (!stats) {
+      // Initialize circuit if it doesn't exist
+      await this.circuitBreakerService.initializeCircuit(id);
+      return await this.circuitBreakerService.getCircuitStats(id);
+    }
+    return stats;
+  }
+
+  @Patch(":id/circuit")
+  @ApiOperation({
+    summary: "Update webhook circuit breaker configuration",
+    description: "Configure failure threshold and recovery window for circuit breaker.",
+  })
+  @ApiParam({
+    name: "id",
+    description: "Webhook endpoint identifier.",
+    example: "ckv8v6h2b0002qzrm7t4k9xza",
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Circuit breaker configuration updated.",
+  })
+  @ApiNotFoundResponse({
+    description: "No such endpoint in the caller's organisation.",
+    type: ApiErrorDto,
+  })
+  async updateCircuitConfig(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") id: string,
+    @Body() config: UpdateWebhookCircuitConfigDto,
+  ) {
+    const orgId = await this.requireOrgId(user);
+    // Verify webhook ownership
+    await this.webhooksService.getForOrg(orgId, id);
+    
+    await this.circuitBreakerService.updateConfig(id, config);
+    return { success: true };
   }
 
   // ---------------------------------------------------------------------------

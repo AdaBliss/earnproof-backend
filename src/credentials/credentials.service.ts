@@ -8,6 +8,7 @@ import { ProofStatus } from "@prisma/client";
 import { createHmac } from "crypto";
 import { z } from "zod";
 import { canonicalize } from "../common/crypto/canonicalize";
+import { CredentialVerificationKeyService } from "../common/crypto/credential-verification-key.service";
 import { sha256 } from "../common/crypto/hash";
 import { safeEqual } from "../common/crypto/timing-safe";
 import { StructuredLogger } from "../common/logger";
@@ -35,6 +36,17 @@ export type VerifyCredentialResult =
 
 export interface VerifyCredentialResponse {
   result: VerifyCredentialResult;
+}
+
+/** One item's outcome in a batch verification. */
+export interface BatchCredentialItemResult {
+  index: number;
+  result?: VerifyCredentialResult;
+  error?: string;
+}
+
+export interface VerifyCredentialsBatchResponse {
+  results: BatchCredentialItemResult[];
 }
 
 // ---------------------------------------------------------------------------
@@ -65,11 +77,20 @@ const MinimumIncomeCredentialSchema = z.object({
   issuedAt: z.string().datetime({ offset: true }),
   expiresAt: z.string().datetime({ offset: true }),
   // The signature proof block appended when a credential is issued
-  proof: z.object({
-    type: z.literal("HMAC-SHA256"),
-    credentialHash: z.string().min(1),
-    signature: z.string().min(1),
-  }).strict(),
+  proof: z.union([
+    z.object({
+      type: z.literal("HMAC-SHA256"),
+      credentialHash: z.string().min(1),
+      signature: z.string().min(1),
+    }).strict(),
+    z.object({
+      type: z.literal("Ed25519"),
+      algorithm: z.literal("EdDSA"),
+      keyId: z.string().min(1),
+      credentialHash: z.string().min(1),
+      signature: z.string().startsWith("ed25519:"),
+    }).strict(),
+  ]),
 }).strict();
 
 type MinimumIncomeCredential = z.infer<typeof MinimumIncomeCredentialSchema>;
@@ -103,10 +124,96 @@ export class CredentialsService {
     configService: ConfigService,
     @Optional()
     private readonly anchoring?: ContractAnchoringService,
+    @Optional()
+    private readonly credentialVerificationKeyService?: CredentialVerificationKeyService,
   ) {
     this.signingSecret = configService.getOrThrow<string>(
       "credentialSigningSecret",
     );
+  }
+
+  /**
+   * Verify a bounded batch of credentials, returning one ordered result per
+   * item.
+   *
+   * Each item runs through the exact single-credential path — same size, depth,
+   * schema, signature and reconciliation checks — so a batch can never accept a
+   * credential the single route would reject, or vice versa. The two failure
+   * modes are kept distinct on purpose:
+   *
+   *   - A whole-batch problem (too many items, aggregate body too large) is a
+   *     4xx rejected by the DTO before this method runs.
+   *   - A single unusable item (not an object, oversized, too deep) is caught
+   *     here and reported against its own index, so one bad item never hides
+   *     another item's verdict.
+   *
+   * Identical items are coalesced: a credential submitted twice is verified once
+   * and its verdict copied to every position it occupies, so a duplicate cannot
+   * multiply the database or contract lookups it triggers.
+   */
+  async verifyCredentialsBatch(
+    credentials: Record<string, unknown>[],
+  ): Promise<VerifyCredentialsBatchResponse> {
+    const results = new Array<BatchCredentialItemResult>(credentials.length);
+    const byKey = new Map<string, Promise<BatchCredentialItemResult>>();
+
+    await Promise.all(
+      credentials.map(async (credential, index) => {
+        const key = this.coalescingKey(credential);
+        let pending = key === null ? null : byKey.get(key);
+        if (!pending) {
+          pending = this.verifyOne(credential);
+          if (key !== null) byKey.set(key, pending);
+        }
+        // Copy the shared outcome onto this position; index is per-item.
+        const outcome = await pending;
+        results[index] = { ...outcome, index };
+      }),
+    );
+
+    return { results };
+  }
+
+  /** Verify one item, converting a rejection into an item-level error. */
+  private async verifyOne(
+    credential: Record<string, unknown>,
+  ): Promise<BatchCredentialItemResult> {
+    try {
+      const { result } = await this.verifyCredential(credential);
+      return { index: -1, result };
+    } catch (error) {
+      if (error instanceof BadRequestException) {
+        return { index: -1, error: this.rejectionMessage(error) };
+      }
+      throw error;
+    }
+  }
+
+  /** The human-readable reason from a per-item rejection. */
+  private rejectionMessage(error: BadRequestException): string {
+    const response = error.getResponse();
+    if (typeof response === "string") return response;
+    if (
+      response &&
+      typeof response === "object" &&
+      typeof (response as { message?: unknown }).message === "string"
+    ) {
+      return (response as { message: string }).message;
+    }
+    return error.message;
+  }
+
+  /**
+   * A stable key for coalescing identical items, or null when the item cannot
+   * be keyed (unserialisable). A null key is verified independently rather than
+   * shared, so an odd item never contaminates another's result.
+   */
+  private coalescingKey(credential: Record<string, unknown>): string | null {
+    try {
+      return canonicalize(credential);
+    } catch {
+      return null;
+    }
   }
 
   async verifyCredential(
@@ -142,7 +249,9 @@ export class CredentialsService {
     if (
       submittedProof !== null &&
       typeof submittedProof === "object" &&
-      (submittedProof as Record<string, unknown>)["type"] !== "HMAC-SHA256"
+      !["HMAC-SHA256", "Ed25519"].includes(
+        (submittedProof as Record<string, unknown>)["type"] as string,
+      )
     ) {
       return { result: "unsupported_key" };
     }
@@ -176,16 +285,40 @@ export class CredentialsService {
     // ------------------------------------------------------------------
     // 5. Signature check — recompute HMAC and compare timing-safely
     // ------------------------------------------------------------------
-    const expectedSignature = `hmac-sha256:${createHmac("sha256", this.signingSecret)
-      .update(canonicalPayload)
-      .digest("base64url")}`;
+    const isEd25519Proof = proof.type === "Ed25519";
+    const signatureValid = isEd25519Proof
+      ? this.credentialVerificationKeyService?.hasKey(proof.keyId) === true &&
+        this.credentialVerificationKeyService.verifyCredential(
+          credentialBody,
+          proof,
+        )
+      : safeEqual(
+          `hmac-sha256:${createHmac("sha256", this.signingSecret)
+            .update(canonicalPayload)
+            .digest("base64url")}`,
+          proof.signature,
+        );
 
+    if (!signatureValid) {
+      this.logger.log({
+        event: "credential_verify",
+        result:
+          isEd25519Proof &&
+          this.credentialVerificationKeyService?.hasKey(proof.keyId) !== true
+            ? "unsupported_key"
+            : "invalid_signature",
     if (!safeEqual(expectedSignature, proof.signature)) {
       this.logger.warn("Credential verification failed", {
         outcome: "invalid_signature",
         credentialHash,
       });
-      return { result: "invalid_signature" };
+      return {
+        result:
+          isEd25519Proof &&
+          this.credentialVerificationKeyService?.hasKey(proof.keyId) !== true
+            ? "unsupported_key"
+            : "invalid_signature",
+      };
     }
 
     // ------------------------------------------------------------------

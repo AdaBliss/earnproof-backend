@@ -35,6 +35,9 @@ export class VerificationEventService {
   private readonly retentionDays: number;
   private readonly currentSaltVersion: number;
   private readonly salts: Map<number, string>;
+  private readonly metadataBudgetPerProof: number;
+  private readonly metadataBudgetWindowMs: number;
+  private readonly budgetUsage = new Map<string, number[]>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -42,6 +45,14 @@ export class VerificationEventService {
   ) {
     this.retentionDays =
       configService.get<number>("verificationEventRetentionDays") || 90;
+    this.metadataBudgetPerProof = configService.get<number>(
+      "verificationMetadataBudgetPerProof",
+      100,
+    );
+    this.metadataBudgetWindowMs = configService.get<number>(
+      "verificationMetadataBudgetWindowMs",
+      24 * 60 * 60 * 1000,
+    );
 
     // Use explicitly configured salt version
     // Operators control rotation by incrementing VERIFICATION_HASH_SALT_VERSION env var
@@ -131,6 +142,26 @@ export class VerificationEventService {
   }
 
   /**
+   * Consume one bounded metadata slot for a proof. The key is an HMAC held
+   * only in memory, so this budget does not create another identifying store.
+   */
+  tryConsumePrivacyBudget(proofId: string, now = Date.now()): boolean {
+    const budgetKey = this.hashBudgetKey(proofId);
+    const usage = (this.budgetUsage.get(budgetKey) ?? []).filter(
+      (timestamp) => timestamp + this.metadataBudgetWindowMs > now,
+    );
+    if (usage.length >= this.metadataBudgetPerProof) return false;
+    usage.push(now);
+    this.budgetUsage.set(budgetKey, usage);
+    return true;
+  }
+
+  private hashBudgetKey(proofId: string): string {
+    const salt = this.salts.get(this.currentSaltVersion) ?? "temporary";
+    return createHmac("sha256", salt).update(proofId).digest("hex");
+  }
+
+  /**
    * Hash metadata using HMAC-SHA256 with versioned salt.
    *
    * Accepts only non-identifying fields:
@@ -193,6 +224,7 @@ export class VerificationEventService {
   async cleanupExpiredEvents(): Promise<number> {
     try {
       const now = new Date();
+      this.prunePrivacyBudget(now.getTime());
       const result = await this.prisma.verificationEventLog.deleteMany({
         where: {
           retainUntil: {
@@ -212,6 +244,16 @@ export class VerificationEventService {
         errorMessage: error instanceof Error ? error.message : String(error),
       });
       return 0;
+    }
+  }
+
+  private prunePrivacyBudget(now: number): void {
+    for (const [key, timestamps] of this.budgetUsage) {
+      const active = timestamps.filter(
+        (timestamp) => timestamp + this.metadataBudgetWindowMs > now,
+      );
+      if (active.length === 0) this.budgetUsage.delete(key);
+      else this.budgetUsage.set(key, active);
     }
   }
 

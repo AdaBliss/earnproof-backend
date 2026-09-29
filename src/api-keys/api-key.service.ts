@@ -1,4 +1,4 @@
-import {
+﻿import {
   ForbiddenException,
   Injectable,
   Logger,
@@ -8,10 +8,15 @@ import { ApiKeyScope, ResourceStatus } from "@prisma/client";
 import { randomBytes, timingSafeEqual } from "crypto";
 import { sha256 } from "../common/crypto/hash";
 import { PrismaService } from "../database/prisma.service";
+import { ApiKeyUsageService } from "./api-key-usage.service";
 
 /**
  * API Key Service - Secure credential management for machine-to-machine integrations.
  *
+ * See original file for full design rationale. Changes in this version:
+ * - Injects ApiKeyUsageService to call freezeOnRevocation() during revokeKey().
+ * - recordKeyUsage() is kept for backward compatibility; new code should use
+ *   ApiKeyUsageService.recordUsage() directly (via the guard).
  * SECURITY POSTURE: This service implements constant-time verification to prevent timing attacks
  * on secret authentication. See verifySecret() for detailed constant-time design.
  *
@@ -53,35 +58,31 @@ export class ApiKeyService {
   private readonly logger = new Logger(ApiKeyService.name);
   private readonly KEY_BYTES = 32;
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly apiKeyUsageService: ApiKeyUsageService,
+  ) {}
 
-  /**
-   * Generate a new cryptographically strong API key secret.
-   *
-   * @returns Object with raw secret (display once) and prefix (for storage/display in listings)
-   */
-  generateSecret(): {
-    secret: string;
-    prefix: string;
-  } {
+  generateSecret(): { secret: string; prefix: string } {
     const randomBytes32 = randomBytes(this.KEY_BYTES);
     const secret = randomBytes32.toString("base64url");
     const prefix = secret.substring(0, 8);
-
     return { secret, prefix };
   }
 
-  /**
-   * Hash a raw API key secret for storage.
-   * Uses SHA-256: appropriate for high-entropy API keys.
-   *
-   * @param secret - The raw secret (display only, never logged)
-   * @returns SHA-256 hash as hex string
-   */
   hashSecret(secret: string): string {
     return sha256(secret);
   }
 
+  verifySecret(secret: string, storedHash: string): boolean {
+    const computedHash = this.hashSecret(secret);
+    const isValidFormat = /^[a-f0-9]{64}$/i.test(storedHash);
+    const hashBufferToCompare = isValidFormat
+      ? Buffer.from(storedHash, "hex")
+      : Buffer.alloc(32);
+    try {
+      return timingSafeEqual(Buffer.from(computedHash, "hex"), hashBufferToCompare);
+    } catch {
   /**
    * Verify a presented secret against a stored hash.
    * Returns true if they match (constant-time comparison).
@@ -161,24 +162,7 @@ export class ApiKeyService {
     }
   }
 
-  /**
-   * Look up an API key by prefix to narrow the search space,
-   * then verify the full secret against the stored hash.
-   *
-   * This is more efficient than hashing the presented secret and
-   * scanning all stored hashes. Prefix is not secret (8 chars from a 43-char key).
-   *
-   * @param prefix - First 8 characters of the presented key (non-secret)
-   * @param secret - Full presented secret (secret)
-   * @param organizationId - Organization scope for isolation
-   * @returns ApiKey record if valid, null if not found/invalid/revoked/expired
-   */
-  async lookupAndVerifyKey(
-    prefix: string,
-    secret: string,
-    organizationId: string,
-  ) {
-    // Lookup by prefix + organization (narrow scope quickly)
+  async lookupAndVerifyKey(prefix: string, secret: string, organizationId: string) {
     const apiKey = await this.prisma.apiKey.findFirst({
       where: {
         prefix,
@@ -187,39 +171,17 @@ export class ApiKeyService {
         OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
       },
       include: {
-        scopeAssignments: {
-          select: {
-            scope: true,
-          },
-        },
-        organization: {
-          select: {
-            id: true,
-            slug: true,
-          },
-        },
+        scopeAssignments: { select: { scope: true } },
+        organization: { select: { id: true, slug: true } },
       },
     });
 
-    if (!apiKey) {
-      return null; // Not found, revoked, expired, or wrong org
-    }
-
-    // Verify the full secret matches stored hash
+    if (!apiKey) return null;
     const isValid = this.verifySecret(secret, apiKey.keyHash);
-    if (!isValid) {
-      return null; // Hash mismatch (wrong secret)
-    }
-
+    if (!isValid) return null;
     return apiKey;
   }
 
-  /**
-   * Create a new API key for an organization.
-   *
-   * @param input - Creation parameters
-   * @returns Object with raw secret (display once) and stored key metadata
-   */
   async createKey(input: {
     organizationId: string;
     createdBy: string;
@@ -239,23 +201,12 @@ export class ApiKeyService {
         keyHash,
         expiresAt: input.expiresAt,
         scopeAssignments: input.scopes
-          ? {
-              createMany: {
-                data: input.scopes.map((scope) => ({ scope })),
-              },
-            }
+          ? { createMany: { data: input.scopes.map((scope) => ({ scope })) } }
           : undefined,
       },
-      include: {
-        scopeAssignments: {
-          select: {
-            scope: true,
-          },
-        },
-      },
+      include: { scopeAssignments: { select: { scope: true } } },
     });
 
-    // Audit log: API key created (never log secret or hash)
     await this.prisma.auditLog.create({
       data: {
         actorType: "user",
@@ -274,7 +225,7 @@ export class ApiKeyService {
     });
 
     return {
-      secret, // Display ONCE - never stored, never retrievable
+      secret,
       apiKey: {
         id: apiKey.id,
         prefix: apiKey.prefix,
@@ -287,40 +238,20 @@ export class ApiKeyService {
     };
   }
 
-  /**
-   * Rotate an API key: generate new secret, invalidate old one immediately.
-   * Key ID remains stable so references in client code don't break.
-   *
-   * @param keyId - ID of key to rotate
-   * @param organizationId - Organization scope
-   * @returns New secret and updated key metadata
-   */
   async rotateKey(keyId: string, organizationId: string, actorId?: string) {
     const { secret, prefix } = this.generateSecret();
     const keyHash = this.hashSecret(secret);
 
     const apiKey = await this.prisma.apiKey.update({
       where: { id: keyId, organizationId },
-      data: {
-        prefix,
-        keyHash,
-        rotatedAt: new Date(),
-      },
-      include: {
-        scopeAssignments: {
-          select: {
-            scope: true,
-          },
-        },
-      },
+      data: { prefix, keyHash, rotatedAt: new Date() },
+      include: { scopeAssignments: { select: { scope: true } } },
     });
 
-    // Verify organization ownership
     if (apiKey.organizationId !== organizationId) {
       throw new ForbiddenException("Key does not belong to this organization");
     }
 
-    // Audit log: API key rotated (never log secrets or hashes)
     await this.prisma.auditLog.create({
       data: {
         actorType: "user",
@@ -338,7 +269,7 @@ export class ApiKeyService {
     });
 
     return {
-      secret, // Display ONCE - new secret invalidates old immediately
+      secret,
       apiKey: {
         id: apiKey.id,
         prefix: apiKey.prefix,
@@ -350,36 +281,23 @@ export class ApiKeyService {
     };
   }
 
-  /**
-   * Revoke an API key: mark as REVOKED, take effect immediately.
-   *
-   * @param keyId - ID of key to revoke
-   * @param organizationId - Organization scope
-   * @param actorId - User performing the revocation
-   */
   async revokeKey(keyId: string, organizationId: string, actorId?: string) {
     const apiKey = await this.prisma.apiKey.findFirst({
       where: { id: keyId, organizationId },
-      select: {
-        organizationId: true,
-        prefix: true,
-        name: true,
-      },
+      select: { organizationId: true, prefix: true, name: true },
     });
 
-    if (!apiKey) {
-      throw new NotFoundException("Key not found");
-    }
+    if (!apiKey) throw new NotFoundException("Key not found");
 
     await this.prisma.apiKey.update({
       where: { id: keyId, organizationId },
-      data: {
-        status: ResourceStatus.REVOKED,
-        revokedAt: new Date(),
-      },
+      data: { status: ResourceStatus.REVOKED, revokedAt: new Date() },
     });
 
-    // Audit log: API key revoked
+    // Freeze usage summaries so the final state is auditable.
+    // Fire-and-forget — revocation must not be blocked by summary writes.
+    void this.apiKeyUsageService.freezeOnRevocation(keyId);
+
     await this.prisma.auditLog.create({
       data: {
         actorType: "user",
@@ -397,67 +315,42 @@ export class ApiKeyService {
     });
   }
 
-  /**
-   * List all API keys for an organization (metadata only, no secrets).
-   *
-   * @param organizationId - Organization to list keys for
-   * @returns List of key metadata (id, prefix, name, status, scopes, dates)
-   */
   async listKeysForOrganization(organizationId: string) {
     return this.prisma.apiKey.findMany({
-      where: {
-        organizationId,
-      },
+      where: { organizationId },
       select: {
         id: true,
         prefix: true,
         name: true,
         status: true,
-        scopeAssignments: {
-          select: {
-            scope: true,
-          },
-        },
+        scopeAssignments: { select: { scope: true } },
         createdAt: true,
         rotatedAt: true,
         revokedAt: true,
         expiresAt: true,
         lastUsedAt: true,
       },
-      orderBy: {
-        createdAt: "desc",
-      },
+      orderBy: { createdAt: "desc" },
     });
   }
 
   /**
-   * Record that an API key was used (for lastUsedAt tracking).
-   * Non-identifying timestamp only (no IP, no user-agent).
-   * Also logs successful key authentication to audit trail.
-   *
-   * @param keyId - Key that was used
-   * @param organizationId - Organization the key belongs to
+   * Kept for backward compatibility with existing tests.
+   * New code should prefer ApiKeyUsageService.recordUsage() directly.
    */
   async recordKeyUsage(keyId: string, organizationId?: string) {
     try {
       const updated = await this.prisma.apiKey.update({
         where: { id: keyId },
-        data: {
-          lastUsedAt: new Date(),
-        },
-        select: {
-          prefix: true,
-          name: true,
-          organizationId: true,
-        },
+        data: { lastUsedAt: new Date() },
+        select: { prefix: true, name: true, organizationId: true },
       });
 
-      // Audit log: API key used (successful authentication)
       if (organizationId && organizationId === updated.organizationId) {
         await this.prisma.auditLog.create({
           data: {
             actorType: "api_key",
-            actorId: keyId, // The API key itself is the actor
+            actorId: keyId,
             action: "api_key.authenticated",
             resourceType: "api_key",
             resourceId: keyId,
@@ -470,7 +363,6 @@ export class ApiKeyService {
         });
       }
     } catch {
-      // Log but don't throw - usage tracking shouldn't block requests
       this.logger.warn(`Failed to record API key usage for ${keyId}`);
     }
   }

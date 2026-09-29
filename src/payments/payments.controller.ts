@@ -18,6 +18,7 @@ import {
 } from "@nestjs/swagger";
 import { SkipThrottle, Throttle } from "@nestjs/throttler";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
+import { AuthenticatedRoute } from "../common/decorators/authorization-policy.decorator";
 import { Idempotent } from "../common/decorators/idempotent.decorator";
 import { ApiErrorDto } from "../common/dto/api-error.dto";
 import { AuthGuard } from "../common/guards/auth.guard";
@@ -26,14 +27,22 @@ import { ListPaymentsDto } from "./dto/list-payments.dto";
 import { PaymentResponseDto } from "./dto/payment-response.dto";
 import { SyncResultDto } from "./dto/sync-result.dto";
 import { UpdatePaymentClassificationDto } from "./dto/update-payment-classification.dto";
+import { 
+  PaymentClassificationHistoryDto,
+  ListPaymentClassificationHistoryDto 
+} from "./dto/payment-classification-history.dto";
 import { PaymentsService } from "./payments.service";
+import { PaymentClassificationHistoryService } from "./payment-classification-history.service";
 
 @ApiBearerAuth()
 @ApiTags("payments")
 @UseGuards(AuthGuard)
 @Controller("payments")
 export class PaymentsController {
-  constructor(private readonly paymentsService: PaymentsService) {}
+  constructor(
+    private readonly paymentsService: PaymentsService,
+    private readonly classificationHistoryService: PaymentClassificationHistoryService,
+  ) {}
 
   @ApiOperation({
     summary: "Sync payments from Stellar Horizon",
@@ -72,6 +81,7 @@ export class PaymentsController {
   @Throttle({ strict: {} })
   @Idempotent({ headerName: "idempotency-key", required: true })
   @Post("sync")
+  @AuthenticatedRoute({ ownership: "user" })
   syncPayments(@CurrentUser() user: AuthenticatedUser): Promise<SyncResultDto> {
     return this.paymentsService.syncPayments(user);
   }
@@ -98,6 +108,7 @@ export class PaymentsController {
     type: ApiErrorDto,
   })
   @Get()
+  @AuthenticatedRoute({ ownership: "user" })
   listPayments(
     @CurrentUser() user: AuthenticatedUser,
     @Query() query: ListPaymentsDto,
@@ -128,6 +139,7 @@ export class PaymentsController {
     type: ApiErrorDto,
   })
   @Get(":id")
+  @AuthenticatedRoute({ ownership: "user" })
   getPayment(
     @CurrentUser() user: AuthenticatedUser,
     @Param("id") paymentId: string,
@@ -163,6 +175,7 @@ export class PaymentsController {
     type: ApiErrorDto,
   })
   @Patch(":id/classification")
+  @AuthenticatedRoute({ ownership: "user" })
   updateClassification(
     @CurrentUser() user: AuthenticatedUser,
     @Param("id") paymentId: string,
@@ -172,6 +185,39 @@ export class PaymentsController {
       user,
       paymentId,
       body.classification,
+      body.reasonCode,
     );
+  }
+
+  @ApiOperation({
+    summary: "Get classification history for a payment",
+    description:
+      "Returns the immutable history of classification changes for a payment. " +
+      "Only the owner of the payment may view its history.",
+  })
+  @ApiParam({ name: "id", description: "Payment ID (cuid).", example: "clx1abc2def3ghi4" })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Classification change history.",
+    type: [PaymentClassificationHistoryDto],
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: "Payment not found or does not belong to the authenticated user.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Bearer token is missing, malformed, invalid, or expired.",
+    type: ApiErrorDto,
+  })
+  @Get(":id/classification-history")
+  @AuthenticatedRoute({ ownership: "user" })
+  getClassificationHistory(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") paymentId: string,
+    @Query() query: ListPaymentClassificationHistoryDto,
+  ) {
+    return this.classificationHistoryService.getPaymentHistory(user, paymentId, query);
   }
 }

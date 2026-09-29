@@ -1,4 +1,4 @@
-import { Module } from "@nestjs/common";
+﻿import { Module } from "@nestjs/common";
 import { AuthController } from "./auth.controller";
 import { AuthService } from "./auth.service";
 import { AuthTokenService } from "./auth-token.service";
@@ -10,6 +10,8 @@ import { AuthRateLimiterService } from "./auth-rate-limiter.service";
 import { Clock, SystemClock } from "../common/time/clock";
 import { WalletRotationController } from "./wallet-rotation.controller";
 import { WalletRotationService } from "./wallet-rotation.service";
+import { RecentAuthService } from "./recent-auth.service";
+import { RecentAuthGuard } from "../common/guards/recent-auth.guard";
 
 @Module({
   controllers: [AuthController, WalletRotationController],
@@ -23,7 +25,16 @@ import { WalletRotationService } from "./wallet-rotation.service";
     CleanupJob,
     WalletRotationService,
     { provide: Clock, useClass: SystemClock },
+    RecentAuthService,
+    RecentAuthGuard,
   ],
-  exports: [SessionService, AuthTokenService, AuthGuard, AuthAuditService],
+  exports: [
+    SessionService,
+    AuthTokenService,
+    AuthGuard,
+    AuthAuditService,
+    RecentAuthService,
+    RecentAuthGuard,
+  ],
 })
 export class AuthModule {}

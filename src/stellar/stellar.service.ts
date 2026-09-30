@@ -13,7 +13,12 @@ import {
   HorizonReadOptions,
   HorizonReadResult,
 } from "./horizon-client";
-import { HorizonTransactionRecord, NormalizedPayment } from "./stellar.types";
+import {
+  HorizonLedgerSummary,
+  HorizonOperationSummary,
+  HorizonTransactionRecord,
+  NormalizedPayment,
+} from "./stellar.types";
 import { HorizonException } from "../common/exceptions/domain.exceptions";
 import { FetchHorizonTransport } from "./horizon-transport";
 import { CircuitHorizonTransport } from "./horizon-circuit-transport";
@@ -130,22 +135,28 @@ export class StellarService {
   }
 
   /**
-   * One ascending page of an account's payments after `options.cursor`, for
-   * ledger-range backfills. Failures collapse to one dependency error, as for
-   * the forward read.
+   * One ledger's sequence and hash, or `null` when Horizon has no such ledger.
+   *
+   * Failures collapse to the same dependency error as the payment read: a
+   * checkpoint that cannot be verified must stop the sync, not be assumed good.
    */
-  async readPaymentsPageAscending(
-    walletAddress: string,
-    options: AscendingPageOptions,
-  ): Promise<AscendingPaymentsPage> {
+  async fetchLedger(sequence: number): Promise<HorizonLedgerSummary | null> {
     try {
-      return await this.horizon.readPaymentsPageAscending(
-        walletAddress,
-        options,
+      return await this.horizon.getLedger(sequence);
+    } catch {
+      throw new ServiceUnavailableException(
+        "Stellar Horizon is temporarily unavailable",
       );
-    } catch (error) {
-      if (error instanceof HorizonCancelledError) throw error;
+    }
+  }
 
+  /** One operation's identity, or `null` when Horizon has no such operation. */
+  async fetchOperation(
+    operationId: string,
+  ): Promise<HorizonOperationSummary | null> {
+    try {
+      return await this.horizon.getOperation(operationId);
+    } catch {
       throw new ServiceUnavailableException(
         "Stellar Horizon is temporarily unavailable",
       );

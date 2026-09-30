@@ -5,6 +5,7 @@ import { ContractAnchoringService } from "../proofs/contract-anchoring.service";
 import { ProofsModule } from "../proofs/proofs.module";
 import { AnchoringReconcilerService } from "./anchoring-reconciler.service";
 import { AnchoringWorkerService } from "./anchoring-worker.service";
+import { ProofExpirationReconcilerService } from "./proof-expiration-reconciler.service";
 import { ProofSharingCleanupJob } from "./proof-sharing-cleanup.job";
 import { DisclosureCleanupJob } from "./disclosure-cleanup.job";
 import { DisclosureModule } from "../common/disclosure/disclosure.module";
@@ -39,6 +40,7 @@ import { RetentionJob } from "./retention/retention.job";
     AnchoringWorkerService,
     PaymentBackfillWorkerService,
     AnchoringReconcilerService,
+    ProofExpirationReconcilerService,
     ProofSharingCleanupJob,
     DisclosureCleanupJob,
     ProofReconciliationService,
@@ -51,6 +53,7 @@ import { RetentionJob } from "./retention/retention.job";
   exports: [
     AnchoringWorkerService,
     AnchoringReconcilerService,
+    ProofExpirationReconcilerService,
     ProofSharingCleanupJob,
     DisclosureCleanupJob,
     ProofReconciliationService,

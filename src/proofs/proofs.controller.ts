@@ -32,6 +32,8 @@ import {
 import { Idempotent } from "../common/decorators/idempotent.decorator";
 import { ApiErrorDto } from "../common/dto/api-error.dto";
 import { AuthGuard } from "../common/guards/auth.guard";
+import { CreateInvoiceSettlementProofDto } from "./dto/create-invoice-settlement-proof.dto";
+import { CreateIncomeRangeProofDto } from "./dto/create-income-range-proof.dto";
 import { RequireApiKeyScopes } from "../common/guards/api-key-quota.guard";
 import { RequireConsent } from "../common/guards/consent.guard";
 import {
@@ -50,6 +52,11 @@ import {
   ProofDetailResponseDto,
   ProofListResponseDto,
 } from "./dto/proof-history-response.dto";
+import {
+  ProofRenewalResponseDto,
+  RenewalEligibilityResponseDto,
+  RenewProofDto,
+} from "./dto/renew-proof.dto";
 import { RevokeProofResponseDto } from "./dto/revoke-proof-response.dto";
 import { VerifyProofResponseDto } from "./dto/verify-proof-response.dto";
 import { VerifyProofsBatchResponseDto } from "./dto/verify-proofs-batch-response.dto";
@@ -181,6 +188,57 @@ export class ProofsController {
   }
 
   @ApiOperation({
+    summary: "Create an invoice-settlement proof",
+    description:
+      "Binds a caller-supplied invoice reference to exactly one confirmed payment matching " +
+      "the requested issuer, asset, and exact amount. The raw invoice reference is never " +
+      "stored or disclosed — only a normalized SHA-256 commitment is embedded in the credential. " +
+      "Ambiguous (multiple matching payments) or unconfirmed (no matching payment) requests are " +
+      "rejected, and a payment already bound to a different invoice cannot be reused.",
+  })
+  @ApiBearerAuth()
+  @ApiResponse({
+    status: HttpStatus.CREATED,
+    description: "Invoice-settlement proof created.",
+    type: ProofCreatedDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: "The issuer is invalid/inactive, or the requested period range is invalid.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: "No confirmed payment matches the requested issuer, asset, and amount.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    description: "More than one payment matches the requested criteria (ambiguous).",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description:
+      "The matched payment is already bound to a different invoice, or this invoice reference " +
+      "has already been settled for this issuer.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Bearer token is missing, malformed, invalid, or expired.",
+    type: ApiErrorDto,
+  })
+  @UseGuards(AuthGuard)
+  @Post("invoice-settlement")
+  createInvoiceSettlementProof(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: CreateInvoiceSettlementProofDto,
+  ) {
+    return this.proofsService.createInvoiceSettlementProof(user, body);
+  }
+
+  @ApiOperation({
     summary: "Create a minimum-income proof",
     description:
       "Generates a privacy-preserving credential asserting that the authenticated wallet " +
@@ -240,6 +298,48 @@ export class ProofsController {
   }
 
   @ApiOperation({
+    summary: "Create an income-range proof",
+    description:
+      "Generates a privacy-preserving credential asserting that the authenticated wallet " +
+      "received a total income inside the inclusive range [`lowerBound`, `upperBound`] of a " +
+      "given asset during the specified period. The exact income total and individual " +
+      "transactions are never disclosed; only the committed bounds and the boolean outcome " +
+      "are embedded in the credential.",
+  })
+  @ApiBearerAuth()
+  @ApiResponse({
+    status: HttpStatus.CREATED,
+    description:
+      "Proof created. Returns the signed credential and an optional anchoring result.",
+    type: ProofCreatedDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    description: "Request body failed validation.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description:
+      "Business rule violation — e.g. period range invalid, bounds inverted or degenerate, " +
+      "payments ineligible, asset mismatch, or the payment sum falls outside the requested range.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Bearer token is missing, malformed, invalid, or expired.",
+    type: ApiErrorDto,
+  })
+  @UseGuards(AuthGuard)
+  @Post("income-range")
+  createIncomeRangeProof(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: CreateIncomeRangeProofDto,
+  ) {
+    return this.proofsService.createIncomeRangeProof(user, body);
+  }
+
+  @ApiOperation({
     summary: "Create a recurring-income proof",
     description:
       "Issues a privacy-preserving credential when every requested cadence interval contains at least one eligible income payment in the selected asset.",
@@ -283,6 +383,51 @@ export class ProofsController {
   }
 
   @ApiOperation({
+    summary: "Create an aggregate-earnings proof",
+    description:
+      "Sums the caller's eligible income payments in one asset over a half-open period under the " +
+      "versioned aggregate-earnings policy, floors the total to the requested rounding increment, " +
+      "and issues a credential committing only that rounded aggregate, the payment count and the " +
+      "policy parameters. Component payments, exact amounts and source identities are not disclosed.",
+  })
+  @ApiBearerAuth()
+  @ApiResponse({
+    status: HttpStatus.CREATED,
+    description: "Aggregate-earnings proof created.",
+    type: ProofCreatedDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description:
+      "INVALID_INPUT: the period is empty, longer than 366 days or in the future, issuerIds was " +
+      "given without sourceScope verified_issuers, or a requested issuer is unknown or inactive.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    description:
+      "Validation failed, or the policy refused the aggregate: AGGREGATION_CROSS_ASSET_UNSUPPORTED, " +
+      "AGGREGATION_INSUFFICIENT_PAYMENTS (fewer than 2 payments, or a total below the increment), " +
+      "AGGREGATION_LIMIT_EXCEEDED (more than 500 payments), or PAYMENT_NOT_ELIGIBLE (an amount is unreadable).",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Bearer token is missing, malformed, invalid, or expired.",
+    type: ApiErrorDto,
+  })
+  @UseGuards(AuthGuard)
+  @SkipThrottle({ default: true, verification: true })
+  @Throttle({ strict: {} })
+  @Post("aggregate-earnings")
+  createAggregateEarningsProof(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: CreateAggregateEarningsProofDto,
+  ) {
+    return this.proofsService.createAggregateEarningsProof(user, body);
+  }
+
+  @ApiOperation({
     summary: "Revoke a proof",
     description:
       "Marks the proof as REVOKED and records a revocation timestamp. " +
@@ -320,6 +465,113 @@ export class ProofsController {
   @AuthenticatedRoute({ ownership: "user" })
   revokeProof(@CurrentUser() user: AuthenticatedUser, @Param("id") id: string) {
     return this.proofsService.revokeProof(user.id, id);
+  }
+
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: "Check whether a proof can be renewed",
+    description:
+      "Returns renewal eligibility with stable reason codes (`revoked`, `invalid`, " +
+      "`expired_beyond_grace`, `already_superseded`) and the proof's supersession links. " +
+      "Expired proofs remain renewable for a grace period after expiry. Only the proof owner may call this.",
+  })
+  @ApiParam({ name: "id", description: "Proof ID (uuid)." })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Renewal eligibility.",
+    type: RenewalEligibilityResponseDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: "Proof not found.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.FORBIDDEN,
+    description: "Proof does not belong to the authenticated user.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Bearer token is missing, malformed, invalid, or expired.",
+    type: ApiErrorDto,
+  })
+  @UseGuards(AuthGuard)
+  @Get(":id/renewal-eligibility")
+  getRenewalEligibility(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") id: string,
+  ) {
+    return this.proofsService.getRenewalEligibility(user.id, id);
+  }
+
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: "Renew a proof",
+    description:
+      "Supersedes an eligible proof. Without `successorProofId`, issues a successor carrying the " +
+      "same claim with a fresh validity window; with it, links an existing compatible proof " +
+      "(same owner, proof type, issuer, asset, network, and disclosure policy) as the successor. " +
+      "A proof has at most one successor: concurrent renewals cannot fork the chain, and links " +
+      "that would form a cycle are rejected. Repeating an identical request (same body and " +
+      "`Idempotency-Key`) returns the original successor with `replayed: true`; any other " +
+      "request for an already-superseded proof returns 409. The supersession link is recorded " +
+      "off-chain; an issued successor is anchored through the normal registration path.",
+  })
+  @ApiParam({ name: "id", description: "Predecessor proof ID (uuid)." })
+  @ApiHeader({
+    name: "Idempotency-Key",
+    required: false,
+    description: "Client-chosen key (1-128 chars) scoping retries of one renewal.",
+  })
+  @ApiResponse({
+    status: HttpStatus.CREATED,
+    description: "Successor issued or linked (or an identical request replayed).",
+    type: ProofRenewalResponseDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: "Invalid Idempotency-Key.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: "Proof or successor proof not found.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.FORBIDDEN,
+    description: "Proof does not belong to the authenticated user.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description: "Proof was already superseded by a different renewal.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    description:
+      "Proof is not eligible for renewal, or the successor is incompatible.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Bearer token is missing, malformed, invalid, or expired.",
+    type: ApiErrorDto,
+  })
+  @UseGuards(AuthGuard)
+  // Renewal issues a credential, so it shares proof creation's strict budget.
+  @SkipThrottle({ default: true, verification: true })
+  @Throttle({ strict: {} })
+  @Post(":id/renew")
+  renewProof(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") id: string,
+    @Body() body: RenewProofDto,
+    @Headers("idempotency-key") idempotencyKey?: string,
+  ) {
+    return this.proofsService.renewProof(user, id, body, idempotencyKey);
   }
 
   @ApiOperation({

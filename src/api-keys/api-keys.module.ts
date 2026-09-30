@@ -1,3 +1,5 @@
+import { QuotasModule } from "../quotas/quotas.module";
+import { Module } from "@nestjs/common";
 ﻿import { Module } from "@nestjs/common";
 import { AuthModule } from "../auth/auth.module";
 import { ApiKeyService } from "./api-key.service";
@@ -12,7 +14,7 @@ import { RequestNonceService } from "./request-nonce.service";
 import { IntegrationAuthController } from "./integration-auth.controller";
 
 @Module({
-  imports: [AuthModule],
+  imports: [AuthModule, QuotasModule],
   controllers: [ApiKeysController, IntegrationAuthController],
   providers: [
     ApiKeyService,

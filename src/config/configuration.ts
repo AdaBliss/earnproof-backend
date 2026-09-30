@@ -30,6 +30,17 @@ export const configuration = () => ({
     networkPassphrase:
       process.env.STELLAR_NETWORK_PASSPHRASE ??
       "Test SDF Network ; September 2015",
+    finality: {
+      // How far behind the last verified checkpoint a ledger divergence can
+      // reach. Payments in this window are held and re-verified; anything
+      // older is treated as final. 17,280 ledgers is roughly one day at ~5s.
+      historyLedgers: Number(
+        process.env.STELLAR_FINALITY_HISTORY_LEDGERS ?? 17_280,
+      ),
+      // Pages one reconciliation read may walk. A window deeper than this
+      // stays held and is resumed on the next sync rather than read unbounded.
+      reconciliationMaxPages: Number(
+        process.env.STELLAR_FINALITY_RECONCILIATION_MAX_PAGES ?? 10,
     // Per-network circuit breaker around Horizon transport calls. Defaults are
     // conservative: five consecutive transient failures open the circuit for
     // 30s, then a single probe must succeed twice to close it.
@@ -127,6 +138,29 @@ export const configuration = () => ({
     // every replica and load balancer, so without caching the probe load scales
     // with poll rate rather than with anything meaningful.
     cacheTtlMs: Number(process.env.HEALTH_CACHE_TTL_MS ?? 5000),
+  },
+  webhooks: {
+    // Attempts per delivery chain before the terminal attempt is
+    // dead-lettered. Automatic retries never exceed this.
+    maxDeliveryAttempts: Number(process.env.WEBHOOK_MAX_DELIVERY_ATTEMPTS ?? 5),
+    // Upper bound on one bounded-batch redrive request.
+    maxRedriveBatchSize: Number(process.env.WEBHOOK_REDRIVE_MAX_BATCH ?? 25),
+  },
+  proofSharing: {
+    // Longest lifetime a share token may be issued with. A token never
+    // outlives the proof it shares either.
+    maxTtlMinutes: Number(process.env.PROOF_SHARE_TOKEN_MAX_TTL_MINUTES ?? 10_080),
+    defaultTtlMinutes: Number(
+      process.env.PROOF_SHARE_TOKEN_DEFAULT_TTL_MINUTES ?? 1_440,
+    ),
+  },
+  // Per-organization operational quotas. Every organization is held to these
+  // limits independently; see docs/quotas.md.
+  quotas: {
+    maxActiveApiKeys: Number(process.env.QUOTA_MAX_ACTIVE_API_KEYS ?? 25),
+    maxWebhooks: Number(process.env.QUOTA_MAX_WEBHOOKS ?? 10),
+    proofRequestsPerDay: Number(process.env.QUOTA_PROOF_REQUESTS_PER_DAY ?? 1_000),
+    syncsPerHour: Number(process.env.QUOTA_SYNCS_PER_HOUR ?? 12),
   },
   issuerRegistry: {
     enabled: process.env.ISSUER_REGISTRY_ENABLED === "true",

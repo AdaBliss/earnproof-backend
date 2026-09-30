@@ -140,6 +140,25 @@ export class OrganizationsController {
     return this.organizationsService.getOrganization(user, organizationId);
   }
 
+  @Get(":id/usage")
+  @UseGuards(AuthGuard)
+  @ApiOperation({
+    summary: "Get organization quota usage",
+    description:
+      "Current usage, limits, and reset times for the organization's operational quotas " +
+      "(active API keys, webhooks, proof requests per day, payment syncs per hour). " +
+      "Only the organization creator or an admin may view it.",
+  })
+  @ApiResponse({ status: 200, description: "Quota usage report" })
+  @ApiResponse({ status: 403, description: "Not the creator or an admin" })
+  @ApiResponse({ status: 404, description: "Organization not found" })
+  getUsage(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") organizationId: string,
+  ) {
+    return this.organizationsService.getUsage(user, organizationId);
+  }
+
   @Patch(":id")
   @UseGuards(AuthGuard, RoleGuard)
   @ApiOperation({

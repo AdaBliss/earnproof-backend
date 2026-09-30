@@ -27,6 +27,7 @@ import { PaymentsModule } from "./payments/payments.module";
 import { ProofsModule } from "./proofs/proofs.module";
 import { TrustedSourcesModule } from "./trusted-sources/trusted-sources.module";
 import { WebhooksModule } from "./webhooks/webhooks.module";
+import { SupportedAssetsModule } from "./supported-assets/supported-assets.module";
 
 @Module({
   imports: [
@@ -57,6 +58,7 @@ import { WebhooksModule } from "./webhooks/webhooks.module";
     TrustedSourcesModule,
     JobsModule,
     WebhooksModule,
+    SupportedAssetsModule,
   ],
   providers: [
     {

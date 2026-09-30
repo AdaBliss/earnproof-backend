@@ -96,7 +96,7 @@ Tenant boundary. Every multi-tenant resource hangs off an organization.
 
 | | |
 |---|---|
-| **Public interface** | `/organizations` CRUD and membership |
+| **Public interface** | `/organizations` CRUD and membership, `GET /organizations/:id/usage` (quota usage) |
 | **Owned tables** | `Organization` |
 | **Key files** | [`organizations.service.ts`](../src/organizations/organizations.service.ts) |
 | **Must not depend on** | `proofs`, `payments`, `credentials`, `jobs` |
@@ -132,8 +132,8 @@ The core domain. Issuance, verification, revocation, and anchoring intent.
 
 | | |
 |---|---|
-| **Public interface** | `/proofs/minimum-income`, `/proofs/recurring-income`, `/proofs/payment-receipt`, `GET /proofs`, `/proofs/:id/verify`, `/proofs/:id/revoke` |
-| **Owned tables** | `Proof`, `ProofClaim`, `AnchoringIntent`, `VerificationEvent` |
+| **Public interface** | `/proofs/minimum-income`, `/proofs/recurring-income`, `/proofs/payment-receipt`, `GET /proofs`, `/proofs/:id/verify`, `/proofs/:id/revoke`, `/proofs/:id/share-tokens`, `POST /proof-shares/resolve` |
+| **Owned tables** | `Proof`, `ProofClaim`, `AnchoringIntent`, `VerificationEvent`, `ProofShareToken` |
 | **Key files** | [`proofs.service.ts`](../src/proofs/proofs.service.ts), [`contract-anchoring.service.ts`](../src/proofs/contract-anchoring.service.ts) |
 | **Must not depend on** | `auth` internals, `api-keys` internals |
 
@@ -166,7 +166,7 @@ Signed outbound event delivery.
 
 | | |
 |---|---|
-| **Public interface** | `/webhooks` CRUD, delivery replay |
+| **Public interface** | `/webhooks` CRUD, delivery replay, dead-letter inspection and redrive |
 | **Owned tables** | `Webhook`, `WebhookDelivery` |
 | **Key files** | [`webhooks.service.ts`](../src/webhooks/webhooks.service.ts), [`webhook-delivery.service.ts`](../src/webhooks/webhook-delivery.service.ts), [`webhook-signing.service.ts`](../src/webhooks/webhook-signing.service.ts), [`webhook-ssrf-guard.ts`](../src/webhooks/webhook-ssrf-guard.ts) |
 | **Must not depend on** | `proofs` internals, `payments` internals |
@@ -208,6 +208,17 @@ Horizon client and memo normalization. The only module that talks to Horizon.
 | | |
 |---|---|
 | **Key files** | [`stellar.service.ts`](../src/stellar/stellar.service.ts), [`memo-normalizer.ts`](../src/stellar/memo-normalizer.ts) |
+| **Must not depend on** | any domain module |
+
+### `quotas` — [`src/quotas/`](../src/quotas/)
+
+Per-organization operational quotas; see [quotas.md](quotas.md).
+
+| | |
+|---|---|
+| **Public interface** | none — enforced inside other modules' transactions; usage is served by `organizations` |
+| **Owned tables** | `OrganizationQuotaUsage` |
+| **Key files** | [`organization-quota.service.ts`](../src/quotas/organization-quota.service.ts) |
 | **Must not depend on** | any domain module |
 
 ### `common`, `config`, `database`, `health`, `trusted-sources`
@@ -393,6 +404,7 @@ anything downstream reads them.
 | Class | Where | Handling |
 |---|---|---|
 | Session tokens | `AuthSession.tokenHash` | SHA-256 only; raw token never stored |
+| Proof share tokens | `ProofShareToken.tokenHash` | SHA-256 only; raw token returned once at issuance |
 | API keys | `ApiKey.hash` | Hashed; prefix stored separately for lookup |
 | Payment amounts | `Payment` | AES-256-GCM at rest |
 | Wallet addresses | `User.walletHash` | Hashed for indexing |

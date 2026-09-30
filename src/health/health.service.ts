@@ -5,6 +5,10 @@ import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../database/prisma.service";
 import { MigrationLeaseService } from "../database/migration-lease.service";
 import {
+  DeploymentMetadataService,
+  DeploymentMetadataState,
+} from "./deployment-metadata.service";
+import {
   DependencyKind,
   DependencyResult,
   DependencyStatus,
@@ -59,6 +63,8 @@ export class HealthService {
    * exactly the overload the probe was meant to detect.
    */
   private readonly inFlight = new Map<string, Promise<DependencyResult>>();
+
+  private readonly deployment: DeploymentMetadataService;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -138,6 +144,15 @@ export class HealthService {
       status: blocked ? "not_ready" : "ready",
       dependencies,
     };
+  }
+
+  /**
+   * The validated deployment metadata, or why it cannot be served. Shares its
+   * source with the `deployment_manifest` readiness probe, so the endpoint and
+   * readiness can never disagree about whether the manifest is valid.
+   */
+  deploymentMetadata(): DeploymentMetadataState {
+    return this.deployment.state();
   }
 
   /**
@@ -374,6 +389,39 @@ export class HealthService {
         throw new ProbeFailure(`upstream_status_${response.status}`);
       }
     });
+  }
+
+  /**
+   * Validate the deployment manifest. Reasons are the manifest loader's stable
+   * codes, which name fixed fields and contract names but never manifest
+   * values.
+   */
+  private probeDeploymentManifest(): DependencyResult {
+    const state = this.deployment.state();
+    const base = {
+      name: "deployment_manifest",
+      kind: DependencyKind.REQUIRED,
+      durationMs: 0,
+    };
+
+    if (state.status === "absent") {
+      return {
+        ...base,
+        kind: DependencyKind.OPTIONAL,
+        status: DependencyStatus.NOT_CONFIGURED,
+        reason: "deployment_manifest_absent",
+      };
+    }
+
+    if (state.status === "invalid") {
+      return {
+        ...base,
+        status: DependencyStatus.ERROR,
+        reason: state.reasons.join(","),
+      };
+    }
+
+    return { ...base, status: DependencyStatus.OK };
   }
 
   /** Report whether contract anchoring is switched on and fully configured. */

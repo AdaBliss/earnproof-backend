@@ -1,3 +1,4 @@
+import { QuotasModule } from "../quotas/quotas.module";
 import { Module } from "@nestjs/common";
 import { AuditModule } from "../audit/audit.module";
 import { AuthModule } from "../auth/auth.module";

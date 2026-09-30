@@ -249,6 +249,8 @@ model User {
   proofs             Proof[]
   createdApiKeys     ApiKey[]
   sessions           AuthSession[]
+  organizationMemberships OrganizationMember[] @relation("organizationMemberships")
+  paymentBackfillJobs PaymentBackfillJob[]
   organizationMemberships OrganizationMember[]
   createdImportJobs  MembershipImportJob[] @relation("CreatedImportJobs")
   createdAccessReviews AccessReviewCampaign[] @relation("CreatedAccessReviews")

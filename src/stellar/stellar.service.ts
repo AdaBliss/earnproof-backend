@@ -6,6 +6,8 @@ import {
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
+  AscendingPageOptions,
+  AscendingPaymentsPage,
   HorizonClient,
   HorizonCancelledError,
   HorizonReadOptions,

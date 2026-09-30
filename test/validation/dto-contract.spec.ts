@@ -1,5 +1,6 @@
 import { CreateChallengeDto } from "../../src/auth/dto/create-challenge.dto";
 import { VerifyChallengeDto } from "../../src/auth/dto/verify-challenge.dto";
+import { CreatePaymentBackfillDto } from "../../src/payments/dto/create-payment-backfill.dto";
 import { CreatePaymentReceiptProofDto } from "../../src/proofs/dto/create-payment-receipt-proof.dto";
 import {
   CreateAggregateEarningsProofDto,

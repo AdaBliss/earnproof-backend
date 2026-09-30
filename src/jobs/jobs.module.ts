@@ -1,4 +1,5 @@
 import { Module } from "@nestjs/common";
+import { PaymentsModule } from "../payments/payments.module";
 import { ApiKeysModule } from "../api-keys/api-keys.module";
 import { ContractAnchoringService } from "../proofs/contract-anchoring.service";
 import { ProofsModule } from "../proofs/proofs.module";
@@ -12,6 +13,7 @@ import { ProofReconciliationService } from "../proofs/proof-reconciliation.servi
 import { IssuerReconciliationService } from "../issuers/issuer-reconciliation.service";
 import { AnchoringReconcilerService } from "./anchoring-reconciler.service";
 import { AnchoringWorkerService } from "./anchoring-worker.service";
+import { PaymentBackfillWorkerService } from "./payment-backfill-worker.service";
 import { AttestationReconcilerService } from "./attestation-reconciler.service";
 import { JobExecutionController } from "./execution/job-execution.controller";
 import { JobExecutionMaintenanceJob } from "./execution/job-execution-maintenance.job";
@@ -25,6 +27,7 @@ import { RetentionJob } from "./retention/retention.job";
  * rather than inventing a second one — the same choice HealthModule makes.
  */
 @Module({
+  imports: [PaymentsModule],
   imports: [
     ProofsModule,
     DisclosureModule,
@@ -35,6 +38,7 @@ import { RetentionJob } from "./retention/retention.job";
   providers: [
     ContractAnchoringService,
     AnchoringWorkerService,
+    PaymentBackfillWorkerService,
     AnchoringReconcilerService,
     ProofExpirationReconcilerService,
     ProofSharingCleanupJob,

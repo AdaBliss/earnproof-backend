@@ -1,8 +1,12 @@
 import { CreateChallengeDto } from "../../src/auth/dto/create-challenge.dto";
 import { VerifyChallengeDto } from "../../src/auth/dto/verify-challenge.dto";
-import { CreateEmployerPaymentProofDto } from "../../src/proofs/dto/create-employer-payment-proof.dto";
-import { CreateEmploymentContinuityProofDto } from "../../src/proofs/dto/create-employment-continuity-proof.dto";
+import { CreatePaymentBackfillDto } from "../../src/payments/dto/create-payment-backfill.dto";
 import { CreatePaymentReceiptProofDto } from "../../src/proofs/dto/create-payment-receipt-proof.dto";
+import {
+  CreateAggregateEarningsProofDto,
+  MAX_AGGREGATE_ASSETS,
+  MAX_AGGREGATE_ISSUER_IDS,
+} from "../../src/proofs/dto/create-aggregate-earnings-proof.dto";
 import { CreateMinimumIncomeProofDto } from "../../src/proofs/dto/create-minimum-income-proof.dto";
 import {
   CreateRecurringIncomeProofDto,
@@ -265,125 +269,65 @@ describe("CreateRecurringIncomeProofDto validation contract", () => {
 });
 
 // ---------------------------------------------------------------------------
-// CreateEmployerPaymentProofDto
+// CreateAggregateEarningsProofDto
 // ---------------------------------------------------------------------------
 
-describe("CreateEmployerPaymentProofDto validation contract", () => {
+describe("CreateAggregateEarningsProofDto validation contract", () => {
   const valid = {
-    trustedSourceId: "ts_123",
-    assetCode: "USDC",
-    periodStart: "2026-08-01T00:00:00.000Z",
-    periodEnd: "2026-09-01T00:00:00.000Z",
+    assets: [{ code: "USDC", issuer: VALID_WALLET }],
+    periodStart: "2026-01-01T00:00:00.000Z",
+    periodEnd: "2026-04-01T00:00:00.000Z",
   };
 
   it("accepts the minimal valid request (all optionals omitted)", async () => {
-    expect(await isValidDto(CreateEmployerPaymentProofDto, valid)).toBe(true);
+    expect(await isValidDto(CreateAggregateEarningsProofDto, valid)).toBe(true);
   });
 
   it("accepts every optional field populated at its boundary", async () => {
     expect(
-      await isValidDto(CreateEmployerPaymentProofDto, {
+      await isValidDto(CreateAggregateEarningsProofDto, {
         ...valid,
-        assetIssuer: VALID_WALLET,
+        assets: Array.from({ length: MAX_AGGREGATE_ASSETS }, () => ({ code: "XLM" })),
+        sourceScope: "verified_issuers",
+        issuerIds: Array.from({ length: MAX_AGGREGATE_ISSUER_IDS }, (_, i) => `iss_${i}`),
+        roundingIncrement: "0.0000001",
         expiresInDays: 365,
       }),
     ).toBe(true);
   });
 
   it.each([
-    ["missing trustedSourceId", { ...valid, trustedSourceId: undefined }],
-    ["empty trustedSourceId", { ...valid, trustedSourceId: "" }],
-    ["oversized trustedSourceId", { ...valid, trustedSourceId: "x".repeat(65) }],
-    ["missing assetCode", { ...valid, assetCode: undefined }],
-    ["oversized assetCode", { ...valid, assetCode: "A".repeat(13) }],
-    ["oversized assetIssuer", { ...valid, assetIssuer: "G".repeat(57) }],
-    ["non-date periodStart", { ...valid, periodStart: "yesterday" }],
-    ["missing periodEnd", { ...valid, periodEnd: undefined }],
-    ["expiresInDays above maximum (366)", { ...valid, expiresInDays: 366 }],
-    ["expiresInDays below minimum (0)", { ...valid, expiresInDays: 0 }],
-  ])("rejects a request with %s", async (_label, plain) => {
-    const violations = await validateDto(CreateEmployerPaymentProofDto, plain);
-    expect(violations.length).toBeGreaterThan(0);
-  });
-
-  it.each([
-    ["paymentId", { paymentId: "pay_1" }],
-    ["operationId", { operationId: "123" }],
-    ["memo", { memo: "salary" }],
-  ])("rejects a caller-chosen %s (claim selection is server-side)", async (_label, extra) => {
-    const violations = await validateDto(CreateEmployerPaymentProofDto, {
-      ...valid,
-      ...extra,
-    });
-    expect(violations.length).toBeGreaterThan(0);
+    ["missing assets", { ...valid, assets: undefined }, "assets"],
+    ["empty assets", { ...valid, assets: [] }, "assets"],
+    [
+      "too many assets",
+      { ...valid, assets: Array.from({ length: MAX_AGGREGATE_ASSETS + 1 }, () => ({ code: "XLM" })) },
+      "assets",
+    ],
+    ["an asset without a code", { ...valid, assets: [{ issuer: VALID_WALLET }] }, "assets"],
+    ["an asset with an unknown field", { ...valid, assets: [{ code: "XLM", rate: "1" }] }, "assets"],
+    ["a non-date periodStart", { ...valid, periodStart: "yesterday" }, "periodStart"],
+    ["a missing periodEnd", { ...valid, periodEnd: undefined }, "periodEnd"],
+    ["an unknown sourceScope", { ...valid, sourceScope: "everyone" }, "sourceScope"],
+    ["an unsupported roundingIncrement", { ...valid, roundingIncrement: "5" }, "roundingIncrement"],
+    ["an empty issuerIds", { ...valid, issuerIds: [] }, "issuerIds"],
+    ["duplicate issuerIds", { ...valid, issuerIds: ["iss_1", "iss_1"] }, "issuerIds"],
+    [
+      "too many issuerIds",
+      { ...valid, issuerIds: Array.from({ length: MAX_AGGREGATE_ISSUER_IDS + 1 }, (_, i) => `iss_${i}`) },
+      "issuerIds",
+    ],
+    ["expiresInDays of 0", { ...valid, expiresInDays: 0 }, "expiresInDays"],
+    ["expiresInDays of 366", { ...valid, expiresInDays: 366 }, "expiresInDays"],
+  ])("rejects %s", async (_label, plain, property) => {
+    const violations = await validateDto(CreateAggregateEarningsProofDto, plain);
+    expect(violations.some((v) => v.property === property)).toBe(true);
   });
 
   it("rejects an unknown field", async () => {
-    const violations = await validateDto(CreateEmployerPaymentProofDto, {
+    const violations = await validateDto(CreateAggregateEarningsProofDto, {
       ...valid,
       ...COMMON_UNKNOWN_FIELD,
-    });
-    expect(violations.length).toBeGreaterThan(0);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// CreateEmploymentContinuityProofDto
-// ---------------------------------------------------------------------------
-
-describe("CreateEmploymentContinuityProofDto validation contract", () => {
-  const valid = {
-    trustedSourceId: "ts_123",
-    assetCode: "USDC",
-    periodStart: "2026-01-01T00:00:00.000Z",
-    observedPeriods: 6,
-  };
-
-  it("accepts the minimal valid request (all optionals omitted)", async () => {
-    expect(await isValidDto(CreateEmploymentContinuityProofDto, valid)).toBe(
-      true,
-    );
-  });
-
-  it("accepts observedPeriods at both boundaries", async () => {
-    for (const observedPeriods of [3, 24]) {
-      expect(
-        await isValidDto(CreateEmploymentContinuityProofDto, {
-          ...valid,
-          observedPeriods,
-          assetIssuer: VALID_WALLET,
-          expiresInDays: 365,
-        }),
-      ).toBe(true);
-    }
-  });
-
-  it.each([
-    ["missing trustedSourceId", { ...valid, trustedSourceId: undefined }],
-    ["empty trustedSourceId", { ...valid, trustedSourceId: "" }],
-    ["missing assetCode", { ...valid, assetCode: undefined }],
-    ["non-date periodStart", { ...valid, periodStart: "January" }],
-    ["observedPeriods below minimum (2)", { ...valid, observedPeriods: 2 }],
-    ["observedPeriods above maximum (25)", { ...valid, observedPeriods: 25 }],
-    ["non-integer observedPeriods", { ...valid, observedPeriods: 3.5 }],
-    ["string observedPeriods", { ...valid, observedPeriods: "6" }],
-    ["expiresInDays above maximum (366)", { ...valid, expiresInDays: 366 }],
-  ])("rejects a request with %s", async (_label, plain) => {
-    const violations = await validateDto(
-      CreateEmploymentContinuityProofDto,
-      plain,
-    );
-    expect(violations.length).toBeGreaterThan(0);
-  });
-
-  it.each([
-    ["selectedPaymentIds", { selectedPaymentIds: ["pay_1"] }],
-    ["toleratedMissingPeriods", { toleratedMissingPeriods: 5 }],
-    ["policyVersion", { policyVersion: "v0" }],
-  ])("rejects a caller-chosen %s (policy is server-side)", async (_label, extra) => {
-    const violations = await validateDto(CreateEmploymentContinuityProofDto, {
-      ...valid,
-      ...extra,
     });
     expect(violations.length).toBeGreaterThan(0);
   });

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DEPLOYMENT_MANIFEST_MAX_BYTES } from "./deployment-manifest";
 
 /**
  * ──────────────────────────────────────────────────────────────────────────
@@ -163,6 +164,10 @@ const retentionDays = (fieldName: string) =>
     .max(3650, `${fieldName} must be at most 3650 days (maximum 10 years)`)
     .finite(`${fieldName} must be a finite number`);
 
+/** Optional bounded integer with a default, for operational limits. */
+const positiveInt = (min: number, max: number, fallback: number) =>
+  z.coerce.number().int().min(min).max(max).optional().default(fallback);
+
 // ── Helper: Rate limit counter validator ──
 // Bounds: 1–1000 per window. Higher values defeat the purpose of rate limiting.
 const rateLimitCounter = (fieldName: string) =>
@@ -250,6 +255,24 @@ const envSchema = z.object({
     .string()
     .min(1, "STELLAR_NETWORK_PASSPHRASE must be non-empty")
     .default("Test SDF Network ; September 2015"),
+
+  /** Ledgers behind the last verified checkpoint that a divergence may reach */
+  STELLAR_FINALITY_HISTORY_LEDGERS: z
+    .coerce.number()
+    .int("STELLAR_FINALITY_HISTORY_LEDGERS must be an integer")
+    .positive("STELLAR_FINALITY_HISTORY_LEDGERS must be positive")
+    .max(1_000_000, "STELLAR_FINALITY_HISTORY_LEDGERS is unreasonably large")
+    .finite("STELLAR_FINALITY_HISTORY_LEDGERS must be a finite number")
+    .default(17_280),
+
+  /** Horizon pages one ledger reconciliation read may walk */
+  STELLAR_FINALITY_RECONCILIATION_MAX_PAGES: z
+    .coerce.number()
+    .int("STELLAR_FINALITY_RECONCILIATION_MAX_PAGES must be an integer")
+    .positive("STELLAR_FINALITY_RECONCILIATION_MAX_PAGES must be positive")
+    .max(100, "STELLAR_FINALITY_RECONCILIATION_MAX_PAGES must not exceed 100")
+    .finite("STELLAR_FINALITY_RECONCILIATION_MAX_PAGES must be a finite number")
+    .default(10),
 
   // ──────────────────────────────────────────────────────────────────────
   // SECRETS (Required, never logged or exposed in error messages)
@@ -368,6 +391,26 @@ const envSchema = z.object({
   ISSUER_REGISTRY_CONTRACT_ID: optionalString(stellarContractId),
 
   // ──────────────────────────────────────────────────────────────────────
+  // DEPLOYMENT MANIFEST (Optional)
+  // ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * Deployment manifest JSON (network, contract addresses, artifact hashes).
+   * Only bounded here; its structure and consistency with the Stellar and
+   * contract variables are validated by deployment-manifest.ts and reported
+   * through readiness, so a bad manifest takes the replica out of rotation
+   * with a stable reason code instead of crash-looping it.
+   */
+  DEPLOYMENT_MANIFEST: optionalString(
+    z
+      .string()
+      .max(
+        DEPLOYMENT_MANIFEST_MAX_BYTES,
+        `DEPLOYMENT_MANIFEST must not exceed ${DEPLOYMENT_MANIFEST_MAX_BYTES} characters`,
+      ),
+  ),
+
+  // ──────────────────────────────────────────────────────────────────────
   // EARNPROOF INTEGRATION (Optional, used when anchoring is enabled)
   // ──────────────────────────────────────────────────────────────────────
 
@@ -391,6 +434,19 @@ const envSchema = z.object({
     "VERIFICATION_EVENT_RETENTION_DAYS",
   )
     .default(90),
+  WEBHOOK_MAX_DELIVERY_ATTEMPTS: positiveInt(1, 20, 5),
+  WEBHOOK_REDRIVE_MAX_BATCH: positiveInt(1, 100, 25),
+  PROOF_SHARE_TOKEN_MAX_TTL_MINUTES: positiveInt(5, 525_600, 10_080),
+  PROOF_SHARE_TOKEN_DEFAULT_TTL_MINUTES: positiveInt(5, 525_600, 1_440),
+  QUOTA_MAX_ACTIVE_API_KEYS: positiveInt(1, 10_000, 25),
+  QUOTA_MAX_WEBHOOKS: positiveInt(1, 1_000, 10),
+  QUOTA_PROOF_REQUESTS_PER_DAY: positiveInt(1, 10_000_000, 1_000),
+  QUOTA_SYNCS_PER_HOUR: positiveInt(1, 3_600, 12),
+  VERIFICATION_HASH_SALT_VERSION: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
 
   /** Hash salt version for verification metadata privacy */
   VERIFICATION_HASH_SALT_VERSION: nonnegativeInt(
@@ -833,6 +889,14 @@ export function validateEnv(config: Record<string, unknown>) {
     );
   }
 
+  if (
+    parsed.data.PROOF_SHARE_TOKEN_DEFAULT_TTL_MINUTES >
+    parsed.data.PROOF_SHARE_TOKEN_MAX_TTL_MINUTES
+  ) {
+    throw new Error(
+      "Invalid environment: PROOF_SHARE_TOKEN_DEFAULT_TTL_MINUTES must not exceed PROOF_SHARE_TOKEN_MAX_TTL_MINUTES",
+    );
+  }
   // Check cross-variable invariants after individual field validation
   checkCrossVariableInvariants(parsed.data);
 

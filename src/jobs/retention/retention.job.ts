@@ -64,14 +64,27 @@ export class RetentionJob {
       return;
     }
 
-    // Counts only, per class. Never the identity of what was removed.
+    // Counts only, per class. Never the identity of what was removed. The
+    // policy version and cutoff are recorded for every run so a real run can
+    // be matched to the dry run an operator reviewed.
+    const cutoffs = new Map(
+      (result.report?.categories ?? []).map((c) => [c.category, c.cutoff]),
+    );
+    if (result.report) {
+      this.logger.log(
+        `Retention ${result.report.mode} under policy ` +
+          `${result.report.policyVersion} evaluated at ${result.report.evaluatedAt}`,
+      );
+    }
+
     for (const entry of result.results) {
       if (entry.affected === 0 && !entry.truncated) continue;
 
       const suffix = entry.truncated ? " (batch cap reached)" : "";
       this.logger.log(
         `${entry.key}: ${entry.affected} record(s) ` +
-          `${entry.dryRun ? "eligible" : "removed"}${suffix}`,
+          `${entry.dryRun ? "eligible" : "removed"} ` +
+          `(cutoff ${cutoffs.get(entry.key) ?? "unknown"})${suffix}`,
       );
     }
   }

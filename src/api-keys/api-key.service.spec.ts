@@ -1,11 +1,13 @@
 ﻿import { ApiKeyScope, ResourceStatus } from "@prisma/client";
 import { ApiKeyService } from "./api-key.service";
+import { unlimitedQuotas } from "../testing/quotas";
 
 describe("ApiKeyService", () => {
   let service: ApiKeyService;
   let prismaService: any;
 
-  const mockPrisma = () => ({
+  const mockPrisma = () => {
+    const client: Record<string, unknown> = {
     apiKey: {
       create: jest.fn(),
       update: jest.fn(),
@@ -16,10 +18,15 @@ describe("ApiKeyService", () => {
     auditLog: {
       create: jest.fn(),
     },
-  });
+    };
+    // Key creation runs inside a transaction; the mock runs it on itself.
+    client.$transaction = jest.fn(async (fn: (tx: unknown) => unknown) => fn(client));
+    return client;
+  };
 
   beforeEach(() => {
     prismaService = mockPrisma();
+    service = new ApiKeyService(prismaService, unlimitedQuotas() as never);
     service = new ApiKeyService(prismaService, {
       freezeOnRevocation: jest.fn().mockResolvedValue(undefined),
       recordUsage: jest.fn().mockResolvedValue(undefined),

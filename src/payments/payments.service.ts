@@ -28,6 +28,7 @@ import {
 const MAX_READS_PER_SYNC = 2;
 import { operationIndexFromToid } from "../stellar/operation-identity";
 import { NormalizedMemo } from "../stellar/stellar.types";
+import { PaymentEligibilityService } from "./payment-eligibility.service";
 import { PaymentClassificationHistoryService } from "./payment-classification-history.service";
 
 @Injectable()
@@ -163,6 +164,7 @@ export class PaymentsService {
     let enrichmentErrors = 0;
     let conflicts = 0;
     const memoCache = new Map<string, NormalizedMemo>();
+    const syncedPaymentIds: string[] = [];
 
     for (const payment of incomingPayments) {
       const isEligible = supportedAssetKeys.has(
@@ -444,6 +446,13 @@ export class PaymentsService {
       },
     });
 
+    await this.eligibility.evaluatePayments(
+      user.id,
+      [payment.id],
+      "classification_changed",
+    );
+
+    return this.toPaymentDto(updated);
     return this.toPaymentDto(result);
   }
 

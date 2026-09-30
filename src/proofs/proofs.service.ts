@@ -11,6 +11,7 @@ import { ConfigService } from "@nestjs/config";
 import {
   AnchoringOperation,
   AnchoringStatus,
+  AttestationType,
   PaymentClassification,
   Proof,
   ProofClaim,
@@ -78,6 +79,22 @@ const RECURRING_INCOME_SCHEMA_VERSION = "earnproof.recurring-income.v1";
 const INVOICE_SETTLEMENT_SCHEMA_VERSION = "earnproof.invoice-settlement.v1";
 const INCOME_RANGE_SCHEMA_VERSION = "earnproof.income-range.v1";
 const DEFAULT_EXPIRY_DAYS = 30;
+
+const EMPLOYER_PERIOD_MESSAGES: Record<EmployerPaymentPeriodViolation, string> =
+  {
+    invalid_date: "periodStart and periodEnd must be valid dates",
+    empty_or_inverted: "periodStart must be before periodEnd",
+    too_long: `The period must not exceed ${MAX_EMPLOYER_PAYMENT_PERIOD_DAYS} days`,
+    ends_in_future: "periodEnd must not be in the future",
+  };
+
+const CONTINUITY_WINDOW_MESSAGES: Record<ContinuityWindowViolation, string> = {
+  invalid_date: "periodStart must be a valid date",
+  not_period_aligned:
+    "periodStart must be the first instant of a UTC calendar month",
+  invalid_period_count: `observedPeriods must be an integer between ${MIN_CONTINUITY_PERIODS} and ${MAX_CONTINUITY_PERIODS}`,
+  window_not_complete: "The observed window must have ended",
+};
 
 type MinimumIncomeCredential = {
   id: string;

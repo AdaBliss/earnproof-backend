@@ -40,6 +40,9 @@ import { OrganizationMemberGuard } from "./guards/organization-member.guard";
 import { RequiredOrganizationRole } from "./decorators/required-organization-role.decorator";
 import { RecentAuthGuard, RequireRecentAuth } from "../common/guards/recent-auth.guard";
 import { RecentAuthService, DESTRUCTIVE_ACTIONS } from "../auth/recent-auth.service";
+import { OrganizationReadinessService } from "./organization-readiness.service";
+import { OrganizationReadinessResponseDto } from "./dto/organization-readiness-response.dto";
+
 
 @ApiBearerAuth()
 @AuthenticatedRoute({ roles: ["ADMIN"] })
@@ -50,6 +53,7 @@ export class OrganizationsController {
     private readonly organizationsService: OrganizationsService,
     private readonly membersService: OrganizationMembersService,
     private readonly recentAuthService: RecentAuthService,
+     private readonly readinessService: OrganizationReadinessService,
   ) {}
 
   @Post()
@@ -136,6 +140,25 @@ export class OrganizationsController {
     return this.organizationsService.getOrganization(user, organizationId);
   }
 
+  @Get(":id/usage")
+  @UseGuards(AuthGuard)
+  @ApiOperation({
+    summary: "Get organization quota usage",
+    description:
+      "Current usage, limits, and reset times for the organization's operational quotas " +
+      "(active API keys, webhooks, proof requests per day, payment syncs per hour). " +
+      "Only the organization creator or an admin may view it.",
+  })
+  @ApiResponse({ status: 200, description: "Quota usage report" })
+  @ApiResponse({ status: 403, description: "Not the creator or an admin" })
+  @ApiResponse({ status: 404, description: "Organization not found" })
+  getUsage(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") organizationId: string,
+  ) {
+    return this.organizationsService.getUsage(user, organizationId);
+  }
+
   @Patch(":id")
   @UseGuards(AuthGuard, RoleGuard)
   @ApiOperation({
@@ -175,6 +198,33 @@ export class OrganizationsController {
 
   // ==================== MEMBERSHIP ENDPOINTS ====================
 
+  @Get(":id/readiness")
+@UseGuards(AuthGuard, OrganizationMemberGuard)
+@RequiredOrganizationRole("VIEWER")
+@ApiOperation({
+  summary: "Assess organization onboarding readiness",
+  description:
+    "Returns a read-only, versioned readiness assessment for the organization.",
+})
+@ApiResponse({
+  status: 200,
+  description: "Organization readiness assessment returned.",
+  type: OrganizationReadinessResponseDto,
+})
+@ApiResponse({
+  status: 403,
+  description: "User is not authorized for the organization.",
+})
+@ApiResponse({
+  status: 404,
+  description: "Organization not found.",
+})
+async getReadiness(
+  @Param("id") organizationId: string,
+): Promise<OrganizationReadinessResponseDto> {
+  return this.readinessService.assess(organizationId);
+}
+  
   @Post(":id/members")
   @UseGuards(AuthGuard, OrganizationMemberGuard)
   @RequiredOrganizationRole("ADMIN")

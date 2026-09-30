@@ -294,6 +294,10 @@ describe("AuthService.verifyChallenge", () => {
 
   it("records challenge replay event", async () => {
     const prisma = makePrismaMock();
+    // Atomic consumption fails (already used), and the diagnostic lookup
+    // finds the challenge with usedAt set.
+    prisma.walletChallenge.updateMany.mockResolvedValue({ count: 0 });
+    prisma.walletChallenge.findFirst.mockResolvedValue({
     // The guarded consume matches nothing, and the challenge turns out to
     // already carry a usedAt: that is a replay, not an expiry.
     // The atomic consumption update matches 0 rows (already used), and the
@@ -410,6 +414,7 @@ describe("AuthService.verifyChallenge", () => {
     ).rejects.toThrow("Invalid wallet signature");
   });
 
+  it("marks the challenge as used via an atomic conditional update", async () => {
   it("consumes the challenge atomically before verifying the signature", async () => {
     const prisma = makePrismaMock();
     (prisma as Record<string, unknown>).authSession = {

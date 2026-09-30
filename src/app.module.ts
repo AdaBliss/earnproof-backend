@@ -6,6 +6,8 @@ import { AuditModule } from "./audit/audit.module";
 import { ApiKeysModule } from "./api-keys/api-keys.module";
 import { AuthModule } from "./auth/auth.module";
 import { RateLimitModule } from "./common/rate-limit/rate-limit.module";
+import { ConsentModule } from "./common/consent/consent.module";
+import { DisclosureModule } from "./common/disclosure/disclosure.module";
 import { AuthorizationPolicyRegistry } from "./common/guards/authorization-policy.registry";
 import { CommonModule } from "./common/common.module";
 import { configuration } from "./config/configuration";
@@ -25,6 +27,7 @@ import { PaymentsModule } from "./payments/payments.module";
 import { ProofsModule } from "./proofs/proofs.module";
 import { TrustedSourcesModule } from "./trusted-sources/trusted-sources.module";
 import { WebhooksModule } from "./webhooks/webhooks.module";
+import { SupportedAssetsModule } from "./supported-assets/supported-assets.module";
 
 @Module({
   imports: [
@@ -39,6 +42,8 @@ import { WebhooksModule } from "./webhooks/webhooks.module";
     ResilienceModule,
     DatabaseModule,
     CommonModule,
+    ConsentModule,
+    DisclosureModule,
     AuditModule,
     ApiKeysModule,
     AuthModule,
@@ -53,6 +58,7 @@ import { WebhooksModule } from "./webhooks/webhooks.module";
     TrustedSourcesModule,
     JobsModule,
     WebhooksModule,
+    SupportedAssetsModule,
   ],
   providers: [
     {

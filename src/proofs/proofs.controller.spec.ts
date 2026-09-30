@@ -4,6 +4,7 @@ import { ProofsController } from "./proofs.controller";
 import { ListProofsDto } from "./dto/list-proofs.dto";
 import { buildAuthorizationMatrix } from "../common/guards/authorization-policy.registry";
 import { CreateEmployerPaymentProofDto } from "./dto/create-employer-payment-proof.dto";
+import { CreateEmploymentContinuityProofDto } from "./dto/create-employment-continuity-proof.dto";
 import { CreateMinimumIncomeProofDto } from "./dto/create-minimum-income-proof.dto";
 import { CreatePaymentReceiptProofDto } from "./dto/create-payment-receipt-proof.dto";
 import { CreateRecurringIncomeProofDto } from "./dto/create-recurring-income-proof.dto";
@@ -23,6 +24,7 @@ type ProofsServiceMock = {
   createMinimumIncomeProof: jest.Mock;
   createRecurringIncomeProof: jest.Mock;
   createEmployerPaymentProof: jest.Mock;
+  createEmploymentContinuityProof: jest.Mock;
   revokeProof: jest.Mock;
   verifyProof: jest.Mock;
   getVerificationStats: jest.Mock;
@@ -49,6 +51,7 @@ describe("ProofsController", () => {
       createMinimumIncomeProof: jest.fn(),
       createRecurringIncomeProof: jest.fn(),
       createEmployerPaymentProof: jest.fn(),
+      createEmploymentContinuityProof: jest.fn(),
       revokeProof: jest.fn(),
       verifyProof: jest.fn(),
       getVerificationStats: jest.fn(),
@@ -417,6 +420,40 @@ describe("ProofsController", () => {
 
       expect(route).toMatchObject({
         path: "/proofs/employer-payment",
+        httpMethod: "POST",
+        policy: { access: "authenticated", ownership: "user" },
+      });
+    });
+  });
+
+  describe("createEmploymentContinuityProof", () => {
+    const body: CreateEmploymentContinuityProofDto = {
+      trustedSourceId: "ts_1",
+      assetCode: "USDC",
+      periodStart: "2026-01-01T00:00:00.000Z",
+      observedPeriods: 6,
+    };
+
+    it("delegates to the service with the authenticated user", async () => {
+      const created = { proofId, status: "ACTIVE" };
+      proofsService.createEmploymentContinuityProof.mockResolvedValueOnce(created);
+
+      await expect(
+        controller.createEmploymentContinuityProof(authenticatedUser, body),
+      ).resolves.toEqual(created);
+      expect(proofsService.createEmploymentContinuityProof).toHaveBeenCalledWith(
+        authenticatedUser,
+        body,
+      );
+    });
+
+    it("is an authenticated, owner-scoped POST route", () => {
+      const route = buildAuthorizationMatrix([ProofsController]).find(
+        (entry) => entry.method === "createEmploymentContinuityProof",
+      );
+
+      expect(route).toMatchObject({
+        path: "/proofs/employment-continuity",
         httpMethod: "POST",
         policy: { access: "authenticated", ownership: "user" },
       });

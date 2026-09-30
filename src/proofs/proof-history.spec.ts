@@ -1,6 +1,7 @@
 import { BadRequestException, NotFoundException } from "@nestjs/common";
 import { ProofStatus, ProofType } from "@prisma/client";
 import { ProofsService } from "./proofs.service";
+import { unlimitedQuotas } from "../testing/quotas";
 import { AttestationsService } from "../attestations/attestations.service";
 
 describe("ProofsService proof history", () => {
@@ -62,6 +63,7 @@ describe("ProofsService proof history", () => {
       prisma as never,
       config as never,
       events as never,
+      unlimitedQuotas() as never,
       mockAttestationsService,
     );
 
@@ -107,6 +109,7 @@ describe("ProofsService proof history", () => {
       prisma as never,
       config as never,
       events as never,
+      unlimitedQuotas() as never,
       mockAttestationsService,
     );
 
@@ -122,6 +125,7 @@ describe("ProofsService proof history", () => {
       prisma as never,
       config as never,
       events as never,
+      unlimitedQuotas() as never,
       mockAttestationsService,
     );
 
@@ -158,6 +162,7 @@ describe("ProofsService proof history", () => {
       prisma as never,
       config as never,
       events as never,
+      unlimitedQuotas() as never,
       mockAttestationsService,
     );
 
@@ -204,6 +209,7 @@ describe("ProofsService proof history", () => {
       prisma as never,
       config as never,
       events as never,
+      unlimitedQuotas() as never,
       mockAttestationsService,
       contract as never,
     );

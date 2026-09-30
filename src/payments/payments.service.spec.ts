@@ -36,6 +36,7 @@ describe("PaymentsService", () => {
       return values[key];
     }),
   };
+  const keyring = () => new PaymentEncryptionKeyringService(config as never);
 
   it("syncs incoming payments idempotently", async () => {
     const prisma = {
@@ -103,13 +104,20 @@ describe("PaymentsService", () => {
           isEligible: true,
           amountEncrypted: expect.stringMatching(/^enc:v0:/),
           memo: {
+            version: 2,
             type: "text",
-            value: "Salary June",
-            truncated: false,
+            ciphertext: expect.stringMatching(/^enc:v0:/),
           },
         }),
       }),
     );
+    const stored = prisma.payment.upsert.mock.calls[0][0].create.memo;
+    expect(JSON.stringify(stored)).not.toContain("Salary June");
+    expect(decodeStoredMemo(stored, keyring())).toEqual({
+      type: "text",
+      value: "Salary June",
+      truncated: false,
+    });
   });
 
   it("deduplicates transaction memo lookups within one sync", async () => {
@@ -199,7 +207,9 @@ describe("PaymentsService", () => {
     ).resolves.toMatchObject({ created: 1, enrichmentErrors: 1 });
     expect(prisma.payment.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        create: expect.objectContaining({ memo: { type: "none" } }),
+        create: expect.objectContaining({
+          memo: { version: 2, type: "none" },
+        }),
       }),
     );
   });
@@ -270,7 +280,10 @@ describe("PaymentsService", () => {
       assetIssuer: null,
       amountEncrypted: "enc:v1:private",
       occurredAt: new Date("2026-07-13T00:00:00Z"),
-      memo: { type: "text", value: "Salary June", truncated: false },
+      memo: encodeStoredMemo(
+        { memo: { type: "text", value: "Salary June", truncated: false } },
+        keyring(),
+      ) as unknown,
       classification: PaymentClassification.INCOME,
       isEligible: true,
       createdAt: new Date("2026-07-13T00:00:00Z"),
@@ -293,8 +306,9 @@ describe("PaymentsService", () => {
     const [listed] = await service.listPayments("user_1", {});
     const detail = await service.getPayment("user_1", "payment_1");
 
-    expect(listed.memoContext).toEqual(payment.memo);
-    expect(detail.memoContext).toEqual(payment.memo);
+    const expected = { type: "text", value: "Salary June", truncated: false };
+    expect(listed.memoContext).toEqual(expected);
+    expect(detail.memoContext).toEqual(expected);
     expect(listed).not.toHaveProperty("memo");
     expect(listed).not.toHaveProperty("amountEncrypted");
     expect(prisma.payment.findFirst).toHaveBeenCalledWith({

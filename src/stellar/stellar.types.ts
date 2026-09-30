@@ -24,6 +24,9 @@ export type HorizonTransactionRecord = {
   memo?: string | Uint8Array;
 };
 
+/** Why a memo present on-chain was not kept. */
+export type MemoOmission = "unsupported" | "malformed" | "oversized";
+
 export type NormalizedMemo =
   | { type: "none" }
   | { type: "text"; value: string; truncated: boolean }

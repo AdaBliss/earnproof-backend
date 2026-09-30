@@ -37,6 +37,14 @@ const config = {
   }),
 } as unknown as ConfigService;
 
+/** Decodes a stored (encrypted, version-2) memo back to its normalized form. */
+function decoded(memo: unknown) {
+  return decodeStoredMemo(
+    memo as never,
+    new PaymentEncryptionKeyringService(config),
+  );
+}
+
 /** Prisma double recording the writes the sync performs. */
 function prismaDouble(existingOperationIds: string[] = []) {
   const upserts: Array<{ operationId: string; memo: unknown }> = [];
@@ -200,7 +208,9 @@ describe("memo consistency", () => {
     await service.syncPayments({ id: "user_1", walletAddress: ACCOUNT });
 
     for (const upsert of prisma.upserts) {
-      expect(upsert.memo).toEqual({
+      expect(upsert.memo).toMatchObject({ version: 2, type: "text" });
+      expect(JSON.stringify(upsert.memo)).not.toContain("Invoice 42");
+      expect(decoded(upsert.memo)).toEqual({
         type: "text",
         value: "Invoice 42",
         truncated: false,
@@ -230,7 +240,11 @@ describe("memo consistency", () => {
 
     await service.syncPayments({ id: "user_1", walletAddress: ACCOUNT });
 
-    const memos = prisma.upserts.map((upsert) => JSON.stringify(upsert.memo));
+    // Each transaction's memo is encrypted with a fresh IV, so the comparison
+    // is on the decoded value rather than on the stored ciphertext.
+    const memos = prisma.upserts.map((upsert) =>
+      JSON.stringify(decoded(upsert.memo)),
+    );
     expect(new Set(memos).size).toBe(1);
   });
 
@@ -242,7 +256,7 @@ describe("memo consistency", () => {
     await service.syncPayments({ id: "user_1", walletAddress: ACCOUNT });
 
     for (const upsert of prisma.upserts) {
-      expect(upsert.memo).toEqual({ type: "none" });
+      expect(upsert.memo).toEqual({ version: 2, type: "none" });
     }
   });
 

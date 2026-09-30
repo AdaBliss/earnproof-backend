@@ -452,6 +452,8 @@ model Payment {
   assetIssuer            String?
   amountEncrypted        String?
   occurredAt             DateTime
+  /// Versioned memo (v2): {version, type, ciphertext} or {version, type: "none", omitted?}.
+  /// Plaintext is never stored. See src/payments/payment-memo.ts and docs/payment-memos.md.
   memo                   Json?
   classification         PaymentClassification  @default(UNKNOWN)
   isEligible             Boolean                @default(false)

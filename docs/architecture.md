@@ -397,7 +397,9 @@ backend being used as a proxy into its own network.
 
 **Horizon data is public but not neutral.** Memos are user-supplied. They are
 normalized in [`memo-normalizer.ts`](../src/stellar/memo-normalizer.ts) before
-anything downstream reads them.
+anything downstream reads them, and stored only in the encrypted, versioned
+form described in [payment-memos.md](payment-memos.md). Proof eligibility never
+reads them.
 
 ## Protected data
 
@@ -407,6 +409,7 @@ anything downstream reads them.
 | Proof share tokens | `ProofShareToken.tokenHash` | SHA-256 only; raw token returned once at issuance |
 | API keys | `ApiKey.hash` | Hashed; prefix stored separately for lookup |
 | Payment amounts | `Payment` | AES-256-GCM at rest |
+| Payment memos | `Payment.memo` | Allowlisted, byte-bounded, AES-256-GCM at rest ([details](payment-memos.md)) |
 | Wallet addresses | `User.walletHash` | Hashed for indexing |
 | Webhook secrets | `Webhook.secretEncrypted` | Encrypted |
 | Credential payloads | `Proof.signedPayload` | Signed; contains no raw payment history |

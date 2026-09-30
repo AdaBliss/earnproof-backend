@@ -2,6 +2,12 @@ import { Module } from "@nestjs/common";
 import { PaymentsModule } from "../payments/payments.module";
 import { ApiKeysModule } from "../api-keys/api-keys.module";
 import { ContractAnchoringService } from "../proofs/contract-anchoring.service";
+import { ProofsModule } from "../proofs/proofs.module";
+import { AnchoringReconcilerService } from "./anchoring-reconciler.service";
+import { AnchoringWorkerService } from "./anchoring-worker.service";
+import { ProofSharingCleanupJob } from "./proof-sharing-cleanup.job";
+import { DisclosureCleanupJob } from "./disclosure-cleanup.job";
+import { DisclosureModule } from "../common/disclosure/disclosure.module";
 import { ProofReconciliationService } from "../proofs/proof-reconciliation.service";
 import { IssuerReconciliationService } from "../issuers/issuer-reconciliation.service";
 import { AnchoringReconcilerService } from "./anchoring-reconciler.service";
@@ -21,6 +27,10 @@ import { RetentionJob } from "./retention/retention.job";
  */
 @Module({
   imports: [PaymentsModule],
+  imports: [
+    ProofsModule,
+    DisclosureModule,
+  ],
   imports: [WebhooksModule],
   imports: [ApiKeysModule],
   controllers: [JobExecutionController],
@@ -29,6 +39,8 @@ import { RetentionJob } from "./retention/retention.job";
     AnchoringWorkerService,
     PaymentBackfillWorkerService,
     AnchoringReconcilerService,
+    ProofSharingCleanupJob,
+    DisclosureCleanupJob,
     ProofReconciliationService,
     IssuerReconciliationService,
     RetentionCleanupService,
@@ -39,6 +51,8 @@ import { RetentionJob } from "./retention/retention.job";
   exports: [
     AnchoringWorkerService,
     AnchoringReconcilerService,
+    ProofSharingCleanupJob,
+    DisclosureCleanupJob,
     ProofReconciliationService,
     IssuerReconciliationService,
     RetentionCleanupService,

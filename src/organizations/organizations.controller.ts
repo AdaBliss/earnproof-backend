@@ -40,6 +40,9 @@ import { OrganizationMemberGuard } from "./guards/organization-member.guard";
 import { RequiredOrganizationRole } from "./decorators/required-organization-role.decorator";
 import { RecentAuthGuard, RequireRecentAuth } from "../common/guards/recent-auth.guard";
 import { RecentAuthService, DESTRUCTIVE_ACTIONS } from "../auth/recent-auth.service";
+import { OrganizationReadinessService } from "./organization-readiness.service";
+import { OrganizationReadinessResponseDto } from "./dto/organization-readiness-response.dto";
+
 
 @ApiBearerAuth()
 @AuthenticatedRoute({ roles: ["ADMIN"] })
@@ -50,6 +53,7 @@ export class OrganizationsController {
     private readonly organizationsService: OrganizationsService,
     private readonly membersService: OrganizationMembersService,
     private readonly recentAuthService: RecentAuthService,
+     private readonly readinessService: OrganizationReadinessService,
   ) {}
 
   @Post()
@@ -175,6 +179,33 @@ export class OrganizationsController {
 
   // ==================== MEMBERSHIP ENDPOINTS ====================
 
+  @Get(":id/readiness")
+@UseGuards(AuthGuard, OrganizationMemberGuard)
+@RequiredOrganizationRole("VIEWER")
+@ApiOperation({
+  summary: "Assess organization onboarding readiness",
+  description:
+    "Returns a read-only, versioned readiness assessment for the organization.",
+})
+@ApiResponse({
+  status: 200,
+  description: "Organization readiness assessment returned.",
+  type: OrganizationReadinessResponseDto,
+})
+@ApiResponse({
+  status: 403,
+  description: "User is not authorized for the organization.",
+})
+@ApiResponse({
+  status: 404,
+  description: "Organization not found.",
+})
+async getReadiness(
+  @Param("id") organizationId: string,
+): Promise<OrganizationReadinessResponseDto> {
+  return this.readinessService.assess(organizationId);
+}
+  
   @Post(":id/members")
   @UseGuards(AuthGuard, OrganizationMemberGuard)
   @RequiredOrganizationRole("ADMIN")

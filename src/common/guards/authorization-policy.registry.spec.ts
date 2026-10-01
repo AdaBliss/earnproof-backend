@@ -6,6 +6,7 @@ import { CredentialsController } from "../../credentials/credentials.controller"
 import { HealthController } from "../../health/health.controller";
 import { IssuersController } from "../../issuers/issuers.controller";
 import { OrganizationsController } from "../../organizations/organizations.controller";
+import { PaymentBackfillsController } from "../../payments/payment-backfills.controller";
 import { PaymentsController } from "../../payments/payments.controller";
 import { ProofsController } from "../../proofs/proofs.controller";
 import { TrustedSourcesController } from "../../trusted-sources/trusted-sources.controller";
@@ -46,12 +47,13 @@ describe("authorization policy registry", () => {
       IssuersController,
       OrganizationsController,
       PaymentsController,
+      PaymentBackfillsController,
       ProofsController,
       TrustedSourcesController,
       WebhooksController,
     ]);
 
-    expect(matrix).toHaveLength(55);
+    expect(matrix).toHaveLength(58);
     expect(matrix.every(({ policy }) => policy.access)).toBe(true);
   });
 

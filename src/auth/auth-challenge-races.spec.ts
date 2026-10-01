@@ -1,6 +1,7 @@
 import { Keypair } from "@stellar/stellar-base";
 import { createHash } from "crypto";
 import { AuthService } from "./auth.service";
+import { SessionService } from "./session.service";
 
 /**
  * Builds the service with inert collaborators.
@@ -41,8 +42,6 @@ function buildAuthService(prisma: any, config: any): AuthService {
 }
 
 describe("Auth challenge replay and race-condition tests", () => {
-  let authService: AuthService;
-  let mockPrisma: any;
   let mockConfig: any;
   let keypairA: Keypair;
   let keypairB: Keypair;
@@ -102,6 +101,28 @@ describe("Auth challenge replay and race-condition tests", () => {
     ].join("\n");
   }
 
+  /**
+   * Builds a real AuthService wired to a fake PrismaService plus no-op
+   * audit/rate-limiter dependencies, so these tests exercise the actual
+   * atomic-consumption logic in AuthService.verifyChallenge without
+   * depending on a real database.
+   */
+  function buildAuthService(mockPrisma: any): AuthService {
+    const sessionSvc = new SessionService(mockPrisma, mockConfig);
+    const auditSvc = { recordEvent: jest.fn().mockResolvedValue(undefined) };
+    const rateLimiter = {
+      checkChallengeCreationLimit: jest.fn().mockResolvedValue(undefined),
+      checkVerificationLimit: jest.fn().mockResolvedValue(undefined),
+    };
+    return new AuthService(
+      mockPrisma,
+      sessionSvc,
+      auditSvc as never,
+      rateLimiter as never,
+      mockConfig,
+    );
+  }
+
   describe("Single-use guarantee", () => {
     it("challenge_can_be_consumed_at_most_once", async () => {
       const challengeId = "challenge_1";
@@ -111,14 +132,18 @@ describe("Auth challenge replay and race-condition tests", () => {
       const validSig = signChallenge(message, keypairA);
 
       // Setup mock for successful first verification
-      mockPrisma = {
+      const mockPrisma = {
         walletChallenge: {
           updateMany: jest
             .fn()
             .mockResolvedValueOnce({ count: 1 }) // First call succeeds (atomic update)
             .mockResolvedValueOnce({ count: 0 }), // Second call fails (already used)
+          findFirst: jest
+            .fn()
+            .mockResolvedValue({ message, walletAddress: walletAddressA, usedAt: new Date() }),
           findUnique: jest
             .fn()
+            .mockResolvedValueOnce({ message, walletAddress: walletAddressA }),
             .mockResolvedValueOnce({ message, walletAddress: walletAddressA, networkPassphrase: "Test SDF Network ; September 2015", origin: "http://localhost:3000" })
             .mockResolvedValueOnce({ message, walletAddress: walletAddressA, networkPassphrase: "Test SDF Network ; September 2015", origin: "http://localhost:3000" }),
         },
@@ -131,8 +156,12 @@ describe("Auth challenge replay and race-condition tests", () => {
             role: "WORKER",
           }),
         },
+        authSession: {
+          create: jest.fn().mockResolvedValue({}),
+        },
       };
 
+      const authService = buildAuthService(mockPrisma);
       authService = buildAuthService(mockPrisma, mockConfig);
 
       // First verification succeeds
@@ -167,7 +196,7 @@ describe("Auth challenge replay and race-condition tests", () => {
       const validSig = signChallenge(message, keypairA);
 
       // Setup mock: first 5 updateMany calls — only first succeeds, rest fail
-      mockPrisma = {
+      const mockPrisma = {
         walletChallenge: {
           updateMany: jest
             .fn()
@@ -176,6 +205,9 @@ describe("Auth challenge replay and race-condition tests", () => {
             .mockResolvedValueOnce({ count: 0 }) // 3rd loses
             .mockResolvedValueOnce({ count: 0 }) // 4th loses
             .mockResolvedValueOnce({ count: 0 }), // 5th loses
+          findFirst: jest
+            .fn()
+            .mockResolvedValue({ message, walletAddress: walletAddressA, usedAt: new Date() }),
           findUnique: jest
             .fn()
             .mockResolvedValue({ message, walletAddress: walletAddressA, networkPassphrase: "Test SDF Network ; September 2015", origin: "http://localhost:3000" }),
@@ -189,8 +221,12 @@ describe("Auth challenge replay and race-condition tests", () => {
             role: "WORKER",
           }),
         },
+        authSession: {
+          create: jest.fn().mockResolvedValue({}),
+        },
       };
 
+      const authService = buildAuthService(mockPrisma);
       authService = buildAuthService(mockPrisma, mockConfig);
 
       // Fire 5 concurrent verification requests for the same challenge
@@ -248,12 +284,15 @@ describe("Auth challenge replay and race-condition tests", () => {
       const message = generateChallengeMessage(walletAddressA, nonce, expiresAt);
       const validSig = signChallenge(message, keypairA);
 
-      mockPrisma = {
+      const mockPrisma = {
         walletChallenge: {
           updateMany: jest
             .fn()
             .mockResolvedValueOnce({ count: 1 }) // First wins
             .mockResolvedValueOnce({ count: 0 }), // Second loses
+          findFirst: jest
+            .fn()
+            .mockResolvedValue({ message, walletAddress: walletAddressA, usedAt: new Date() }),
           findUnique: jest
             .fn()
             .mockResolvedValue({ message, walletAddress: walletAddressA, networkPassphrase: "Test SDF Network ; September 2015", origin: "http://localhost:3000" }),
@@ -266,6 +305,9 @@ describe("Auth challenge replay and race-condition tests", () => {
             walletHash: "sha256:hash",
             role: "WORKER",
           }),
+        },
+        authSession: {
+          create: jest.fn().mockResolvedValue({}),
         },
       };
 
@@ -303,9 +345,10 @@ describe("Auth challenge replay and race-condition tests", () => {
       const message = generateChallengeMessage(walletAddressA, nonce, expiresAt);
       const validSig = signChallenge(message, keypairA);
 
-      mockPrisma = {
+      const mockPrisma = {
         walletChallenge: {
           updateMany: jest.fn().mockResolvedValue({ count: 0 }), // No challenge found (expired)
+          findFirst: jest.fn().mockResolvedValue(null),
         },
         user: {
           findUnique: jest.fn().mockResolvedValue(null),
@@ -331,7 +374,7 @@ describe("Auth challenge replay and race-condition tests", () => {
       const message = generateChallengeMessage(walletAddressA, nonce, expiresAt);
       const validSig = signChallenge(message, keypairA);
 
-      mockPrisma = {
+      const mockPrisma = {
         walletChallenge: {
           updateMany: jest.fn().mockResolvedValue({ count: 1 }),
           findUnique: jest.fn().mockResolvedValue({
@@ -349,6 +392,9 @@ describe("Auth challenge replay and race-condition tests", () => {
             walletHash: "sha256:hash",
             role: "WORKER",
           }),
+        },
+        authSession: {
+          create: jest.fn().mockResolvedValue({}),
         },
       };
 
@@ -373,9 +419,10 @@ describe("Auth challenge replay and race-condition tests", () => {
       // Challenge created for wallet A
       const messageA = generateChallengeMessage(walletAddressA, nonce, expiresAt);
 
-      mockPrisma = {
+      const mockPrisma = {
         walletChallenge: {
           updateMany: jest.fn().mockResolvedValue({ count: 0 }), // No match because wallet mismatch
+          findFirst: jest.fn().mockResolvedValue(null),
         },
         user: {
           findUnique: jest.fn().mockResolvedValue(null),
@@ -405,9 +452,10 @@ describe("Auth challenge replay and race-condition tests", () => {
       const messageA = generateChallengeMessage(walletAddressA, nonce, expiresAt);
       const sigB = signChallenge(messageA, keypairB);
 
-      mockPrisma = {
+      const mockPrisma = {
         walletChallenge: {
           updateMany: jest.fn().mockResolvedValue({ count: 0 }), // No match (wallet mismatch)
+          findFirst: jest.fn().mockResolvedValue(null),
         },
         user: {
           findUnique: jest.fn().mockResolvedValue(null),
@@ -435,7 +483,7 @@ describe("Auth challenge replay and race-condition tests", () => {
       const expiresAt = new Date(Date.now() + 60_000);
       const message = generateChallengeMessage(walletAddressA, nonce, expiresAt);
 
-      mockPrisma = {
+      const mockPrisma = {
         walletChallenge: {
           updateMany: jest.fn().mockResolvedValue({ count: 1 }),
           findUnique: jest.fn().mockResolvedValue({
@@ -473,7 +521,7 @@ describe("Auth challenge replay and race-condition tests", () => {
       const expiresAt = new Date(Date.now() + 60_000);
       const message = generateChallengeMessage(walletAddressA, nonce, expiresAt);
 
-      mockPrisma = {
+      const mockPrisma = {
         walletChallenge: {
           updateMany: jest.fn().mockResolvedValue({ count: 1 }),
           findUnique: jest.fn().mockResolvedValue({
@@ -512,7 +560,7 @@ describe("Auth challenge replay and race-condition tests", () => {
       const messageB = generateChallengeMessage(walletAddressA, nonceB, expiresAt);
       const sigA = signChallenge(messageA, keypairA);
 
-      mockPrisma = {
+      const mockPrisma = {
         walletChallenge: {
           updateMany: jest.fn().mockResolvedValue({ count: 1 }),
           findUnique: jest.fn().mockResolvedValue({
@@ -548,7 +596,7 @@ describe("Auth challenge replay and race-condition tests", () => {
       const expiresAt = new Date(Date.now() + 60_000);
       const message = generateChallengeMessage(walletAddressA, nonce, expiresAt);
 
-      mockPrisma = {
+      const mockPrisma = {
         walletChallenge: {
           updateMany: jest.fn().mockResolvedValue({ count: 1 }),
           findUnique: jest.fn().mockResolvedValue({
@@ -562,6 +610,7 @@ describe("Auth challenge replay and race-condition tests", () => {
         },
       };
 
+      const authService = buildAuthService(mockPrisma);
       authService = buildAuthService(mockPrisma, mockConfig);
 
       try {
@@ -582,12 +631,13 @@ describe("Auth challenge replay and race-condition tests", () => {
       const expiredChallengeId = "challenge_expired_error";
       const invalidChallengeId = "challenge_nonexistent_error";
 
-      mockPrisma = {
+      const mockPrisma = {
         walletChallenge: {
           updateMany: jest
             .fn()
             .mockResolvedValueOnce({ count: 0 }) // expired
             .mockResolvedValueOnce({ count: 0 }), // nonexistent
+          findFirst: jest.fn().mockResolvedValue(null),
         },
         user: {
           findUnique: jest.fn().mockResolvedValue(null),
@@ -595,6 +645,7 @@ describe("Auth challenge replay and race-condition tests", () => {
         },
       };
 
+      const authService = buildAuthService(mockPrisma);
       authService = buildAuthService(mockPrisma, mockConfig);
 
       let expiredError: any;
@@ -634,7 +685,7 @@ describe("Auth challenge replay and race-condition tests", () => {
       const message = generateChallengeMessage(walletAddressA, nonce, expiresAt);
       const validSig = signChallenge(message, keypairA);
 
-      mockPrisma = {
+      const mockPrisma = {
         walletChallenge: {
           updateMany: jest.fn().mockResolvedValue({ count: 1 }),
           findUnique: jest.fn().mockResolvedValue({
@@ -653,8 +704,12 @@ describe("Auth challenge replay and race-condition tests", () => {
             role: "WORKER",
           }),
         },
+        authSession: {
+          create: jest.fn().mockResolvedValue({}),
+        },
       };
 
+      const authService = buildAuthService(mockPrisma);
       authService = buildAuthService(mockPrisma, mockConfig);
 
       const result = await authService.verifyChallenge({
@@ -679,7 +734,7 @@ describe("Auth challenge replay and race-condition tests", () => {
 
       let updateCalled = false;
 
-      mockPrisma = {
+      const mockPrisma = {
         walletChallenge: {
           updateMany: jest.fn().mockImplementation(async () => {
             updateCalled = true;
@@ -696,6 +751,7 @@ describe("Auth challenge replay and race-condition tests", () => {
         },
       };
 
+      const authService = buildAuthService(mockPrisma);
       authService = buildAuthService(mockPrisma, mockConfig);
 
       // Attempt with bad signature
@@ -720,12 +776,15 @@ describe("Auth challenge replay and race-condition tests", () => {
       const expiresAt = new Date(Date.now() + 60_000);
       const message = generateChallengeMessage(walletAddressA, nonce, expiresAt);
 
-      mockPrisma = {
+      const mockPrisma = {
         walletChallenge: {
           updateMany: jest
             .fn()
             .mockResolvedValueOnce({ count: 1 }) // First attempt marks as used
             .mockResolvedValueOnce({ count: 0 }), // Second attempt finds it already used
+          findFirst: jest
+            .fn()
+            .mockResolvedValue({ message, walletAddress: walletAddressA, usedAt: new Date() }),
           findUnique: jest
             .fn()
             .mockResolvedValueOnce({
@@ -739,6 +798,7 @@ describe("Auth challenge replay and race-condition tests", () => {
         },
       };
 
+      const authService = buildAuthService(mockPrisma);
       authService = buildAuthService(mockPrisma, mockConfig);
 
       // First attempt with bad signature fails after consuming

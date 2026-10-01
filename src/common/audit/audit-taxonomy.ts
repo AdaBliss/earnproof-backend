@@ -477,6 +477,7 @@ export const AUDIT_EVENTS: readonly AuditEventDefinition[] = [
   },
   {
     type: "operator.user_status_changed",
+    type: "operator.payment_backfill_requested",
     domain: "operator",
     store: "audit_log",
     match: {
@@ -494,6 +495,19 @@ export const AUDIT_EVENTS: readonly AuditEventDefinition[] = [
   },
   {
     type: "operator.user_role_changed",
+      action: "payment_backfill.requested",
+      resourceType: "payment_backfill",
+    },
+    actorTypes: ["user"],
+    outcomes: ["success"],
+    tenant: "actor_id",
+    writeFailure: "fail_closed",
+    requiredMetadata: ["startLedger", "endLedger"],
+    description:
+      "An administrator queued a ledger-range rescan of a user's incoming payments.",
+  },
+  {
+    type: "operator.payment_backfill_cancelled",
     domain: "operator",
     store: "audit_log",
     match: {
@@ -507,6 +521,16 @@ export const AUDIT_EVENTS: readonly AuditEventDefinition[] = [
     writeFailure: "fail_closed",
     requiredMetadata: ["previousRole", "newRole"],
     description: "An administrator changed an account's global role.",
+      action: "payment_backfill.cancelled",
+      resourceType: "payment_backfill",
+    },
+    actorTypes: ["user"],
+    outcomes: ["success"],
+    tenant: "actor_id",
+    writeFailure: "fail_closed",
+    requiredMetadata: ["previousStatus"],
+    description:
+      "An administrator cancelled a payment backfill; committed pages are kept.",
   },
 ];
 

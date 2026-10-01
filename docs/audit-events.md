@@ -58,6 +58,8 @@ and continues.
 | `operator.trusted_source_deleted` | operator | `audit_log` | user | success | actor | fail_closed |
 | `operator.user_status_changed` | operator | `audit_log` | user | success | resource | fail_closed |
 | `operator.user_role_changed` | operator | `audit_log` | user | success | resource | fail_closed |
+| `operator.payment_backfill_requested` | operator | `audit_log` | user | success | actor | fail_closed |
+| `operator.payment_backfill_cancelled` | operator | `audit_log` | user | success | actor | fail_closed |
 
 ### Stable types and persisted shapes
 

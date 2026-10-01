@@ -6,12 +6,19 @@ import {
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
+  AscendingPageOptions,
+  AscendingPaymentsPage,
   HorizonClient,
   HorizonCancelledError,
   HorizonReadOptions,
   HorizonReadResult,
 } from "./horizon-client";
-import { HorizonTransactionRecord, NormalizedPayment } from "./stellar.types";
+import {
+  HorizonLedgerSummary,
+  HorizonOperationSummary,
+  HorizonTransactionRecord,
+  NormalizedPayment,
+} from "./stellar.types";
 import { HorizonException } from "../common/exceptions/domain.exceptions";
 import { FetchHorizonTransport } from "./horizon-transport";
 import { CircuitHorizonTransport } from "./horizon-circuit-transport";
@@ -121,6 +128,35 @@ export class StellarService {
       // outage on the dashboards.
       if (error instanceof HorizonCancelledError) throw error;
 
+      throw new ServiceUnavailableException(
+        "Stellar Horizon is temporarily unavailable",
+      );
+    }
+  }
+
+  /**
+   * One ledger's sequence and hash, or `null` when Horizon has no such ledger.
+   *
+   * Failures collapse to the same dependency error as the payment read: a
+   * checkpoint that cannot be verified must stop the sync, not be assumed good.
+   */
+  async fetchLedger(sequence: number): Promise<HorizonLedgerSummary | null> {
+    try {
+      return await this.horizon.getLedger(sequence);
+    } catch {
+      throw new ServiceUnavailableException(
+        "Stellar Horizon is temporarily unavailable",
+      );
+    }
+  }
+
+  /** One operation's identity, or `null` when Horizon has no such operation. */
+  async fetchOperation(
+    operationId: string,
+  ): Promise<HorizonOperationSummary | null> {
+    try {
+      return await this.horizon.getOperation(operationId);
+    } catch {
       throw new ServiceUnavailableException(
         "Stellar Horizon is temporarily unavailable",
       );

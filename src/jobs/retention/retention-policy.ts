@@ -1,3 +1,6 @@
+import { canonicalize } from "../../common/crypto/canonicalize";
+import { sha256 } from "../../common/crypto/hash";
+
 /**
  * Retention classes and their durations.
  *
@@ -290,6 +293,56 @@ export function resolveRetentionDays(
   }
 
   return parsed;
+}
+
+/**
+ * Schema of the policy fingerprint below. Bump it if the fingerprint's inputs
+ * change shape, so old and new versions can never collide.
+ */
+export const RETENTION_POLICY_SCHEMA_VERSION = 1;
+
+/**
+ * Stable version identifier for the retention policy in force.
+ *
+ * Derived rather than hand-maintained: it fingerprints every sweepable class's
+ * definition together with its resolved duration, so changing a class, adding
+ * one, or overriding a duration through the environment all produce a new
+ * version. A hand-bumped constant would silently go stale the first time an
+ * operator tightened a duration without a deploy. Recorded on every run so an
+ * execution can be matched to the dry-run plan that was reviewed.
+ */
+export function retentionPolicyVersion(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const fingerprint = SWEEPABLE_CLASSES.map((entry) => ({
+    key: entry.key,
+    model: entry.model,
+    cutoffColumn: entry.cutoffColumn,
+    disposal: entry.disposal,
+    sweep: entry.sweep,
+    days: resolvedDaysOrInvalid(entry, env),
+  }));
+
+  return `v${RETENTION_POLICY_SCHEMA_VERSION}-${sha256(
+    canonicalize(fingerprint),
+  ).slice(0, 16)}`;
+}
+
+/**
+ * A misconfigured class must not stop the version being computed: the run
+ * isolates that class's failure, and the report still needs a version. The
+ * marker keeps a broken override distinguishable from every valid one.
+ */
+function resolvedDaysOrInvalid(
+  entry: RetentionClass,
+  env: NodeJS.ProcessEnv,
+): number | "invalid" {
+  try {
+    return resolveRetentionDays(entry, env);
+  } catch (error) {
+    if (error instanceof RetentionConfigError) return "invalid";
+    throw error;
+  }
 }
 
 /**

@@ -12,6 +12,7 @@ user or organization is answered as `404`, identical to an absent resource.
 | `POST /auth/wallet-rotation`, `POST /auth/wallet-rotation/:id/complete` | bearer session + signatures from the current and replacement wallets | own account and own rotation; another account's rotation id is answered like an unknown one | 400/401/409 |
 | `GET/POST/PATCH /proofs`, `POST /proofs/*`, `PATCH /proofs/:id/revoke`, `GET /proofs/:id/verification-stats` | bearer session | proof owner | 401/404 |
 | `GET /proofs/:id/verify`, `POST /credentials/verify` | public | only published verification result | no protected fields |
+| `POST /payment-backfills`, `GET /payment-backfills/:id`, `POST /payment-backfills/:id/cancel` | bearer `ADMIN` | global admin exception | 401/403/404 |
 | `GET/POST/PATCH /payments*`, `GET/POST/PATCH/DELETE /trusted-sources*` | bearer session | user-owned record | 401/404 |
 | `GET/POST/PATCH/DELETE /webhooks*`, delivery replay | bearer `DEVELOPER` or `ADMIN` | caller's organization | 401/403/404 |
 | `GET /organizations`, `GET/PATCH /organizations/:id` | bearer | creator; ADMIN exception | 401/404 |

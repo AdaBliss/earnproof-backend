@@ -122,6 +122,11 @@ export class AuthService {
       input.clientMetadata,
     );
 
+    // Atomically mark the challenge as consumed only if it exists, is not
+    // used, and is not expired. This prevents TOCTOU race conditions where
+    // multiple concurrent requests could both pass an existence check before
+    // any of them are marked as used — only one caller can ever win this
+    // conditional update.
     // Atomically mark the challenge as consumed only if it exists, is not used,
     // and is not expired. This closes the TOCTOU window in which two concurrent
     // requests could both pass an existence check before either marked it used.
@@ -143,6 +148,9 @@ export class AuthService {
     });
 
     if (consumedChallenge.count === 0) {
+      // Determine if the challenge was already used (replay) or is expired /
+      // never existed, purely for audit-trail accuracy — the caller always
+      // receives the same generic error either way.
       // Nothing was consumed: the challenge was already used (a replay), or it
       // expired or never existed. The two are audited separately; both return
       // the same message, so the caller learns nothing either way.
@@ -186,6 +194,9 @@ export class AuthService {
       throw new UnauthorizedException("Challenge is expired or unavailable");
     }
 
+    // Fetch the now-consumed challenge to get the message for signature
+    // verification. It is already marked as used, so even if verification
+    // fails below, it cannot be reused (no signature-oracle attack).
     // Fetch the challenge again to get the message for signature verification.
     // It is already marked used, so a failed verification cannot be retried.
     // The challenge is now marked as used, so even if verification fails, it cannot be reused.
@@ -196,6 +207,10 @@ export class AuthService {
     });
 
     if (!challenge) {
+      // Should never happen: we just consumed this row atomically above.
+      throw new UnauthorizedException("Challenge is expired or unavailable");
+    }
+
       // Unreachable unless the row was deleted between the two statements;
       // safeguarded rather than dereferenced.
       // Should be unreachable: updateMany just matched and updated this row,
@@ -273,6 +288,9 @@ export class AuthService {
         lastLoginAt: new Date(),
       },
     });
+
+    // The challenge was already atomically marked as consumed above, before
+    // signature verification — no further write is needed here.
 
     // Create a persisted, revocable session.  Only the hash is stored.
     const { token, sessionId, expiresAt } = await this.sessionService.create({

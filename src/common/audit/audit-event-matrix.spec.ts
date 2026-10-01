@@ -7,6 +7,7 @@ import { sep53MessageHash } from "../../auth/wallet-signature";
 import { VerificationEventService } from "../../audit/verification-event.service";
 import { IssuersService } from "../../issuers/issuers.service";
 import { OrganizationsService } from "../../organizations/organizations.service";
+import { PaymentBackfillService } from "../../payments/payment-backfill.service";
 import { PaymentsService } from "../../payments/payments.service";
 import { TrustedSourcesService } from "../../trusted-sources/trusted-sources.service";
 import { WebhooksService } from "../../webhooks/webhooks.service";
@@ -566,6 +567,7 @@ const scenarios: Scenario[] = [
         prisma as never,
         {} as never,
         configDouble({ paymentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=" }),
+        {} as never,
       ).updateClassification({ id: USER_ID }, "payment_1", "INCOME" as never);
     },
   },
@@ -594,7 +596,7 @@ const scenarios: Scenario[] = [
         auditLog: sink.auditLog,
       };
 
-      return new TrustedSourcesService(prisma as never).createTrustedSource(
+      return new TrustedSourcesService(prisma as never, { reevaluateSource: jest.fn().mockResolvedValue(0) } as never).createTrustedSource(
         ADMIN,
         { sourceAddress: PAYER_ADDRESS, displayName: "Employer" } as never,
       );
@@ -629,7 +631,7 @@ const scenarios: Scenario[] = [
         auditLog: sink.auditLog,
       };
 
-      return new TrustedSourcesService(prisma as never).updateTrustedSource(
+      return new TrustedSourcesService(prisma as never, { reevaluateSource: jest.fn().mockResolvedValue(0) } as never).updateTrustedSource(
         ADMIN,
         "trusted_1",
         { displayName: "Main employer" } as never,
@@ -655,10 +657,96 @@ const scenarios: Scenario[] = [
         auditLog: sink.auditLog,
       };
 
-      return new TrustedSourcesService(prisma as never).deleteTrustedSource(
+      return new TrustedSourcesService(prisma as never, { reevaluateSource: jest.fn().mockResolvedValue(0) } as never).deleteTrustedSource(
         ADMIN,
         "trusted_1",
       );
+    },
+  },
+  {
+    event: "operator.payment_backfill_requested",
+    outcome: "success",
+    name: "requesting a payment backfill",
+    run: (sink) => {
+      const job = {
+        id: "backfill_1",
+        userId: "user_target",
+        startLedger: 100,
+        endLedger: 200,
+        status: "PENDING",
+        checkpointCursor: null,
+        pagesProcessed: 0,
+        recordsSeen: 0,
+        paymentsCreated: 0,
+        duplicatesSkipped: 0,
+        attempts: 0,
+        cancelRequestedAt: null,
+        lastErrorSafe: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        completedAt: null,
+      };
+      const prisma: Record<string, unknown> = {
+        $queryRaw: jest.fn().mockResolvedValue([{ id: "user_target" }]),
+        paymentBackfillJob: {
+          findFirst: jest.fn().mockResolvedValue(null),
+          create: jest.fn().mockResolvedValue(job),
+        },
+        auditLog: sink.auditLog,
+      };
+      prisma.$transaction = jest.fn((callback: (tx: unknown) => unknown) =>
+        callback(prisma),
+      );
+
+      return new PaymentBackfillService(
+        prisma as never,
+        {} as never,
+        configDouble({ paymentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=" }),
+      ).createJob(ADMIN, { userId: "user_target", startLedger: 100, endLedger: 200 });
+    },
+  },
+  {
+    event: "operator.payment_backfill_cancelled",
+    outcome: "success",
+    name: "cancelling a payment backfill",
+    run: (sink) => {
+      const job = {
+        id: "backfill_1",
+        userId: "user_target",
+        startLedger: 100,
+        endLedger: 200,
+        status: "CANCELLED",
+        checkpointCursor: null,
+        pagesProcessed: 0,
+        recordsSeen: 0,
+        paymentsCreated: 0,
+        duplicatesSkipped: 0,
+        attempts: 0,
+        cancelRequestedAt: new Date(),
+        lastErrorSafe: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        completedAt: new Date(),
+      };
+      const prisma: Record<string, unknown> = {
+        paymentBackfillJob: {
+          findUnique: jest
+            .fn()
+            .mockResolvedValue({ id: "backfill_1", status: "PENDING" }),
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+          findUniqueOrThrow: jest.fn().mockResolvedValue(job),
+        },
+        auditLog: sink.auditLog,
+      };
+      prisma.$transaction = jest.fn((callback: (tx: unknown) => unknown) =>
+        callback(prisma),
+      );
+
+      return new PaymentBackfillService(
+        prisma as never,
+        {} as never,
+        configDouble({ paymentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=" }),
+      ).cancelJob(ADMIN, "backfill_1");
     },
   },
   // ------------------------------------------------------ authentication ---

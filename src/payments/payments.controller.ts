@@ -23,6 +23,7 @@ import { Idempotent } from "../common/decorators/idempotent.decorator";
 import { ApiErrorDto } from "../common/dto/api-error.dto";
 import { AuthGuard } from "../common/guards/auth.guard";
 import { AuthenticatedUser } from "../auth/auth.types";
+import { EligibilityExplanationDto } from "./dto/eligibility-explanation.dto";
 import { ListPaymentsDto } from "./dto/list-payments.dto";
 import { PaymentResponseDto } from "./dto/payment-response.dto";
 import { SyncResultDto } from "./dto/sync-result.dto";
@@ -145,6 +146,38 @@ export class PaymentsController {
     @Param("id") paymentId: string,
   ) {
     return this.paymentsService.getPayment(user.id, paymentId);
+  }
+
+  @ApiOperation({
+    summary: "Explain a payment's eligibility",
+    description:
+      "Returns the active eligibility decision for one of the caller's payments: the policy " +
+      "version that produced it, the evaluated factors, a reason code per factor, which proof " +
+      "families it permits, and recent historical decisions. A payment without a decision under " +
+      "the current policy is evaluated first. Contains no memo, amount, or counterparty address.",
+  })
+  @ApiParam({ name: "id", description: "Payment ID (cuid).", example: "clx1abc2def3ghi4" })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "The eligibility explanation.",
+    type: EligibilityExplanationDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: "Payment not found or does not belong to the authenticated user.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Bearer token is missing, malformed, invalid, or expired.",
+    type: ApiErrorDto,
+  })
+  @Get(":id/eligibility")
+  explainEligibility(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") paymentId: string,
+  ): Promise<EligibilityExplanationDto> {
+    return this.paymentsService.explainEligibility(user.id, paymentId) as Promise<EligibilityExplanationDto>;
   }
 
   @ApiOperation({

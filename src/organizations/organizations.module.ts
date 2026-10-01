@@ -17,6 +17,25 @@ import {
 } from "./exports/organization-exports.controller";
 import { OrganizationMembersService } from "./organization-members.service";
 import { OrganizationMemberGuard } from "./guards/organization-member.guard";
+import { OrganizationReadinessService } from "./organization-readiness.service";
+
+
+@Module({
+  imports: [DatabaseModule, AuthModule],
+  controllers: [OrganizationsController],
+  providers: [
+    OrganizationsService,
+    OrganizationMembersService,
+    OrganizationMemberGuard,
+    OrganizationReadinessService,
+  ],
+  exports: [
+    OrganizationsService,
+    OrganizationMembersService,
+    OrganizationReadinessService,
+  ],
+})
+export class OrganizationsModule {}
 import { MembershipImportService } from "./membership-import.service";
 import { MembershipImportController } from "./membership-import.controller";
 import { AccessReviewService } from "./access-review.service";

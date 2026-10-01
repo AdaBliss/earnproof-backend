@@ -106,7 +106,7 @@ Tenant boundary. Every multi-tenant resource hangs off an organization.
 
 | | |
 |---|---|
-| **Public interface** | `/organizations` CRUD and membership |
+| **Public interface** | `/organizations` CRUD and membership, `GET /organizations/:id/usage` (quota usage) |
 | **Owned tables** | `Organization` |
 | **Key files** | [`organizations.service.ts`](../src/organizations/organizations.service.ts) |
 | **Must not depend on** | `proofs`, `payments`, `credentials`, `jobs` |
@@ -128,9 +128,9 @@ Horizon synchronization and payment classification.
 
 | | |
 |---|---|
-| **Public interface** | `POST /payments/sync`, `GET /payments`, `PATCH /payments/:id/classification` |
-| **Owned tables** | `Payment`, `SupportedAsset` |
-| **Key files** | [`payments.service.ts`](../src/payments/payments.service.ts) |
+| **Public interface** | `POST /payments/sync`, `GET /payments`, `PATCH /payments/:id/classification`, `/payment-backfills` (ADMIN, [details](payment-backfills.md)) |
+| **Owned tables** | `Payment`, `SupportedAsset`, `PaymentBackfillJob` |
+| **Key files** | [`payments.service.ts`](../src/payments/payments.service.ts), [`payment-backfill.service.ts`](../src/payments/payment-backfill.service.ts) |
 | **Must not depend on** | `proofs`, `credentials`, `webhooks` |
 
 Payments are read by `proofs` but never written by it. Amounts are stored
@@ -142,8 +142,8 @@ The core domain. Issuance, verification, revocation, and anchoring intent.
 
 | | |
 |---|---|
-| **Public interface** | `/proofs/minimum-income`, `/proofs/recurring-income`, `/proofs/payment-receipt`, `GET /proofs`, `/proofs/:id/verify`, `/proofs/:id/revoke` |
-| **Owned tables** | `Proof`, `ProofClaim`, `AnchoringIntent`, `VerificationEvent` |
+| **Public interface** | `/proofs/minimum-income`, `/proofs/recurring-income`, `/proofs/payment-receipt`, `GET /proofs`, `/proofs/:id/verify`, `/proofs/:id/revoke`, `/proofs/:id/share-tokens`, `POST /proof-shares/resolve` |
+| **Owned tables** | `Proof`, `ProofClaim`, `AnchoringIntent`, `VerificationEvent`, `ProofShareToken` |
 | **Key files** | [`proofs.service.ts`](../src/proofs/proofs.service.ts), [`contract-anchoring.service.ts`](../src/proofs/contract-anchoring.service.ts) |
 | **Must not depend on** | `auth` internals, `api-keys` internals |
 
@@ -176,7 +176,7 @@ Signed outbound event delivery.
 
 | | |
 |---|---|
-| **Public interface** | `/webhooks` CRUD, delivery replay |
+| **Public interface** | `/webhooks` CRUD, delivery replay, dead-letter inspection and redrive |
 | **Owned tables** | `Webhook`, `WebhookDelivery` |
 | **Key files** | [`webhooks.service.ts`](../src/webhooks/webhooks.service.ts), [`webhook-delivery.service.ts`](../src/webhooks/webhook-delivery.service.ts), [`webhook-signing.service.ts`](../src/webhooks/webhook-signing.service.ts), [`webhook-ssrf-guard.ts`](../src/webhooks/webhook-ssrf-guard.ts) |
 | **Must not depend on** | `proofs` internals, `payments` internals |
@@ -191,8 +191,8 @@ Scheduled background work.
 | | |
 |---|---|
 | **Public interface** | none — no controller |
-| **Owned tables** | none; operates on `AnchoringIntent` |
-| **Key files** | [`anchoring-worker.service.ts`](../src/jobs/anchoring-worker.service.ts), [`anchoring-reconciler.service.ts`](../src/jobs/anchoring-reconciler.service.ts) |
+| **Owned tables** | none; operates on `AnchoringIntent` and `PaymentBackfillJob` |
+| **Key files** | [`anchoring-worker.service.ts`](../src/jobs/anchoring-worker.service.ts), [`anchoring-reconciler.service.ts`](../src/jobs/anchoring-reconciler.service.ts), [`payment-backfill-worker.service.ts`](../src/jobs/payment-backfill-worker.service.ts) |
 | **Must not depend on** | HTTP request context |
 
 Jobs have no request and therefore no user. Anything that reads
@@ -218,6 +218,17 @@ Horizon client and memo normalization. The only module that talks to Horizon.
 | | |
 |---|---|
 | **Key files** | [`stellar.service.ts`](../src/stellar/stellar.service.ts), [`memo-normalizer.ts`](../src/stellar/memo-normalizer.ts) |
+| **Must not depend on** | any domain module |
+
+### `quotas` — [`src/quotas/`](../src/quotas/)
+
+Per-organization operational quotas; see [quotas.md](quotas.md).
+
+| | |
+|---|---|
+| **Public interface** | none — enforced inside other modules' transactions; usage is served by `organizations` |
+| **Owned tables** | `OrganizationQuotaUsage` |
+| **Key files** | [`organization-quota.service.ts`](../src/quotas/organization-quota.service.ts) |
 | **Must not depend on** | any domain module |
 
 ### `common`, `config`, `database`, `health`, `trusted-sources`
@@ -396,15 +407,19 @@ backend being used as a proxy into its own network.
 
 **Horizon data is public but not neutral.** Memos are user-supplied. They are
 normalized in [`memo-normalizer.ts`](../src/stellar/memo-normalizer.ts) before
-anything downstream reads them.
+anything downstream reads them, and stored only in the encrypted, versioned
+form described in [payment-memos.md](payment-memos.md). Proof eligibility never
+reads them.
 
 ## Protected data
 
 | Class | Where | Handling |
 |---|---|---|
 | Session tokens | `AuthSession.tokenHash` | SHA-256 only; raw token never stored |
+| Proof share tokens | `ProofShareToken.tokenHash` | SHA-256 only; raw token returned once at issuance |
 | API keys | `ApiKey.hash` | Hashed; prefix stored separately for lookup |
 | Payment amounts | `Payment` | AES-256-GCM at rest |
+| Payment memos | `Payment.memo` | Allowlisted, byte-bounded, AES-256-GCM at rest ([details](payment-memos.md)) |
 | Wallet addresses | `User.walletHash` | Hashed for indexing |
 | Webhook secrets | `Webhook.secretEncrypted` | Encrypted |
 | Credential payloads | `Proof.signedPayload` | Signed; contains no raw payment history |

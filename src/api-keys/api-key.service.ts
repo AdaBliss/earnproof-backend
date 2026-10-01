@@ -8,6 +8,7 @@ import { ApiKeyScope, ResourceStatus } from "@prisma/client";
 import { randomBytes, timingSafeEqual } from "crypto";
 import { sha256 } from "../common/crypto/hash";
 import { PrismaService } from "../database/prisma.service";
+import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { ApiKeyUsageService } from "./api-key-usage.service";
 
 /**
@@ -60,6 +61,7 @@ export class ApiKeyService {
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly quotas: OrganizationQuotaService,
     private readonly apiKeyUsageService: ApiKeyUsageService,
   ) {}
 
@@ -195,6 +197,51 @@ export class ApiKeyService {
     const { secret, prefix } = this.generateSecret();
     const keyHash = this.hashSecret(secret);
 
+    // Quota check, creation, and audit commit together: a rejected request
+    // leaves no key, no scope assignment, and no audit entry.
+    const apiKey = await this.prisma.$transaction(async (tx) => {
+      await this.quotas.assertCapacity(tx, input.organizationId, "api_keys");
+
+      const created = await tx.apiKey.create({
+        data: {
+          organizationId: input.organizationId,
+          createdById: input.createdBy,
+          name: input.name,
+          prefix,
+          keyHash,
+          expiresAt: input.expiresAt,
+          scopeAssignments: input.scopes
+            ? {
+                createMany: {
+                  data: input.scopes.map((scope) => ({ scope })),
+                },
+              }
+            : undefined,
+        },
+        include: {
+          scopeAssignments: {
+            select: {
+              scope: true,
+            },
+          },
+        },
+      });
+
+      // Audit log: API key created (never log secret or hash)
+      await tx.auditLog.create({
+        data: {
+          actorType: "user",
+          actorId: input.createdBy,
+          action: "api_key.created",
+          resourceType: "api_key",
+          resourceId: created.id,
+          metadata: {
+            prefix: created.prefix,
+            name: created.name,
+            organizationId: created.organizationId,
+            scopes: created.scopeAssignments.map((sa) => sa.scope),
+            expiresAt: created.expiresAt?.toISOString(),
+          },
     const apiKey = await this.prisma.apiKey.create({
       data: {
         organizationId: input.organizationId,
@@ -224,7 +271,9 @@ export class ApiKeyService {
           scopes: apiKey.scopeAssignments.map((sa) => sa.scope),
           expiresAt: apiKey.expiresAt?.toISOString(),
         },
-      },
+      });
+
+      return created;
     });
 
     return {

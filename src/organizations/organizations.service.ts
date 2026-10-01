@@ -7,6 +7,7 @@
 import { ResourceStatus } from "@prisma/client";
 import { AuthenticatedUser } from "../auth/auth.types";
 import { PrismaService } from "../database/prisma.service";
+import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { ConflictException } from "../common/exceptions/domain.exceptions";
 import { CreateOrganizationDto } from "./dto/create-organization.dto";
 import { ListOrganizationsDto } from "./dto/list-organizations.dto";
@@ -19,6 +20,7 @@ import { OrganizationMembersService } from "./organization-members.service";
 export class OrganizationsService {
   constructor(
     private readonly prisma: PrismaService,
+    private readonly quotas: OrganizationQuotaService,
     private readonly membersService: OrganizationMembersService,
   ) {}
 
@@ -140,6 +142,21 @@ export class OrganizationsService {
       ...this.toResponseDto(org),
       issuerCount,
     };
+  }
+
+  /**
+   * Current quota usage and reset context. Same access rule as
+   * {@link getOrganization}: the creator or an ADMIN. Counts and limits only —
+   * no resource identifiers.
+   */
+  async getUsage(user: AuthenticatedUser, organizationId: string) {
+    const org = await this.getOrganizationById(organizationId);
+    if (user.role !== "ADMIN" && org.createdById !== user.id) {
+      throw new ForbiddenException(
+        "You do not have permission to access this organization",
+      );
+    }
+    return this.quotas.getUsage(organizationId);
   }
 
   async listOrganizations(

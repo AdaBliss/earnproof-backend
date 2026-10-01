@@ -38,6 +38,11 @@ import {
   CreateApiKeyDto,
   OrganizationApiKeysQueryDto,
 } from "./dto/api-key-request.dto";
+import {
+  ApiKeyQuotaResponseDto,
+  SetApiKeyQuotasDto,
+} from "./dto/api-key-quota.dto";
+import { ApiKeyQuotaService } from "./api-key-quota.service";
 
 /**
  * API Keys Controller - Machine-to-machine integration credential management.
@@ -68,6 +73,7 @@ export class ApiKeysController {
   constructor(
     private readonly apiKeyService: ApiKeyService,
     private readonly apiKeyUsageService: ApiKeyUsageService,
+    private readonly apiKeyQuotaService: ApiKeyQuotaService,
     private readonly recentAuthService: RecentAuthService,
     private readonly prisma: PrismaService,
   ) {}
@@ -508,6 +514,154 @@ export class ApiKeysController {
       })),
       totalRequests,
     };
+  }
+
+  /**
+   * Get quota configurations for an API key.
+   *
+   * Authorization: Organization admin only
+   * Returns: All quota configurations for the key
+   */
+  @Get(":id/quotas")
+  @ApiOperation({
+    summary: "Get quota configurations for an API key",
+    description: "Returns all quota configurations for the specified API key, organized by scope.",
+  })
+  @ApiParam({ name: "id", description: "API key ID.", example: "ckv8v6h2b0000qzrmn831i7rn" })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Quota configurations for the key.",
+    type: [ApiKeyQuotaResponseDto],
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Session token is missing, malformed, invalid, or expired.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.FORBIDDEN,
+    description: "The caller is not an administrator of the organization the key belongs to.",
+    type: ApiErrorDto,
+  })
+  async getKeyQuotas(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") keyId: string,
+    @Query() query: OrganizationApiKeysQueryDto = {},
+  ): Promise<ApiKeyQuotaResponseDto[]> {
+    const organizationId = await this.getAuthorizedOrganizationId(user, query.organizationId);
+    if (!organizationId) {
+      throw new ForbiddenException(
+        "Only organization admins can view API key quotas.",
+      );
+    }
+
+    // Verify the key belongs to this organization
+    const key = await this.prisma.apiKey.findFirst({
+      where: { id: keyId, organizationId },
+      select: { id: true },
+    });
+    if (!key) {
+      throw new ForbiddenException("API key not found");
+    }
+
+    const quotas = await this.apiKeyQuotaService.getKeyQuotas(keyId);
+
+    return quotas.map((quota) => ({
+      scope: quota.scope,
+      quotaLimit: quota.quotaLimit,
+      windowSeconds: quota.windowSeconds,
+      updatedAt: quota.updatedAt,
+      isUnlimited: quota.quotaLimit === null,
+      isDisabled: quota.quotaLimit === 0,
+    }));
+  }
+
+  /**
+   * Set quota configurations for an API key.
+   *
+   * Authorization: Organization admin only
+   * Effect: Updates quota configurations, overwriting existing settings
+   */
+  @Post(":id/quotas")
+  @ApiOperation({
+    summary: "Set quota configurations for an API key",
+    description: "Set or update quota configurations for the specified API key. Existing quotas for specified scopes are overwritten.",
+  })
+  @ApiParam({ name: "id", description: "API key ID.", example: "ckv8v6h2b0000qzrmn831i7rn" })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Quota configurations updated successfully.",
+    type: [ApiKeyQuotaResponseDto],
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: "Invalid quota configuration (e.g., negative limits, invalid scope).",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Session token is missing, malformed, invalid, or expired.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.FORBIDDEN,
+    description: "The caller is not an administrator of the organization the key belongs to.",
+    type: ApiErrorDto,
+  })
+  async setKeyQuotas(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") keyId: string,
+    @Body() body: SetApiKeyQuotasDto,
+    @Query() query: OrganizationApiKeysQueryDto = {},
+  ): Promise<ApiKeyQuotaResponseDto[]> {
+    const organizationId = await this.getAuthorizedOrganizationId(user, query.organizationId);
+    if (!organizationId) {
+      throw new ForbiddenException(
+        "Only organization admins can set API key quotas.",
+      );
+    }
+
+    // Verify the key belongs to this organization
+    const key = await this.prisma.apiKey.findFirst({
+      where: { id: keyId, organizationId },
+      select: { id: true },
+    });
+    if (!key) {
+      throw new ForbiddenException("API key not found");
+    }
+
+    // Validate scopes
+    const validScopes = Object.values(ApiKeyScope);
+    for (const quotaConfig of body.quotas) {
+      if (!validScopes.includes(quotaConfig.scope)) {
+        throw new BadRequestException(`Invalid scope: ${quotaConfig.scope}`);
+      }
+      if (quotaConfig.windowSeconds < 60) {
+        throw new BadRequestException("Window must be at least 60 seconds");
+      }
+    }
+
+    // Update quota configurations
+    for (const quotaConfig of body.quotas) {
+      await this.apiKeyQuotaService.setQuotaConfig(
+        keyId,
+        quotaConfig.scope,
+        quotaConfig.quotaLimit,
+        quotaConfig.windowSeconds,
+      );
+    }
+
+    // Return updated configurations
+    const quotas = await this.apiKeyQuotaService.getKeyQuotas(keyId);
+
+    return quotas.map((quota) => ({
+      scope: quota.scope,
+      quotaLimit: quota.quotaLimit,
+      windowSeconds: quota.windowSeconds,
+      updatedAt: quota.updatedAt,
+      isUnlimited: quota.quotaLimit === null,
+      isDisabled: quota.quotaLimit === 0,
+    }));
   }
 
   /**

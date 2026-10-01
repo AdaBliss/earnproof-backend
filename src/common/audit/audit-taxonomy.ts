@@ -544,6 +544,40 @@ export const AUDIT_EVENTS: readonly AuditEventDefinition[] = [
     description:
       "A trusted payer was soft-deleted; history referencing it is retained.",
   },
+  {
+    type: "operator.payment_backfill_requested",
+    domain: "operator",
+    store: "audit_log",
+    match: {
+      store: "audit_log",
+      action: "payment_backfill.requested",
+      resourceType: "payment_backfill",
+    },
+    actorTypes: ["user"],
+    outcomes: ["success"],
+    tenant: "actor_id",
+    writeFailure: "fail_closed",
+    requiredMetadata: ["startLedger", "endLedger"],
+    description:
+      "An administrator queued a ledger-range rescan of a user's incoming payments.",
+  },
+  {
+    type: "operator.payment_backfill_cancelled",
+    domain: "operator",
+    store: "audit_log",
+    match: {
+      store: "audit_log",
+      action: "payment_backfill.cancelled",
+      resourceType: "payment_backfill",
+    },
+    actorTypes: ["user"],
+    outcomes: ["success"],
+    tenant: "actor_id",
+    writeFailure: "fail_closed",
+    requiredMetadata: ["previousStatus"],
+    description:
+      "An administrator cancelled a payment backfill; committed pages are kept.",
+  },
 ];
 
 /** Every domain the taxonomy is required to cover. */

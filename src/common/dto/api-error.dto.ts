@@ -76,6 +76,10 @@ export enum ApiErrorCode {
   // resets at the window boundary or when usage is reduced.
   QUOTA_EXCEEDED = "QUOTA_EXCEEDED",
 
+  // 504 – database operation timed out or was cancelled
+  DATABASE_TIMEOUT = "DATABASE_TIMEOUT",
+  DATABASE_CANCELLED = "DATABASE_CANCELLED",
+
   // 503 – a required dependency is unavailable
   DEPENDENCY_UNAVAILABLE = "DEPENDENCY_UNAVAILABLE",
 

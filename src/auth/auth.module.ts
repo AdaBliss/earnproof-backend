@@ -12,6 +12,7 @@ import { WalletRotationController } from "./wallet-rotation.controller";
 import { WalletRotationService } from "./wallet-rotation.service";
 import { RecentAuthService } from "./recent-auth.service";
 import { RecentAuthGuard } from "../common/guards/recent-auth.guard";
+import { VersionedHashService } from "../common/crypto/versioned-hash.service";
 
 @Module({
   controllers: [AuthController, WalletRotationController],
@@ -27,6 +28,7 @@ import { RecentAuthGuard } from "../common/guards/recent-auth.guard";
     { provide: Clock, useClass: SystemClock },
     RecentAuthService,
     RecentAuthGuard,
+    VersionedHashService,
   ],
   exports: [
     SessionService,
@@ -35,6 +37,7 @@ import { RecentAuthGuard } from "../common/guards/recent-auth.guard";
     AuthAuditService,
     RecentAuthService,
     RecentAuthGuard,
+    VersionedHashService,
   ],
 })
 export class AuthModule {}

@@ -1,0 +1,10 @@
+# Security-sensitive repository automation and executable configuration.
+/.github/ @Hallab7
+/.githooks/ @Hallab7
+**/.vscode/ @Hallab7
+**/package.json @Hallab7
+**/package-lock.json @Hallab7
+/scripts/install-git-hooks.js @Hallab7
+/scripts/security/ @Hallab7
+**/public/fonts/ @Hallab7
+**/*config.* @Hallab7

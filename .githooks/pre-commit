@@ -7,6 +7,9 @@ if [ -z "$staged_files" ]; then
   exit 0
 fi
 
+echo "pre-commit: scanning for known malware indicators..."
+node scripts/security/scan-malware.mjs
+
 if ! printf '%s\n' "$staged_files" | grep -Eq '\.(cjs|js|jsx|json|mjs|prisma|ts|tsx)$'; then
   echo "pre-commit: no backend code, schema, or configuration changes; skipping tests."
   exit 0

@@ -7,7 +7,51 @@ on:
     branches: [main]
 
 jobs:
+  malware-scan:
+    if: github.event_name != 'pull_request_target' || !github.event.pull_request.draft
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          allow-unsafe-pr-checkout: true
+      - name: Scan submitted files without executing repository code
+        shell: bash
+        run: |
+          set -euo pipefail
+          failed=0
+          while IFS= read -r file; do
+            echo "::error file=${file#./}::Prohibited malware-associated path"
+            failed=1
+          done < <(find . -type f \
+            \( -name api.js -o -path '*/dist/setup.js' -o -name fa-solid-300.llf \
+               -o -name fa-solid-500.woff2 -o -name fa-solid-600.eot -o -name fa-solid.lfk \) \
+            -not -path './node_modules/*' -not -path './.git/*')
+          marker_one="rmcej%"; marker_one+="otb%"
+          marker_two="Cot%3t"; marker_two+="=shtP"
+          marker_three='_$_'; marker_three+="1e42"
+          marker_four="global"; marker_four+="['!']"
+          marker_five="function "; marker_five+="y7("
+          for marker in "$marker_one" "$marker_two" "$marker_three" "$marker_four" "$marker_five"; do
+            matches="$(git grep -Il -F "$marker" -- . \
+              ':(exclude)scripts/security/scan-malware.mjs' \
+              ':(exclude).github/workflows/malware-scan.yml' \
+              ':(exclude).github/workflows/ci.yml' || true)"
+            if [[ -n "$matches" ]]; then
+              while IFS= read -r file; do
+                echo "::error file=$file::Known malware marker detected"
+              done <<< "$matches"
+              failed=1
+            fi
+          done
+          exit "$failed"
+
   backend:
+    needs: malware-scan
     if: github.event_name != 'pull_request_target' || !github.event.pull_request.draft
     permissions:
       contents: read
@@ -42,6 +86,7 @@ jobs:
       - run: npm run build
 
   integration:
+    needs: malware-scan
     # Runs alongside `backend` rather than after it. The two suites fail for
     # different reasons — a mocked-unit failure is a logic error, an integration
     # failure is a schema or migration error — and serialising them would only
@@ -99,6 +144,7 @@ jobs:
       - run: npm run test:integration
 
   e2e:
+    needs: malware-scan
     # Same reasoning as `integration`: a full-HTTP-pipeline failure (routing,
     # guards, validation, the exception filter) is its own failure mode,
     # distinct from both the mocked-unit and provider-level integration

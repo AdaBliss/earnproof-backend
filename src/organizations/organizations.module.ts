@@ -1,13 +1,60 @@
 import { Module } from "@nestjs/common";
 import { AuthModule } from "../auth/auth.module";
+import { AuditModule } from "../audit/audit.module";
+import { QuotasModule } from "../quotas/quotas.module";
+import { Clock, SystemClock } from "../common/time/clock";
 import { DatabaseModule } from "../database/database.module";
-import { OrganizationsService } from "./organizations.service";
+import { JobsModule } from "../jobs/jobs.module";
+import { AccessReviewController } from "./access-review.controller";
+import { AccessReviewService } from "./access-review.service";
+import { MembershipImportController } from "./membership-import.controller";
+import { MembershipImportService } from "./membership-import.service";
+import { OrganizationLifecycleController } from "./organization-lifecycle.controller";
+import { OrganizationLifecycleService } from "./organization-lifecycle.service";
+import { OrganizationMembersService } from "./organization-members.service";
+import { OrganizationMemberGuard } from "./guards/organization-member.guard";
+import { OrganizationReadinessService } from "./organization-readiness.service";
 import { OrganizationsController } from "./organizations.controller";
+import { OrganizationsService } from "./organizations.service";
+import { RoleApprovalPolicyController } from "./role-approval-policy/role-approval-policy.controller";
+import { RoleApprovalPolicyService } from "./role-approval-policy/role-approval-policy.service";
+import { OrganizationInvitationsController } from "./organization-invitations.controller";
+import { InvitationsController } from "./invitations.controller";
+import { OrganizationInvitationsService } from "./organization-invitations.service";
 
 @Module({
-  imports: [DatabaseModule, AuthModule],
-  controllers: [OrganizationsController],
-  providers: [OrganizationsService],
-  exports: [OrganizationsService],
+  imports: [DatabaseModule, AuthModule, JobsModule, QuotasModule],
+  controllers: [
+    OrganizationsController,
+    OrganizationLifecycleController,
+    MembershipImportController,
+    AccessReviewController,
+    RoleApprovalPolicyController,
+    OrganizationInvitationsController,
+    InvitationsController,
+  ],
+  providers: [
+    OrganizationsService,
+    OrganizationLifecycleService,
+    OrganizationMembersService,
+    OrganizationMemberGuard,
+    OrganizationReadinessService,
+    MembershipImportService,
+    AccessReviewService,
+    RoleApprovalPolicyService,
+    OrganizationInvitationsService,
+    { provide: Clock, useClass: SystemClock },
+  ],
+  exports: [
+    OrganizationsService,
+    OrganizationLifecycleService,
+    OrganizationMembersService,
+    OrganizationMemberGuard,
+    OrganizationReadinessService,
+    MembershipImportService,
+    AccessReviewService,
+    RoleApprovalPolicyService,
+    OrganizationInvitationsService,
+  ],
 })
 export class OrganizationsModule {}

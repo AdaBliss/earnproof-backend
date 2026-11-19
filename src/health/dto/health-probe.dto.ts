@@ -91,7 +91,9 @@ export class DependencyResultDto {
 export class ReadinessResponseDto {
   @ApiProperty({
     description:
-      "Aggregate verdict. Only required dependencies can produce not_ready.",
+      "Aggregate verdict. Only required dependencies can produce not_ready. " +
+      "Returned only by the authorized diagnostics endpoint; the public " +
+      "readiness probe reports just this verdict, never the dependency list.",
     enum: ["ready", "not_ready"],
     example: "ready",
   })
@@ -99,4 +101,42 @@ export class ReadinessResponseDto {
 
   @ApiProperty({ type: [DependencyResultDto] })
   dependencies!: DependencyResultDto[];
+}
+
+/**
+ * Public readiness probe response.
+ *
+ * Deliberately minimal: the aggregate verdict, the service name, when the
+ * probe was answered, and — when the request carried one — the opaque
+ * `X-Request-ID` correlation reference. It names no dependency, carries no
+ * reason code, duration, or diagnostic detail, so an unauthenticated caller
+ * learns only whether the service can serve work and how to ask an operator
+ * about this specific answer.
+ */
+export class PublicReadinessResponseDto {
+  @ApiProperty({
+    description:
+      "Aggregate verdict. Only required dependencies can produce not_ready.",
+    enum: ["ready", "not_ready"],
+    example: "ready",
+  })
+  status!: string;
+
+  @ApiProperty({ example: "earnproof-api" })
+  service!: string;
+
+  @ApiProperty({
+    description: "ISO-8601 UTC timestamp of when the probe was answered.",
+    example: "2025-01-15T12:00:00.000Z",
+  })
+  timestamp!: string;
+
+  @ApiPropertyOptional({
+    description:
+      "Opaque correlation reference echoed from the X-Request-ID header. " +
+      "Identifies this request in server-side logs; it is not a dependency " +
+      "or diagnostic detail.",
+    example: "9f2c1a7b4e5d4a3b8c6d7e8f90a1b2c3",
+  })
+  requestId?: string;
 }

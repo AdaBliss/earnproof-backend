@@ -99,15 +99,32 @@ describe("HealthController", () => {
   });
 
   describe("readiness", () => {
-    it("returns the readiness payload when required dependencies are healthy", async () => {
+    it("returns the public readiness verdict only, with no dependency detail", async () => {
       const controller = new HealthController(buildService());
 
-      await expect(controller.getReadiness()).resolves.toMatchObject({
+      const result = await controller.getReadiness({} as Request);
+
+      expect(result).toMatchObject({
         status: "ready",
+        service: "earnproof-api",
       });
+      expect(typeof result.timestamp).toBe("string");
+      // The public view must not name, count, or time any dependency.
+      expect(result).not.toHaveProperty("dependencies");
+      expect(JSON.stringify(result)).not.toContain("database");
     });
 
-    it("throws 503 and includes which dependency blocked readiness", async () => {
+    it("echoes a valid request ID as the correlation reference", async () => {
+      const controller = new HealthController(buildService());
+
+      const result = await controller.getReadiness({
+        requestId: "9f2c1a7b4e5d4a3b8c6d7e8f90a1b2c3",
+      } as unknown as Request);
+
+      expect(result.requestId).toBe("9f2c1a7b4e5d4a3b8c6d7e8f90a1b2c3");
+    });
+
+    it("throws a generic 503 that names no dependency", async () => {
       const notReady = {
         status: "not_ready",
         dependencies: [
@@ -126,9 +143,24 @@ describe("HealthController", () => {
         } as Partial<HealthService>),
       );
 
-      await expect(controller.getReadiness()).rejects.toMatchObject({
-        response: notReady,
-      });
+      let thrown: unknown;
+      try {
+        await controller.getReadiness({} as Request);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(ServiceUnavailableException);
+      expect((thrown as ServiceUnavailableException).message).toBe(
+        "Service is not ready",
+      );
+      // The per-dependency payload must not travel in the exception: an
+      // operator reads it from the authorized diagnostics endpoint.
+      const serialized = JSON.stringify(
+        (thrown as ServiceUnavailableException).getResponse(),
+      );
+      expect(serialized).not.toContain("database");
+      expect(serialized).not.toContain("probe_timeout");
     });
   });
 

@@ -106,3 +106,51 @@ export interface ReadinessResult {
   status: "ready" | "not_ready";
   dependencies: DependencyResult[];
 }
+
+/**
+ * What an unauthenticated caller may see of readiness: the aggregate verdict
+ * only.
+ *
+ * This is the entire public readiness contract. Dependency names, kinds,
+ * statuses, reason codes, probe durations, cache ages, circuit detail, and
+ * clock-skew snapshots are diagnostics: they name infrastructure and its
+ * current state, which is exactly the reconnaissance an unauthenticated
+ * caller must not get. They stay behind the authorized diagnostics endpoint.
+ * `requestId` is an opaque correlation reference (echoed from the
+ * `X-Request-ID` header when the request carried one); it identifies the
+ * request in server-side logs, never a person or a dependency.
+ */
+export interface PublicReadinessResult {
+  status: "ready" | "not_ready";
+  service: string;
+  /** ISO-8601 UTC timestamp of when the probe was answered. */
+  timestamp: string;
+  /** Opaque correlation reference, present only when the request carried one. */
+  requestId?: string;
+}
+
+/** Name reported by every public health probe. */
+export const HEALTH_SERVICE_NAME = "earnproof-api";
+
+/**
+ * Project a full readiness result onto its public view.
+ *
+ * Pure and total: the output is built field by field from the aggregate
+ * verdict, so no dependency detail can leak through by being added to
+ * {@link DependencyResult} later. The result is deterministic in shape and
+ * bounded to four fields.
+ */
+export function toPublicReadiness(
+  result: ReadinessResult,
+  requestId?: string,
+): PublicReadinessResult {
+  const publicResult: PublicReadinessResult = {
+    status: result.status,
+    service: HEALTH_SERVICE_NAME,
+    timestamp: new Date().toISOString(),
+  };
+  if (requestId !== undefined) {
+    publicResult.requestId = requestId;
+  }
+  return publicResult;
+}

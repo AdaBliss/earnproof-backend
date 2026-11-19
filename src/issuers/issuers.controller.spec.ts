@@ -1,5 +1,5 @@
 import { NotFoundException } from "@nestjs/common";
-import { ResourceStatus } from "@prisma/client";
+import { IssuerAssuranceLevel, ResourceStatus } from "@prisma/client";
 import { Test, TestingModule } from "@nestjs/testing";
 import { AuthTokenService } from "../auth/auth-token.service";
 import { AuthGuard } from "../common/guards/auth.guard";
@@ -29,6 +29,13 @@ describe("IssuersController", () => {
     contractSyncState: "PENDING",
     contractTransactionHash: null,
     contractSyncedAt: null,
+    assuranceLevel: IssuerAssuranceLevel.NONE,
+    accreditationExpiresAt: null,
+    accreditationSyncedAt: null,
+    accreditationContractId: null,
+    accreditationTransactionHash: null,
+    effectiveAccreditationStatus: "NOT_ACCREDITED" as const,
+    accreditationStale: false,
     revision: 0,
     verifiedAt: null,
     suspendedAt: null,
@@ -42,6 +49,10 @@ describe("IssuersController", () => {
     stellarAddress:
       "GBUQWP3BOUZX34ULNQG23RQ6F4BVWCIBTBTQUGS7SEEDS23ABC123DEF45",
     trustStatus: "PENDING" as const,
+    assuranceLevel: IssuerAssuranceLevel.NONE,
+    accreditationExpiresAt: null,
+    effectiveAccreditationStatus: "NOT_ACCREDITED" as const,
+    accreditationStale: false,
     publicMetadata: {
       name: "Test Issuer",
       description: "A test issuer",

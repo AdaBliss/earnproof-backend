@@ -119,6 +119,9 @@ npm run image:verify -- \
   --expected-tag "${TAG}"
 
 docker run --rm -p 4000:4000 \
+  --read-only --tmpfs /tmp \
+  --cap-drop=ALL --security-opt=no-new-privileges:true \
+  --pids-limit 512 \
   -e NODE_ENV=production \
   -e DATABASE_URL='postgresql://user:password@db.internal:5432/earnproof' \
   -e REDIS_URL='redis://cache.internal:6379' \
@@ -129,6 +132,11 @@ docker run --rm -p 4000:4000 \
   -e PAYMENT_ENCRYPTION_KEY="$PAYMENT_ENCRYPTION_KEY" \
   "${IMAGE}@${DIGEST}"
 ```
+
+The runtime flags are part of the contract, not decoration — see
+[Runtime policy](#runtime-policy). The image never needs privileged mode, any
+Linux capability, a writable root filesystem, or more than 512 processes, and
+the run command above does not grant any of them.
 
 Then:
 
@@ -151,6 +159,9 @@ the development profile and give the container a route to the host:
 ```bash
 docker compose up -d                       # postgres + redis
 docker run --rm -p 4000:4000 \
+  --read-only --tmpfs /tmp \
+  --cap-drop=ALL --security-opt=no-new-privileges:true \
+  --pids-limit 512 \
   -e NODE_ENV=development \
   -e DATABASE_URL='postgresql://earnproof:earnproof@host.docker.internal:5432/earnproof' \
   -e REDIS_URL='redis://host.docker.internal:6379' \
@@ -214,10 +225,74 @@ crash loop:
 
 ```bash
 docker run --rm \
+  --read-only --tmpfs /tmp \
+  --cap-drop=ALL --security-opt=no-new-privileges:true \
+  --pids-limit 512 \
   -e DATABASE_URL="$DATABASE_URL" \
   "${IMAGE}@${DIGEST}" \
-  npm run prisma:migrate:deploy
+  ./node_modules/.bin/prisma migrate deploy
 ```
+
+The migration job runs the Prisma binary directly rather than through `npm
+run`: npm writes cache entries and failure logs under `$HOME`, which is
+read-only inside the container, so `npm run prisma:migrate:deploy` fails
+under `--read-only` while the binary itself needs no writable path. It takes
+the same hardened flags as the serving container.
+
+## Runtime policy
+
+The production container runs with minimal privileges. The table is the
+whole contract; anything not listed here is not granted.
+
+| Setting | Value | Where it is set |
+|---|---|---|
+| User | `node` (uid 1000), never root | `USER node` in the `Dockerfile` runtime stage; runtime files are copied with `--chown=node:node` |
+| Root filesystem | Read-only | `--read-only` on every `docker run` in this document |
+| Writable paths | `/tmp` only, as tmpfs | `--tmpfs /tmp` on every `docker run`; the image pins `TMPDIR=/tmp` |
+| Linux capabilities | None | `--cap-drop=ALL` on every `docker run` |
+| Privilege escalation | Disabled | `--security-opt=no-new-privileges:true` on every `docker run` |
+| Privileged mode | Never | No `--privileged` anywhere; the gate rejects it |
+| Process count | At most 512 | `--pids-limit 512` on every `docker run` |
+| Stop signal | `SIGTERM` | `STOPSIGNAL SIGTERM` in the `Dockerfile`; node runs as PID 1 under the exec-form `CMD` |
+| Healthcheck | `/api/v1/health`, 30s interval, 5s timeout, 20s start period, 3 retries | `HEALTHCHECK` in the `Dockerfile`, using Node's built-in `fetch` |
+
+### Writable paths, in detail
+
+The application writes nothing to disk in normal operation: logs go to
+stdout, state lives in PostgreSQL and Redis. The single exception is the
+organization-export staging area, which holds encrypted archives between
+generation and download (see
+[`../src/organizations/exports/export-artifact-store.ts`](../src/organizations/exports/export-artifact-store.ts)):
+it defaults to `$TMPDIR/earnproof-exports`, is created on demand with mode
+`0700`, and its files are written with mode `0600`. `TMPDIR` is pinned to
+`/tmp` in the image, so the default stays on the tmpfs mount. If
+`ORGANIZATION_EXPORT_TEMP_DIR` is ever set explicitly, it must point under a
+tmpfs mount (a path under `/tmp`); a path under `/app` or anywhere else on
+the read-only root filesystem will fail at the first export write, which is
+the intended behaviour — a silent fallback to a writable location would
+defeat the policy.
+
+Health behaviour does not depend on the filesystem: the `HEALTHCHECK` uses
+Node's built-in `fetch` against `/api/v1/health`, which reads process state
+and database connectivity and writes nothing, so a container stays
+probeable with a read-only root filesystem and no extra binary in the image.
+For orchestrator probes, prefer `/api/v1/health/live` and
+`/api/v1/health/ready` as documented under [Health checks](#health-checks).
+
+### Verifying the policy
+
+```bash
+npm run runtime:policy
+```
+
+`scripts/runtime-policy.ts` statically checks the `Dockerfile`, every
+`docker run` in this document, `docker-compose.yml`, and the export artifact
+store against the table above, and exits non-zero on the first violation. It
+needs no Docker daemon and no built image, so it runs in CI
+(`.github/workflows/ci.yml`, right after the migration-safety gate) and on a
+developer machine. Change the policy by changing the table and the gate
+together — a run command edited without its flags fails the gate rather than
+silently shipping a more privileged container.
 
 ## Health checks
 
@@ -247,7 +322,9 @@ documented in [`shutdown.md`](shutdown.md).
 ## Security posture
 
 - **Non-root.** The runtime stage runs as the base image's `node` user (uid
-  1000). Nothing in the image requires write access outside `/tmp`.
+  1000). Nothing in the image requires write access outside `/tmp`, and the
+  runtime files in `/app` are owned by `node`, so the process never needs
+  root to read its own code.
 - **Minimal surface.** The runtime stage installs one package, `openssl`, which
   the Prisma query engine links against. There is no compiler, no `curl`, no
   `wget`; the health check uses Node's built-in `fetch`.
@@ -258,11 +335,13 @@ documented in [`shutdown.md`](shutdown.md).
 - **Signed releases.** Production images are keyless-signed and
   provenance-attested by the release workflow and deployed by digest only;
   see [Signed images and digest verification](#signed-images-and-digest-verification).
-- **Read-only filesystem is supported.** The application writes nothing to disk:
-
-  ```bash
-  docker run --read-only --tmpfs /tmp ... earnproof-api:local
-  ```
+- **Read-only filesystem.** The container runs with `--read-only` and a
+  `--tmpfs /tmp` mount; the only writable path is `/tmp`, used solely for
+  export-archive staging as documented under
+  [Runtime policy](#runtime-policy). No `--privileged`, no added
+  capabilities, no privilege escalation: `--cap-drop=ALL`,
+  `--security-opt=no-new-privileges:true`, `--pids-limit 512`. The whole
+  contract is enforced by `npm run runtime:policy`.
 
 ## Related
 

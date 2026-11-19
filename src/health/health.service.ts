@@ -13,6 +13,10 @@ import {
 import { HealthHysteresisService } from "./health-hysteresis.service";
 import { ClockSkewMonitorService } from "./clock-skew-monitor.service";
 import {
+  DATABASE_POOL_REASONS,
+  DatabasePoolMonitorService,
+} from "./database-pool-monitor.service";
+import {
   DependencyKind,
   DependencyResult,
   DependencyStatus,
@@ -83,6 +87,7 @@ export class HealthService {
     @Optional() p4?: any,
     @Optional() p5?: any,
     @Optional() private readonly clockSkew?: ClockSkewMonitorService,
+    @Optional() private readonly poolMonitor?: DatabasePoolMonitorService,
   ) {
     const rest = [p3, p4, p5].filter(Boolean);
     for (const item of rest) {
@@ -163,6 +168,22 @@ export class HealthService {
     }
     const dependencies = await Promise.all(requiredProbes);
 
+    // Pool saturation gates readiness only through its sustained-critical
+    // latch (see probePoolReadiness). It is sampled after the database probe
+    // succeeds: a dead database already fails readiness, and sampling pool
+    // metrics against it would only add a second failing connection attempt.
+    // Not cached: the monitor rate-limits its own reads.
+    const database = dependencies.find(
+      (dependency) => dependency.name === "database",
+    );
+    if (
+      this.poolMonitor?.enabled &&
+      database?.status === DependencyStatus.OK
+    ) {
+      const pool = await this.probePoolReadiness();
+      if (pool) dependencies.push(pool);
+    }
+
     const blocked = dependencies.some(
       (dependency) =>
         dependency.kind === DependencyKind.REQUIRED &&
@@ -235,6 +256,7 @@ export class HealthService {
         Promise.resolve(this.probeCircuitBreakers()),
       ),
       Promise.resolve(this.probeClockSkewDiagnostics()),
+      this.probePoolDiagnostics(),
     );
     const dependencies = await Promise.all(diagProbes);
 
@@ -319,9 +341,17 @@ export class HealthService {
 
   /** Probe the primary database with a trivial query. */
   private async probeDatabase(): Promise<DependencyResult> {
-    return this.timed("database", DependencyKind.REQUIRED, async () => {
+    const result = await this.timed("database", DependencyKind.REQUIRED, async () => {
       await this.prisma.$queryRaw`SELECT 1`;
     });
+    // Feed the outcome to the pool monitor: a timeout is a failed connection
+    // acquisition (and a saturation observation), a success contributes its
+    // duration to the bounded fallback wait buffer.
+    this.poolMonitor?.recordProbeOutcome(
+      result.durationMs ?? 0,
+      result.status === DependencyStatus.TIMEOUT,
+    );
+    return result;
   }
 
   /**
@@ -579,6 +609,85 @@ export class HealthService {
       reason: blocked ? "clock_skew_sustained_critical" : undefined,
       durationMs: 0,
     };
+  }
+
+  /**
+   * Readiness view of pool saturation.
+   *
+   * Returns a dependency only while the monitor's sustained-critical latch
+   * is set — a single saturated sample never drains a replica from the load
+   * balancer, exactly like the sustained clock-skew alert. Absent otherwise,
+   * so readiness stays silent about the pool until it actually blocks.
+   */
+  private async probePoolReadiness(): Promise<DependencyResult | null> {
+    const monitor = this.poolMonitor;
+    if (!monitor || !monitor.enabled) return null;
+    const snapshot = await monitor.sample();
+    if (!monitor.blocksReadiness()) return null;
+    return {
+      name: "database_pool",
+      kind: DependencyKind.REQUIRED,
+      status: DependencyStatus.ERROR,
+      reason: DATABASE_POOL_REASONS.saturationSustained,
+      durationMs: 0,
+      pool: snapshot,
+    };
+  }
+
+  /**
+   * Diagnostics view of pool saturation: the full bounded snapshot —
+   * occupancy, wait latency, timeout counts, thresholds, hysteresis state,
+   * and the runbook link. Numbers and stable codes only.
+   *
+   * REQUIRED only while the sustained-critical latch actually gates
+   * readiness, so the diagnostics verdict never disagrees with readiness
+   * about the pool.
+   */
+  private async probePoolDiagnostics(): Promise<DependencyResult> {
+    const monitor = this.poolMonitor;
+    if (!monitor || !monitor.enabled) {
+      return {
+        name: "database_pool",
+        kind: DependencyKind.OPTIONAL,
+        status: DependencyStatus.NOT_CONFIGURED,
+        reason: DATABASE_POOL_REASONS.monitorAbsent,
+      };
+    }
+    const snapshot = await monitor.sample();
+    const blocking = monitor.blocksReadiness();
+    const base = {
+      name: "database_pool",
+      kind: blocking ? DependencyKind.REQUIRED : DependencyKind.OPTIONAL,
+      durationMs: 0,
+      pool: snapshot,
+    };
+    switch (snapshot.status) {
+      case "ok":
+        return { ...base, status: DependencyStatus.OK };
+      case "warning":
+        return {
+          ...base,
+          status: DependencyStatus.DEGRADED,
+          reason: DATABASE_POOL_REASONS.saturationWarning,
+        };
+      case "critical":
+        return {
+          ...base,
+          status: blocking ? DependencyStatus.ERROR : DependencyStatus.DEGRADED,
+          reason: blocking
+            ? DATABASE_POOL_REASONS.saturationSustained
+            : DATABASE_POOL_REASONS.saturationCritical,
+        };
+      case "disabled":
+        return { ...base, status: DependencyStatus.DISABLED };
+      default:
+        return {
+          ...base,
+          status: DependencyStatus.DEGRADED,
+          reason:
+            snapshot.reason ?? DATABASE_POOL_REASONS.metricsUnavailable,
+        };
+    }
   }
 
   /**

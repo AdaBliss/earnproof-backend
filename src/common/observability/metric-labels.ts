@@ -99,6 +99,9 @@ export const ALLOWED_METRIC_LABELS = {
   /** Health verdict. */
   health: ["up", "down", "degraded"],
 
+  /** Database pool saturation state reported by the pool monitor. */
+  pool_status: ["ok", "warning", "critical", "unknown", "disabled"],
+
   /** Organization operational quota. Names the quota, never the tenant. */
   quota: ["api_keys", "webhooks", "proof_requests", "sync_frequency"],
 } as const;

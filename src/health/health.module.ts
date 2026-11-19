@@ -8,6 +8,7 @@ import { DeploymentMetadataService } from "./deployment-metadata.service";
 import { HealthController } from "./health.controller";
 import { IncidentsController } from "./incidents.controller";
 import { HealthService } from "./health.service";
+import { DatabasePoolMonitorService } from "./database-pool-monitor.service";
 import { ProtocolPauseController } from "./protocol-pause.controller";
 import { ProtocolPauseService } from "./protocol-pause.service";
 
@@ -16,11 +17,12 @@ import { ProtocolPauseService } from "./protocol-pause.service";
   controllers: [HealthController, ProtocolPauseController],
   providers: [
     HealthService,
+    DatabasePoolMonitorService,
     DeploymentMetadataService,
     ProtocolPauseService,
     ClockSkewMonitorService,
     { provide: Clock, useClass: SystemClock },
   ],
-  exports: [HealthService, ProtocolPauseService, ClockSkewMonitorService],
+  exports: [HealthService, DatabasePoolMonitorService, ProtocolPauseService, ClockSkewMonitorService],
 })
 export class HealthModule {}

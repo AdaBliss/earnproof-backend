@@ -295,6 +295,9 @@ describe("MetricsRegistry", () => {
       expect(names).toContain(METRIC_NAMES.webhookDeliveriesTotal);
       // Database health
       expect(names).toContain(METRIC_NAMES.databaseProbesTotal);
+      // Database pool saturation
+      expect(names).toContain(METRIC_NAMES.databasePoolTimeoutsTotal);
+      expect(names).toContain(METRIC_NAMES.databasePoolWaitDurationMs);
       // Verification outcomes
       expect(names).toContain(METRIC_NAMES.verificationsTotal);
     });

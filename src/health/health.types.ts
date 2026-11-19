@@ -10,6 +10,7 @@
  */
 
 import type { ClockSkewSnapshot } from "./clock-skew-monitor.service";
+import type { DatabasePoolSnapshot } from "./database-pool-monitor.service";
 
 /**
  * Stable, safe status codes.
@@ -81,6 +82,12 @@ export interface DependencyResult {
    * Numbers, source names and stable codes only — see clock-skew-monitor.
    */
   clockSkew?: ClockSkewSnapshot;
+  /**
+   * Pool saturation detail, present only on the `database_pool` entry.
+   * Counts, ratios, latencies, thresholds and a runbook link only — never
+   * a connection string, credential, host, or query text.
+   */
+  pool?: DatabasePoolSnapshot;
 }
 
 /** Privacy-safe view of one circuit for the diagnostics endpoint. */

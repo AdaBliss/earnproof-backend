@@ -74,6 +74,18 @@ export class DependencyResultDto {
     additionalProperties: true,
   })
   clockSkew?: object;
+
+  @ApiPropertyOptional({
+    description:
+      "Diagnostics only, on the `database_pool` entry: bounded pool " +
+      "occupancy, wait latency, timeout counts, thresholds, hysteresis " +
+      "state, and the runbook link. Counts and ratios only — never a " +
+      "connection string, credential, host, or query text. See " +
+      "docs/runbooks/database-pool-saturation.md.",
+    type: "object",
+    additionalProperties: true,
+  })
+  pool?: object;
 }
 
 export class ReadinessResponseDto {

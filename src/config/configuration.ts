@@ -38,6 +38,9 @@ export const configuration = () => ({
   paymentEncryptionKeyVersion: Number(
     process.env.PAYMENT_ENCRYPTION_KEY_VERSION ?? 0,
   ),
+  envelopeEncryption: {
+    provider: process.env.ENVELOPE_ENCRYPTION_PROVIDER ?? "local",
+  },
   verificationEventRetentionDays: Number(
     process.env.VERIFICATION_EVENT_RETENTION_DAYS ?? 90,
   ),

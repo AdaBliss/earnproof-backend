@@ -18,16 +18,17 @@ which is what the application enforces and what the tests assert against.
 
 | Boundary | Enforced by | Rejects with |
 |---|---|---|
-| **Transport** — bytes on the socket | `express.json` limits, in [`bootstrap.ts`](../src/bootstrap.ts) | `413 PAYLOAD_TOO_LARGE` |
+| **Transport** — compressed and expanded bytes | Compressed-body gate and `express.json` limits, in [`bootstrap.ts`](../src/bootstrap.ts) | `413 PAYLOAD_TOO_LARGE` |
 | **Structure** — depth, array length, string length, node count | [`requestShapeMiddleware`](../src/common/middleware/request-shape.middleware.ts) | `413 PAYLOAD_TOO_LARGE` |
 | **Domain** — what each field means | DTO decorators | `422 VALIDATION_ERROR` |
 
-They run in that order, and the order is the design. The transport limit refuses
-an oversized body while it is still bytes arriving on a socket — it is never
-parsed, never validated, never logged, and no handler runs. The structural check
-is the first thing to look at a parsed body, before guards do database work and
-before class-transformer walks it. Only then does the domain get a say, and by
-then the input is small enough that being wrong about it is cheap.
+They run in that order, and the order is the design. Compressed bodies are
+bounded before decompression; decoded bytes are bounded before JSON/form
+parsing. Rejected bodies are never parsed, validated, logged as payloads, or
+passed to a handler. The structural check is the first thing to look at a parsed
+body, before guards do database work and before class-transformer walks it. Only
+then does the domain get a say, and by then the input is small enough that being
+wrong about it is cheap.
 
 ## Transport: body size
 
@@ -44,6 +45,14 @@ Two routes are tighter, and none is looser:
 
 A test asserts no route limit exceeds the global one; a route limit above it
 would be silently ineffective and would read as protection that is not there.
+
+Compressed JSON and form bodies are bounded by the same route-specific limit
+before decompression. Decoded output is bounded by the existing transport limit
+and by a maximum `MAX_BODY_EXPANSION_RATIO` (100:1). Equality at each limit is
+accepted.
+Limit rejections increment `request_body_rejections_total{rejection}` with one of
+`compressed_too_large`, `expanded_too_large`, or `expansion_ratio_exceeded`.
+The closed reason vocabulary carries no request, route, or payload data.
 
 ## Structure
 

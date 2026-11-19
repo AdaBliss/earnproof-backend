@@ -5,6 +5,7 @@ import {
 } from "@nestjs/common";
 import { Reflector } from "@nestjs/core";
 import { json, urlencoded } from "express";
+import type { ErrorRequestHandler } from "express";
 import helmet from "helmet";
 import { GlobalExceptionFilter } from "./common/filters/global-exception.filter";
 import { RequestIdInterceptor } from "./common/interceptors/request-id.interceptor";
@@ -14,6 +15,12 @@ import {
   ROUTE_BODY_LIMITS,
 } from "./common/limits/request-limits";
 import { requestShapeMiddleware } from "./common/middleware/request-shape.middleware";
+import {
+  compressedRequestBodyMiddleware,
+  requestBodyRejectionReason,
+} from "./common/middleware/compressed-request-body.middleware";
+import { METRIC_NAMES } from "./common/observability/metrics.catalog";
+import { MetricsRegistry } from "./common/observability/metrics.registry";
 
 /**
  * The HTTP-level configuration of the application.
@@ -28,8 +35,8 @@ import { requestShapeMiddleware } from "./common/middleware/request-shape.middle
  * Order is load-bearing and is the reason this is one function rather than a
  * handful of calls at the call site:
  *
- * 1. **Body parsing, with a limit.** Refuses an oversized body while it is
- *    still bytes arriving on a socket. Nothing downstream ever sees it.
+ * 1. **Body parsing, with limits.** Bounds compressed bytes before decoding,
+ *    then bounds decoded bytes before the parsers consume them.
  * 2. **Structural limits.** The first thing to look at a parsed body, before
  *    guards do database work and before class-transformer walks it.
  * 3. Security headers and CORS.
@@ -38,6 +45,8 @@ import { requestShapeMiddleware } from "./common/middleware/request-shape.middle
 export interface AppConfiguration {
   /** Allowed CORS origin. Omitted in tests that do not exercise CORS. */
   readonly corsOrigin?: string;
+  /** Production metrics registry; omitted by test applications without telemetry. */
+  readonly metrics?: MetricsRegistry;
 }
 
 export function configureApp(
@@ -47,6 +56,8 @@ export function configureApp(
   app.setGlobalPrefix("api/v1");
 
   // ── Body limits ──────────────────────────────────────────────────────────
+  app.use(compressedRequestBodyMiddleware);
+
   // Mounted per prefix, longest first, then a global parser. body-parser skips
   // a request whose body another parser already read, so the first matching
   // mount is the one that applies — which is how the unauthenticated auth
@@ -61,6 +72,25 @@ export function configureApp(
 
   app.use(json({ limit: GLOBAL_BODY_LIMIT_BYTES }));
   app.use(urlencoded({ extended: false, limit: GLOBAL_BODY_LIMIT_BYTES }));
+
+  if (config.metrics) {
+    const metrics = config.metrics;
+    const requestBodyMetricHandler: ErrorRequestHandler = (
+      error,
+      _req,
+      _res,
+      next,
+    ) => {
+      const reason = requestBodyRejectionReason(error);
+      if (reason) {
+        metrics.increment(METRIC_NAMES.requestBodyRejectionsTotal, {
+          rejection: reason,
+        });
+      }
+      next(error);
+    };
+    app.use(requestBodyMetricHandler);
+  }
 
   // ── Structural limits ────────────────────────────────────────────────────
   app.use(requestShapeMiddleware);

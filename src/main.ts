@@ -12,6 +12,7 @@ import {
   SESSION_AUTH_SCHEME,
   SESSION_AUTH_SCHEME_DEFINITION,
 } from "./common/swagger/security-schemes";
+import { MetricsRegistry } from "./common/observability/metrics.registry";
 import { HealthService } from "./health/health.service";
 
 async function bootstrap() {
@@ -38,7 +39,10 @@ async function bootstrap() {
   // Body limits, structural limits, security headers, CORS, interceptors, the
   // error filter and validation, in the order a request meets them. See
   // `src/bootstrap.ts`; kept there so tests can exercise the same pipeline.
-  configureApp(app, { corsOrigin: configService.getOrThrow<string>("appUrl") });
+  configureApp(app, {
+    corsOrigin: configService.getOrThrow<string>("appUrl"),
+    metrics: app.get(MetricsRegistry),
+  });
 
   // ── Swagger / OpenAPI ────────────────────────────────────────────────────
   const documentConfig = new DocumentBuilder()

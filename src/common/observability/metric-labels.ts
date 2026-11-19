@@ -101,6 +101,13 @@ export const ALLOWED_METRIC_LABELS = {
 
   /** Organization operational quota. Names the quota, never the tenant. */
   quota: ["api_keys", "webhooks", "proof_requests", "sync_frequency"],
+
+  /** Deterministic reason a request body crossed a transport expansion bound. */
+  rejection: [
+    "compressed_too_large",
+    "expanded_too_large",
+    "expansion_ratio_exceeded",
+  ],
 } as const;
 
 export type MetricLabelName = keyof typeof ALLOWED_METRIC_LABELS;

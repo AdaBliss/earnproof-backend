@@ -45,6 +45,18 @@ export function postRaw(
   body: string,
   contentType = "application/json",
 ): Promise<HttpResponse> {
+  return postBytes(baseUrl, path, Buffer.from(body), {
+    "content-type": contentType,
+  });
+}
+
+/** POSTs bytes with explicit headers for compressed transport fixtures. */
+export function postBytes(
+  baseUrl: string,
+  path: string,
+  body: Buffer,
+  headers: Record<string, string>,
+): Promise<HttpResponse> {
   const url = new URL(path, baseUrl);
 
   return new Promise((resolve, reject) => {
@@ -57,8 +69,8 @@ export function postRaw(
         path: url.pathname + url.search,
         method: "POST",
         headers: {
-          "content-type": contentType,
-          "content-length": Buffer.byteLength(body),
+          ...headers,
+          "content-length": body.length,
         },
       },
       (res) => {

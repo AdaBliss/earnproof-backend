@@ -189,6 +189,13 @@ after deletion, and an attestation stays resolvable through its issuer. Audit
 records keep their own retention class (`audit_logs`); deleting an organization
 does not shorten it.
 
+## Audit legal holds
+
+Audit records covered by an approved (or pending) legal hold are excluded from
+the `audit_logs` sweep and its dry run until the hold is released, rejected or
+expires. If holds cannot be read, audit cleanup fails closed for that run. See
+[audit-legal-holds.md](audit-legal-holds.md).
+
 ## Test coverage
 
 | Scenario | Where |

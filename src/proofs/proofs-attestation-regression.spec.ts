@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Regression Tests for Proof Issuance with Attestation Integration
  *
  * Verifies that adding attestation lifecycle validation to proof issuance
@@ -19,6 +19,7 @@ import { AttestationsService } from "../attestations/attestations.service";
 import { PrismaService } from "../database/prisma.service";
 import { VerificationEventService } from "../audit/verification-event.service";
 import { ConfigService } from "@nestjs/config";
+import { encodeCursor } from "../common/pagination/cursor";
 
 describe("Proofs Service - Attestation Integration Regression Tests", () => {
   let service: ProofsService;
@@ -232,7 +233,7 @@ describe("Proofs Service - Attestation Integration Regression Tests", () => {
       (prisma.proof.update as jest.Mock).mockResolvedValue(revokedProof);
       (prisma.anchoringIntent.create as jest.Mock).mockResolvedValue({});
 
-      const result = await service.revokeProof(mockUser.id, "proof-1");
+      const result = await service.revokeProof(mockUser as any, "proof-1");
 
       expect(result).toHaveProperty("id");
       expect(result).toHaveProperty("status");
@@ -357,7 +358,7 @@ describe("Proofs Service - Attestation Integration Regression Tests", () => {
       (prisma.proof.update as jest.Mock).mockResolvedValue(revokedProof);
       (prisma.anchoringIntent.create as jest.Mock).mockResolvedValue({});
 
-      const result = await service.revokeProof(mockUser.id, "proof-1");
+      const result = await service.revokeProof(mockUser as any, "proof-1");
 
       // Response should have expected structure
       expect(result).toHaveProperty("id");
@@ -451,13 +452,17 @@ describe("Proofs Service - Attestation Integration Regression Tests", () => {
     });
 
     it("should support pagination as before", async () => {
-      (prisma.proof.findFirst as jest.Mock).mockResolvedValue({ id: "cursor_proof" });
       (prisma.proof.findMany as jest.Mock).mockResolvedValue([]);
+      const cursor = encodeCursor(new Date("2026-08-01T00:00:00.000Z"), "cursor_proof");
 
-      await service.listProofs(mockUser.id, { cursor: "cursor_proof", limit: 50 });
+      await service.listProofs(mockUser.id, { cursor, limit: 50 });
 
       const callArgs = (prisma.proof.findMany as jest.Mock).mock.calls[0][0];
-      expect(callArgs.skip).toBe(1); // skip the cursor
+      // Keyset pagination resumes via an OR where-fragment rather than
+      // Prisma's native `cursor`/`skip`, since a raw auto-incrementing-style
+      // cursor can't carry the opaque, versioned, tamper-evident shape
+      // issue #188 requires.
+      expect(callArgs.where.OR).toBeDefined();
       expect(callArgs.take).toBe(51); // +1 for hasMore check
     });
   });

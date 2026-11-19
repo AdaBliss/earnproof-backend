@@ -17,7 +17,6 @@ import {
   NormalizedPayment,
 } from "./stellar.types";
 import { operationIndexFromToid } from "./operation-identity";
-import { HorizonPaymentRecord, NormalizedPayment } from "./stellar.types";
 
 /**
  * Cursor-paginated, fault-classifying reader for a Horizon payments feed.
@@ -245,8 +244,8 @@ export class HorizonClient {
     const url = this.pageUrl(
       address,
       options.pageLimit ?? DEFAULT_PAGE_LIMIT,
-      options.cursor,
       "asc",
+      options.cursor,
     );
     let attempts = 0;
     const page = await this.fetchPage(

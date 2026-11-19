@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -8,8 +9,14 @@ import { Prisma, ResourceStatus } from "@prisma/client";
 import { createHash } from "crypto";
 import { AuthenticatedUser } from "../auth/auth.types";
 import { sha256 } from "../common/crypto/hash";
+import {
+  buildPage,
+  cursorOrderBy,
+  cursorWhereFragment,
+} from "../common/pagination/keyset-paginate";
+import { PageInfo } from "../common/pagination/pagination.dto";
 import { PrismaService } from "../database/prisma.service";
-import { ConflictException } from "../common/exceptions/domain.exceptions";
+import { ConflictException as OptimisticLockConflictException } from "../common/exceptions/domain.exceptions";
 import { IssuerRegistryService } from "./issuer-registry.service";
 import { CreateIssuerDto } from "./dto/create-issuer.dto";
 import {
@@ -78,7 +85,7 @@ export class IssuersService {
     });
 
     if (existing) {
-      throw new ForbiddenException(
+      throw new ConflictException(
         `Issuer with Stellar address "${input.stellarAddress}" already exists`,
       );
     }
@@ -154,14 +161,13 @@ export class IssuersService {
         publicMetadata,
         contractSyncState: "PENDING",
         contractSyncError: null,
-        revision: { increment: 1 },
         revision: input.expectedRevision + 1,
       },
     });
 
     // If no records were updated, the revision didn't match
     if (updated.count === 0) {
-      throw new ConflictException(
+      throw new OptimisticLockConflictException(
         "Issuer has been modified by another request. Please refresh and retry.",
         issuer.revision,
       );
@@ -222,7 +228,6 @@ export class IssuersService {
       status: input.status,
       contractSyncState: "PENDING",
       contractSyncError: null,
-      revision: { increment: 1 },
       revision: input.expectedRevision + 1,
     };
 
@@ -252,7 +257,7 @@ export class IssuersService {
 
     // If no records were updated, the revision didn't match
     if (updated.count === 0) {
-      throw new ConflictException(
+      throw new OptimisticLockConflictException(
         "Issuer has been modified by another request. Please refresh and retry.",
         issuer.revision,
       );
@@ -296,14 +301,15 @@ export class IssuersService {
   async listIssuers(query: ListIssuersDto): Promise<{
     items: IssuerResponseDto[];
     total: number;
-    page: number;
     limit: number;
+    pageInfo: PageInfo;
   }> {
-    const page = query.page || 1;
     const limit = Math.min(query.limit || 20, 100);
-    const skip = (page - 1) * limit;
+    const cursorWhere = cursorWhereFragment(query.cursor, "createdAt");
 
-    const where: Prisma.IssuerWhereInput = {};
+    const where: Prisma.IssuerWhereInput = {
+      ...(cursorWhere as Prisma.IssuerWhereInput),
+    };
     if (query.status) {
       where.status = query.status;
     }
@@ -311,55 +317,57 @@ export class IssuersService {
       where.organizationId = query.organizationId;
     }
 
-    const [items, total] = await Promise.all([
+    const [rows, total] = await Promise.all([
       this.prisma.issuer.findMany({
         where,
-        skip,
-        take: limit,
-        orderBy: { createdAt: "desc" },
+        take: limit + 1,
+        orderBy: cursorOrderBy("createdAt"),
       }),
-      this.prisma.issuer.count({ where }),
+      this.prisma.issuer.count({ where: { status: where.status, organizationId: where.organizationId } }),
     ]);
+    const { data, pageInfo } = buildPage(rows, limit, "createdAt");
 
     return {
-      items: items.map((issuer) => this.toResponseDto(issuer)),
+      items: data.map((issuer) => this.toResponseDto(issuer)),
       total,
-      page,
       limit,
+      pageInfo,
     };
   }
 
   async listIssuersPublic(query: ListIssuersDto): Promise<{
     items: IssuerPublicResponseDto[];
     total: number;
-    page: number;
     limit: number;
+    pageInfo: PageInfo;
   }> {
-    const page = query.page || 1;
     const limit = Math.min(query.limit || 20, 100);
-    const skip = (page - 1) * limit;
+    const cursorWhere = cursorWhereFragment(query.cursor, "createdAt");
 
     // Public endpoint only shows active/trusted issuers
     const where: Prisma.IssuerWhereInput = {
       status: ResourceStatus.ACTIVE,
+      ...(cursorWhere as Prisma.IssuerWhereInput),
     };
 
     if (query.organizationId) {
       where.organizationId = query.organizationId;
     }
 
-    const [items, total] = await Promise.all([
+    const [rows, total] = await Promise.all([
       this.prisma.issuer.findMany({
         where,
-        skip,
-        take: limit,
-        orderBy: { createdAt: "desc" },
+        take: limit + 1,
+        orderBy: cursorOrderBy("createdAt"),
       }),
-      this.prisma.issuer.count({ where }),
+      this.prisma.issuer.count({
+        where: { status: ResourceStatus.ACTIVE, organizationId: where.organizationId },
+      }),
     ]);
+    const { data, pageInfo } = buildPage(rows, limit, "createdAt");
 
     return {
-      items: items.map((issuer) => {
+      items: data.map((issuer) => {
         const publicMetadata = this.allowlistedMetadata(issuer.publicMetadata);
 
         return {
@@ -371,8 +379,8 @@ export class IssuersService {
         };
       }),
       total,
-      page,
       limit,
+      pageInfo,
     };
   }
 
@@ -498,7 +506,6 @@ export class IssuersService {
       contractSyncState: issuer.contractSyncState,
       contractTransactionHash: issuer.contractTransactionHash,
       contractSyncedAt: issuer.contractSyncedAt,
-      revision: issuer.revision,
       verifiedAt: issuer.verifiedAt,
       suspendedAt: issuer.suspendedAt,
       revokedAt: issuer.revokedAt,

@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
+import { Injectable, NotFoundException, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
   Payment,
@@ -9,19 +9,27 @@ import {
 import { canonicalAssetId } from "../common/assets/asset-identifier";
 import { encryptProtectedAmount } from "../common/crypto/protected-amount";
 import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
+import {
+  buildPage,
+  cursorOrderBy,
+  cursorWhereFragment,
+} from "../common/pagination/keyset-paginate";
 import { PrismaService } from "../database/prisma.service";
 import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { StellarService } from "../stellar/stellar.service";
-import { normalizeMemoDetailed } from "../stellar/memo-normalizer";
-import { NormalizedMemo } from "../stellar/stellar.types";
+import { normalizeMemoDetailed, normalizeMemo } from "../stellar/memo-normalizer";
 import { StoredMemo, decodeStoredMemo, encodeStoredMemo } from "./payment-memo";
-import { normalizeMemo } from "../stellar/memo-normalizer";
 import { ledgerSequenceFromPagingToken } from "../stellar/ledger-finality";
 import { NormalizedMemo, NormalizedPayment } from "../stellar/stellar.types";
 import {
   FinalityOutcome,
   PaymentFinalityService,
 } from "./payment-finality.service";
+import { operationIndexFromToid } from "../stellar/operation-identity";
+import { PaymentEligibilityService } from "./payment-eligibility.service";
+import { PaymentClassificationHistoryService } from "./payment-classification-history.service";
+import { PaymentAddressCipher } from "../common/crypto/payment-address-cipher";
+import { PaymentAccountResolver } from "./payment-account.resolver";
 
 /**
  * A plan is re-read at most once per sync: when a forward read diverges, the
@@ -29,28 +37,26 @@ import {
  * left for the next sync rather than looping against an inconsistent Horizon.
  */
 const MAX_READS_PER_SYNC = 2;
-import { operationIndexFromToid } from "../stellar/operation-identity";
-import { NormalizedMemo } from "../stellar/stellar.types";
-import { PaymentEligibilityService } from "./payment-eligibility.service";
-import { PaymentClassificationHistoryService } from "./payment-classification-history.service";
 
 @Injectable()
 export class PaymentsService {
-  private readonly paymentEncryptionKey: string;
   private readonly stellarNetwork: string;
   private readonly paymentEncryptionKeyring: PaymentEncryptionKeyringService;
+  private readonly addressCipher: PaymentAddressCipher;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly stellarService: StellarService,
-    configService: ConfigService,
-    private readonly finality: PaymentFinalityService,
     private readonly configService: ConfigService,
+    private readonly finality: PaymentFinalityService,
     private readonly classificationHistoryService: PaymentClassificationHistoryService,
+    private readonly eligibility: PaymentEligibilityService,
+    @Optional() private readonly accounts?: PaymentAccountResolver,
   ) {
     this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
       configService,
     );
+    this.addressCipher = this.paymentEncryptionKeyring.addressCipher();
     this.stellarNetwork = configService.getOrThrow<string>("stellar.network");
   }
 
@@ -64,6 +70,19 @@ export class PaymentsService {
    * docs/ledger-finality.md.
    */
   async syncPayments(user: { id: string; walletAddress: string }) {
+    // The indexed account is the active monitored account after a payment
+    // account rotation (#321), and the wallet otherwise — unchanged for users
+    // who never rotated, and for wiring without the resolver.
+    if (!this.accounts) return this.syncAccount(user);
+    const account = await this.accounts.current(user);
+    try {
+      return await this.syncAccount({ id: user.id, walletAddress: account.accountId });
+    } finally {
+      await this.accounts.discardStaleCheckpoint(user, account);
+    }
+  }
+
+  private async syncAccount(user: { id: string; walletAddress: string }) {
     let plan = await this.finality.plan(user.id);
     // Resolved here rather than in the constructor: the network stamps every
     // synced payment's canonical identity, but classification-only call paths
@@ -170,7 +189,6 @@ export class PaymentsService {
     // of them.
     const memoCache = new Map<string, StoredMemo>();
     let conflicts = 0;
-    const memoCache = new Map<string, NormalizedMemo>();
     const syncedPaymentIds: string[] = [];
 
     for (const payment of incomingPayments) {
@@ -280,12 +298,12 @@ export class PaymentsService {
             isEligible,
             occurredAt: payment.occurredAt,
             memo: memoContext as Prisma.InputJsonValue,
-            network,
+            network: this.stellarNetwork,
             operationIndex,
           },
           create: {
-            userId: user.id,
-            network,
+            userId: userId,
+            network: this.stellarNetwork,
             operationId: payment.operationId,
             operationIndex,
             stellarTransactionHash: payment.stellarTransactionHash,
@@ -334,32 +352,37 @@ export class PaymentsService {
       skipped: counts.skipped,
       enrichmentErrors: counts.enrichmentErrors,
       finality,
-      totalFetched: incomingPayments.length,
-      created,
-      updated,
-      skipped,
-      enrichmentErrors,
-      conflicts,
     };
   }
 
   async listPayments(
     userId: string,
-    filters: { classification?: PaymentClassification; assetCode?: string },
+    filters: {
+      classification?: PaymentClassification;
+      assetCode?: string;
+      cursor?: string;
+      limit?: number;
+    },
   ) {
+    const limit = filters.limit ?? 20;
+    const cursorWhere = cursorWhereFragment(filters.cursor, "occurredAt");
     const payments = await this.prisma.payment.findMany({
       where: {
         userId,
         classification: filters.classification,
         assetCode: filters.assetCode,
+        ...(cursorWhere as Prisma.PaymentWhereInput),
       },
-      orderBy: {
-        occurredAt: "desc",
-      },
-      take: 100,
+      orderBy: cursorOrderBy("occurredAt"),
+      take: limit + 1,
     });
 
-    return payments.map((payment) => this.toPaymentDto(payment));
+    const { data, pageInfo } = buildPage(payments, limit, "occurredAt");
+
+    return {
+      data: data.map((payment) => this.toPaymentDto(payment)),
+      pageInfo,
+    };
   }
 
   async getPayment(userId: string, paymentId: string) {
@@ -465,8 +488,11 @@ export class PaymentsService {
       "classification_changed",
     );
 
-    return this.toPaymentDto(updated);
     return this.toPaymentDto(result);
+  }
+
+  async explainEligibility(userId: string, paymentId: string) {
+    return this.eligibility.explain(userId, paymentId);
   }
 
   private protectAmount(amount: string) {

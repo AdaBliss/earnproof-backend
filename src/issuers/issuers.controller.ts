@@ -192,7 +192,10 @@ export class IssuersController {
   @ApiOperation({
     summary: "List issuers (public)",
     description:
-      "Public endpoint to list active issuers with allowlisted metadata. Non-authenticated users see public listing.",
+      "Public, cursor-paginated endpoint listing active issuers with allowlisted " +
+      "metadata, ordered deterministically by `createdAt` then `id`. Non-authenticated " +
+      "users see public listing. Pass `pageInfo.nextCursor` from a response as the next " +
+      "request's `cursor`.",
   })
   @ApiResponse({
     status: 200,
@@ -245,7 +248,10 @@ export class IssuersController {
   @ApiOperation({
     summary: "List issuers (admin)",
     description:
-      "Admin-only endpoint to list all issuers with full details and ability to filter by status/organization",
+      "Admin-only, cursor-paginated endpoint to list all issuers with full details and " +
+      "ability to filter by status/organization, ordered deterministically by " +
+      "`createdAt` then `id`. Pass `pageInfo.nextCursor` from a response as the next " +
+      "request's `cursor`.",
   })
   @ApiResponse({
     status: 200,

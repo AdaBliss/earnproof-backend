@@ -187,6 +187,7 @@ export function redactError(error: unknown): string {
  * value that identifies a request, not a person.
  */
 export interface LogContext {
+  [key: string]: unknown;
   /** Propagated from `X-Request-ID`. Correlates a log line to one HTTP request. */
   requestId?: string;
   /** Identifies one execution of a scheduled job. */

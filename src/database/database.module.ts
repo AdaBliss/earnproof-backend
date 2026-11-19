@@ -7,5 +7,11 @@ import { DatabaseTimeoutService } from "./database-timeout.service";
 @Module({
   providers: [PrismaService, MigrationLeaseService, DatabaseTimeoutService],
   exports: [PrismaService, MigrationLeaseService, DatabaseTimeoutService],
+import { DistributedLeaseService } from "../jobs/distributed-lease.service";
+
+@Global()
+@Module({
+  providers: [PrismaService, MigrationLeaseService, DistributedLeaseService],
+  exports: [PrismaService, MigrationLeaseService, DistributedLeaseService],
 })
 export class DatabaseModule {}

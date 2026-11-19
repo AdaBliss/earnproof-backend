@@ -4,6 +4,7 @@ import { APP_INTERCEPTOR, DiscoveryModule } from "@nestjs/core";
 import { ScheduleModule } from "@nestjs/schedule";
 import { AuditModule } from "./audit/audit.module";
 import { ApiKeysModule } from "./api-keys/api-keys.module";
+import { ApprovalsModule } from "./approvals/approvals.module";
 import { AuthModule } from "./auth/auth.module";
 import { RateLimitModule } from "./common/rate-limit/rate-limit.module";
 import { ConsentModule } from "./common/consent/consent.module";
@@ -18,20 +19,29 @@ import { CredentialsModule } from "./credentials/credentials.module";
 import { DatabaseModule } from "./database/database.module";
 import { DisputesModule } from "./disputes/disputes.module";
 import { HealthModule } from "./health/health.module";
+import { IntegrationsModule } from "./integrations/integrations.module";
 import { HttpMetricsInterceptor } from "./common/interceptors/http-metrics.interceptor";
 import { IdempotentInterceptor } from "./common/interceptors/idempotent.interceptor";
 import { ObservabilityModule } from "./common/observability/observability.module";
 import { ResilienceModule } from "./common/resilience/resilience.module";
 import { JobsModule } from "./jobs/jobs.module";
+import { MetricsModule } from "./metrics/metrics.module";
 import { IssuersModule } from "./issuers/issuers.module";
 import { OrganizationsModule } from "./organizations/organizations.module";
+import { DataResidencyModule } from "./organizations/residency/data-residency.module";
 import { PaymentsModule } from "./payments/payments.module";
 import { ProofsModule } from "./proofs/proofs.module";
-import { ReconciliationModule } from "./reconciliation/reconciliation.module";
+import { SchemaImportsModule } from "./schemas/schema-imports.module";
 import { TrustedSourcesModule } from "./trusted-sources/trusted-sources.module";
 import { UsersModule } from "./users/users.module";
 import { WebhooksModule } from "./webhooks/webhooks.module";
 import { SupportedAssetsModule } from "./supported-assets/supported-assets.module";
+import { GovernanceModule } from "./governance/governance.module";
+import { SupportAccessModule } from "./support-access/support-access.module";
+import { ReconciliationModule } from "./reconciliation/reconciliation.module";
+import { DeploymentsModule } from "./deployments/deployments.module";
+import { NotificationsModule } from "./notifications/notifications.module";
+import { SecurityModule } from "./security/security.module";
 
 @Module({
   imports: [
@@ -50,23 +60,33 @@ import { SupportedAssetsModule } from "./supported-assets/supported-assets.modul
     DisclosureModule,
     AuditModule,
     ApiKeysModule,
+    ApprovalsModule,
     AuthModule,
     RateLimitModule,
     DisputesModule,
     TenantBudgetModule,
     HealthModule,
     EnvelopeEncryptionModule,
+    IntegrationsModule,
     OrganizationsModule,
+    DataResidencyModule,
     IssuersModule,
     PaymentsModule,
     ProofsModule,
     CredentialsModule,
-    ReconciliationModule,
+    SchemaImportsModule,
     TrustedSourcesModule,
     UsersModule,
     JobsModule,
+    MetricsModule,
     WebhooksModule,
     SupportedAssetsModule,
+    GovernanceModule,
+    SupportAccessModule,
+    ReconciliationModule,
+    DeploymentsModule,
+    NotificationsModule,
+    SecurityModule,
   ],
   providers: [
     {

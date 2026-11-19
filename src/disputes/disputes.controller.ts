@@ -16,11 +16,11 @@ import {
   ApiResponse,
   ApiTags,
 } from "@nestjs/swagger";
-import { AuthGuard } from "../auth/auth.guard";
+import { AuthGuard } from "../common/guards/auth.guard";
 import { AuthenticatedUser } from "../auth/auth.types";
-import { User } from "../auth/user.decorator";
-import { OrganizationGuard } from "../auth/organization.guard";
-import { Organization } from "../auth/organization.decorator";
+import { CurrentUser as User } from "../common/decorators/current-user.decorator";
+import { OrganizationMemberGuard as OrganizationGuard } from "../organizations/guards/organization-member.guard";
+const Organization = () => Param("organizationId");
 import { DisputesService } from "./disputes.service";
 import {
   CreateDisputeDto,
@@ -68,7 +68,7 @@ Evidence should be committed as a SHA-256 hash, not raw content.
     @Organization() organizationId: string,
     @Body() input: CreateDisputeDto,
   ): Promise<DisputeResponseDto> {
-    return this.disputesService.submitDispute(user, organizationId, input);
+    return (await this.disputesService.submitDispute(user, organizationId, input)) as unknown as DisputeResponseDto;
   }
 
   @Get()
@@ -110,7 +110,7 @@ Useful for dashboard displays and monitoring dispute volume.
     @User() user: AuthenticatedUser,
     @Organization() organizationId: string,
   ): Promise<DisputeStatsResponseDto> {
-    return this.disputesService.getDisputeStats(user, organizationId);
+    return (await this.disputesService.getDisputeStats(user, organizationId)) as unknown as DisputeStatsResponseDto;
   }
 
   @Get(":disputeId")

@@ -43,18 +43,37 @@ export class GenerateDisclosureReceiptDto {
 }
 
 /**
- * DTO for receipt verification request
+ * Requester information in receipt
  */
-export class VerifyReceiptDto {
-  @ApiProperty({
-    description: "Complete receipt payload to verify",
-  })
-  receipt: ReceiptPayloadDto;
+export class RequesterDto {
+  @ApiProperty({ example: "user_12345678-1234-5678-9abc-123456789012" })
+  @IsUUID()
+  userId: string;
 
   @ApiProperty({
-    description: "Receipt signature data",
+    example: "Employment verification for background check",
+    maxLength: 500,
   })
-  signature: ReceiptSignatureDto;
+  @IsString()
+  @MaxLength(500)
+  purpose: string;
+}
+
+/**
+ * Disclosure metadata in receipt
+ */
+export class DisclosureDto {
+  @ApiProperty({ example: "2024-01-15T10:30:00.000Z" })
+  @IsDateString()
+  approvedAt: string;
+
+  @ApiProperty({ example: "privacy-policy-v2.1" })
+  @IsString()
+  policyVersion: string;
+
+  @ApiProperty({ example: "2024-02-15T10:30:00.000Z" })
+  @IsDateString()
+  expiresAt: string;
 }
 
 /**
@@ -95,40 +114,6 @@ export class ReceiptPayloadDto {
 }
 
 /**
- * Requester information in receipt
- */
-export class RequesterDto {
-  @ApiProperty({ example: "user_12345678-1234-5678-9abc-123456789012" })
-  @IsUUID()
-  userId: string;
-
-  @ApiProperty({ 
-    example: "Employment verification for background check",
-    maxLength: 500,
-  })
-  @IsString()
-  @MaxLength(500)
-  purpose: string;
-}
-
-/**
- * Disclosure metadata in receipt
- */
-export class DisclosureDto {
-  @ApiProperty({ example: "2024-01-15T10:30:00.000Z" })
-  @IsDateString()
-  approvedAt: string;
-
-  @ApiProperty({ example: "privacy-policy-v2.1" })
-  @IsString()
-  policyVersion: string;
-
-  @ApiProperty({ example: "2024-02-15T10:30:00.000Z" })
-  @IsDateString()
-  expiresAt: string;
-}
-
-/**
  * Receipt signature structure
  */
 export class ReceiptSignatureDto {
@@ -141,19 +126,34 @@ export class ReceiptSignatureDto {
   @IsString()
   keyId: string;
 
-  @ApiProperty({ 
+  @ApiProperty({
     example: "ed25519:base64url_encoded_signature",
     description: "EdDSA signature in ed25519:base64url format",
   })
   @IsString()
   signature: string;
 
-  @ApiProperty({ 
+  @ApiProperty({
     example: "sha256_hash_of_canonical_payload",
     description: "SHA256 hash of the canonicalized receipt payload",
   })
   @IsString()
   credentialHash: string;
+}
+
+/**
+ * DTO for receipt verification request
+ */
+export class VerifyReceiptDto {
+  @ApiProperty({
+    description: "Complete receipt payload to verify",
+  })
+  receipt: ReceiptPayloadDto;
+
+  @ApiProperty({
+    description: "Receipt signature data",
+  })
+  signature: ReceiptSignatureDto;
 }
 
 /**

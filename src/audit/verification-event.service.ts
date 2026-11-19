@@ -1,8 +1,9 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { VerificationOutcome } from "@prisma/client";
 import { createHmac } from "crypto";
 import { StructuredLogger } from "../common/logger";
+import { Clock, SystemClock } from "../common/time/clock";
 import { PrismaService } from "../database/prisma.service";
 import type { RetentionImpactReport } from "../jobs/retention/retention-report";
 
@@ -107,17 +108,15 @@ export class VerificationEventService {
       if (fallbackSalt) {
         this.salts.set(0, fallbackSalt);
         this.logger.warn(
-          "Using credentialSigningSecret as fallback salt V0",
-          { context: "Configure VERIFICATION_HASH_SALT_V* for production" }
+          "Using credentialSigningSecret as fallback salt V0; configure VERIFICATION_HASH_SALT_V* for production",
         );
       }
     }
 
     if (!this.salts.has(this.currentSaltVersion)) {
-      this.logger.warn("Configured salt version is not available", {
-        configuredVersion: this.currentSaltVersion,
-        availableVersions: this.salts.size - 1,
-      });
+      this.logger.warn(
+        `Configured salt version ${this.currentSaltVersion} is not available`,
+      );
     }
   }
 
@@ -164,10 +163,9 @@ export class VerificationEventService {
       });
     } catch (error) {
       // Fail-open: log but do not throw
-      this.logger.warn("Failed to record verification event", {
-        proofId,
-        errorMessage: error instanceof Error ? error.message : String(error),
-      });
+      this.logger.warn(
+        `Failed to record verification event: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
@@ -253,22 +251,25 @@ export class VerificationEventService {
    *
    * @returns Number of records deleted (or, in a dry run, that would be)
    */
-  async cleanupExpiredEvents(): Promise<number> {
-    try {
-      const now = new Date();
-      this.prunePrivacyBudget(now.getTime());
-      const result = await this.prisma.verificationEventLog.deleteMany({
-        where: {
-          retainUntil: {
-            lt: now,
-          },
-        },
-      });
+  async cleanupExpiredEvents(
+    options: ExpiredEventCleanupOptions = {},
+  ): Promise<number> {
+    const report = await this.runExpiredEventsCleanup(options);
+    return report.mode === "dry_run"
+      ? report.totals.selected
+      : report.totals.affected;
+  }
 
-      this.logger.log("Verification event cleanup completed", {
-        count: result.count,
-        timestamp: now.toISOString(),
-      });
+  /**
+   * The expired-event cleanup with its full impact report.
+   */
+  async runExpiredEventsCleanup(
+    options: ExpiredEventCleanupOptions = {},
+  ): Promise<RetentionImpactReport> {
+    const dryRun = options.dryRun ?? false;
+    const now = options.now ?? this.clock.now();
+    const where = expiredEventsFilter(now);
+    this.prunePrivacyBudget(now.getTime());
 
     let selected = 0;
     let affected = 0;
@@ -291,10 +292,8 @@ export class VerificationEventService {
         );
       }
     } catch (error) {
-      this.logger.error("Verification event cleanup failed", error, {
-        errorMessage: error instanceof Error ? error.message : String(error),
-      });
-      return 0;
+      failed = true;
+      this.logger.error("Verification event cleanup failed", error);
     }
 
     return {
@@ -369,7 +368,7 @@ export class VerificationEventService {
 
       return stats as Record<VerificationOutcome, number>;
     } catch (error) {
-      this.logger.error("Failed to get verification stats", error, { proofId });
+      this.logger.error("Failed to get verification stats", error);
       // Return empty stats on error
       const empty: Record<string, number> = {};
       for (const outcome of Object.values(VerificationOutcome)) {

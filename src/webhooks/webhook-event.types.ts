@@ -66,16 +66,34 @@ export interface ProofVerifiedSource {
   verifiedAt: Date;
 }
 
+export interface AttestationExpiredSource {
+  attestationId: string;
+  issuerId: string;
+  subjectWalletHash: string;
+  previousStatus: string;
+  effectiveStatus: string;
+  expiresAt: Date | string;
+  reconciledAt: Date | string;
+}
+
 export interface WebhookEventSources {
   "proof.created": ProofCreatedSource;
   "proof.revoked": ProofRevokedSource;
   "proof.verified": ProofVerifiedSource;
+  "attestation.expired": AttestationExpiredSource;
 }
 
 /** A domain event awaiting fan-out to subscribed endpoints. */
 export type WebhookEventSource = {
   [E in WebhookEventType]: { event: E; source: WebhookEventSources[E] };
 }[WebhookEventType];
+
+export interface WebhookPayloadsV1 {
+  "proof.created": ProofCreatedPayload;
+  "proof.revoked": ProofRevokedPayload;
+  "proof.verified": ProofVerifiedPayload;
+  "attestation.expired": AttestationExpiredPayload;
+}
 
 // ---------------------------------------------------------------------------
 // Version 1 payload shapes — only public / non-sensitive fields are included.
@@ -126,6 +144,13 @@ export interface AttestationExpiredPayload {
   reconciledAt: string;
 }
 
+export interface WebhookPayloadsV1 {
+  "proof.created": ProofCreatedPayload;
+  "proof.revoked": ProofRevokedPayload;
+  "proof.verified": ProofVerifiedPayload;
+  "attestation.expired": AttestationExpiredPayload;
+}
+
 export type WebhookEventPayload =
   | { event: "proof.created"; data: ProofCreatedPayload }
   | { event: "proof.revoked"; data: ProofRevokedPayload }
@@ -145,13 +170,10 @@ export type WebhookEventPayload =
 export interface WebhookEnvelope<E extends WebhookEventType = WebhookEventType> {
   specVersion: "1";
   id: string; // delivery eventId — idempotency key for the integrator
-  event: WebhookEventType;
+  event: E;
+  schemaVersion: WebhookPayloadVersion;
   createdAt: string; // ISO-8601
-  data:
-    | ProofCreatedPayload
-    | ProofRevokedPayload
-    | ProofVerifiedPayload
-    | AttestationExpiredPayload;
+  data: WebhookPayloadsV1[E];
 }
 
 // ---------------------------------------------------------------------------

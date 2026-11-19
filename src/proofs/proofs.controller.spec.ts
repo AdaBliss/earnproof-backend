@@ -57,28 +57,18 @@ describe("ProofsController", () => {
       getVerificationStats: jest.fn(),
     };
 
-    controller = new ProofsController(proofsService as never);
+    controller = new ProofsController(proofsService as never, {} as never, {} as never);
   });
 
   describe("listProofs", () => {
     it("should list proofs for the authenticated user", async () => {
       const proofList: ProofListResponseDto = {
-        proofs: [
-          {
-            id: proofId,
-            type: "MINIMUM_INCOME",
-            status: "ACTIVE",
-            issuedAt: new Date("2027-01-01T00:00:00Z"),
-            expiresAt: new Date("2028-01-01T00:00:00Z"),
-            revokedAt: null,
-          },
-        ],
-        hasMore: false,
-        nextCursor: null,
+        data: [] as any,
+        pageInfo: { hasMore: false, nextCursor: null },
       };
       proofsService.listProofs.mockResolvedValueOnce(proofList);
 
-      const query: ListProofsDto = {};
+      const query: ListProofsDto = { limit: 20 };
       const result = await controller.listProofs(authenticatedUser, query);
 
       expect(result).toEqual(proofList);
@@ -87,13 +77,12 @@ describe("ProofsController", () => {
 
     it("should support cursor-based pagination", async () => {
       const proofList: ProofListResponseDto = {
-        proofs: [],
-        hasMore: true,
-        nextCursor: "cursor_123",
+        data: [] as any,
+        pageInfo: { hasMore: true, nextCursor: "cursor_123" },
       };
       proofsService.listProofs.mockResolvedValueOnce(proofList);
 
-      const query: ListProofsDto = { cursor: "cursor_abc" };
+      const query: ListProofsDto = { limit: 20, cursor: "cursor_abc" };
       await controller.listProofs(authenticatedUser, query);
 
       expect(proofsService.listProofs).toHaveBeenCalledWith(authenticatedUser.id, query);
@@ -104,7 +93,7 @@ describe("ProofsController", () => {
         new BadRequestException("Invalid cursor"),
       );
 
-      const query: ListProofsDto = { cursor: "invalid" };
+      const query: ListProofsDto = { limit: 20, cursor: "invalid" };
 
       await expect(controller.listProofs(authenticatedUser, query)).rejects.toThrow(
         BadRequestException,
@@ -113,16 +102,15 @@ describe("ProofsController", () => {
 
     it("should handle empty proof list", async () => {
       const proofList: ProofListResponseDto = {
-        proofs: [],
-        hasMore: false,
-        nextCursor: null,
+        data: [] as any,
+        pageInfo: { hasMore: false, nextCursor: null },
       };
       proofsService.listProofs.mockResolvedValueOnce(proofList);
 
-      const result = await controller.listProofs(authenticatedUser, {});
+      const result = await controller.listProofs(authenticatedUser, { limit: 20 });
 
-      expect(result.proofs).toEqual([]);
-      expect(result.hasMore).toBe(false);
+      expect(result.data).toEqual([]);
+      expect(result.pageInfo.hasMore).toBe(false);
     });
   });
 
@@ -130,23 +118,22 @@ describe("ProofsController", () => {
     it("should get proof details for the authenticated user", async () => {
       const proofDetail: ProofDetailResponseDto = {
         id: proofId,
-        type: "MINIMUM_INCOME",
-        status: "ACTIVE",
-        issuedAt: new Date("2027-01-01T00:00:00Z"),
-        expiresAt: new Date("2028-01-01T00:00:00Z"),
+        schemaVersion: "earnproof.minimum-income.v1",
+        type: "MINIMUM_INCOME" as any,
+        localStatus: "ACTIVE" as any,
+        credentialValidity: "valid" as any,
+        expired: false,
+        asset: { code: "USDC", issuer: null },
+        periodStart: "2027-01-01",
+        periodEnd: "2027-12-31",
+        issuedAt: "2027-01-01T00:00:00.000Z",
+        expiresAt: "2028-01-01T00:00:00.000Z",
         revokedAt: null,
-        credential: {
-          credentialSubject: {
-            income: {
-              amount: "1000.00",
-              asset: "USDC",
-              period: {
-                start: "2027-01-01",
-                end: "2027-12-31",
-              },
-            },
-          },
-        },
+        revokedByType: null,
+        revocationReasonCode: null,
+        revocationReasonPrivate: null,
+        revocationEvidenceHash: null,
+        anchoring: { anchored: false, reason: "disabled" } as any,
       };
       proofsService.getProofDetail.mockResolvedValueOnce(proofDetail);
 
@@ -213,7 +200,7 @@ describe("ProofsController", () => {
         },
         anchored: false,
         anchoringResult: null,
-      };
+      } as any;
       proofsService.createPaymentReceiptProof.mockResolvedValueOnce(proof);
 
       const body: CreatePaymentReceiptProofDto = {
@@ -271,7 +258,7 @@ describe("ProofsController", () => {
         credential: {},
         anchored: false,
         anchoringResult: null,
-      };
+      } as any;
       proofsService.createPaymentReceiptProof.mockResolvedValueOnce(proof);
 
       const body: CreatePaymentReceiptProofDto = {
@@ -309,7 +296,7 @@ describe("ProofsController", () => {
         },
         anchored: false,
         anchoringResult: null,
-      };
+      } as any;
       proofsService.createMinimumIncomeProof.mockResolvedValueOnce(proof);
 
       const body: CreateMinimumIncomeProofDto = {
@@ -317,7 +304,7 @@ describe("ProofsController", () => {
         assetCode: "USDC",
         startDate: "2027-01-01",
         endDate: "2027-12-31",
-      };
+      } as any;
       const result = await controller.createMinimumIncomeProof(
         authenticatedUser,
         body,
@@ -340,7 +327,7 @@ describe("ProofsController", () => {
         assetCode: "USDC",
         startDate: "2027-12-31",
         endDate: "2027-01-01",
-      };
+      } as any;
 
       await expect(
         controller.createMinimumIncomeProof(authenticatedUser, body),
@@ -357,7 +344,7 @@ describe("ProofsController", () => {
         assetCode: "USDC",
         startDate: "2027-01-01",
         endDate: "2027-01-31",
-      };
+      } as any;
 
       await expect(
         controller.createMinimumIncomeProof(authenticatedUser, body),
@@ -374,7 +361,7 @@ describe("ProofsController", () => {
         assetCode: "UNSUPPORTED",
         startDate: "2027-01-01",
         endDate: "2027-12-31",
-      };
+      } as any;
 
       await expect(
         controller.createMinimumIncomeProof(authenticatedUser, body),
@@ -475,7 +462,7 @@ describe("ProofsController", () => {
         },
         anchored: false,
         anchoringResult: null,
-      };
+      } as any;
       proofsService.createRecurringIncomeProof.mockResolvedValueOnce(proof);
 
       const body: CreateRecurringIncomeProofDto = {
@@ -484,7 +471,7 @@ describe("ProofsController", () => {
         intervals: 12,
         startDate: "2027-01-01",
         endDate: "2027-12-31",
-      };
+      } as any;
       const result = await controller.createRecurringIncomeProof(
         authenticatedUser,
         body,
@@ -508,7 +495,7 @@ describe("ProofsController", () => {
         intervals: 100,
         startDate: "2027-01-01",
         endDate: "2027-01-31",
-      };
+      } as any;
 
       await expect(
         controller.createRecurringIncomeProof(authenticatedUser, body),
@@ -526,7 +513,7 @@ describe("ProofsController", () => {
         intervals: 12,
         startDate: "2027-12-31",
         endDate: "2027-01-01",
-      };
+      } as any;
 
       await expect(
         controller.createRecurringIncomeProof(authenticatedUser, body),
@@ -538,9 +525,11 @@ describe("ProofsController", () => {
     it("should revoke a proof owned by the authenticated user", async () => {
       const revokeResult: RevokeProofResponseDto = {
         id: proofId,
-        status: "REVOKED",
-        revokedAt: new Date("2027-01-02T00:00:00Z"),
-        anchorRevoked: false,
+        status: "REVOKED" as any,
+        revokedAt: "2027-01-02T00:00:00.000Z",
+        revokedByType: "OWNER" as any,
+        revocationReasonCode: "OWNER_REQUESTED" as any,
+        anchoring: { anchored: false, reason: "disabled" } as any,
       };
       proofsService.revokeProof.mockResolvedValueOnce(revokeResult);
 
@@ -548,7 +537,7 @@ describe("ProofsController", () => {
 
       expect(result).toEqual(revokeResult);
       expect(proofsService.revokeProof).toHaveBeenCalledWith(
-        authenticatedUser.id,
+        authenticatedUser,
         proofId,
       );
     });
@@ -576,15 +565,17 @@ describe("ProofsController", () => {
     it("should handle on-chain revocation", async () => {
       const revokeResult: RevokeProofResponseDto = {
         id: proofId,
-        status: "REVOKED",
-        revokedAt: new Date("2027-01-02T00:00:00Z"),
-        anchorRevoked: true,
+        status: "REVOKED" as any,
+        revokedAt: "2027-01-02T00:00:00.000Z",
+        revokedByType: "OWNER" as any,
+        revocationReasonCode: "OWNER_REQUESTED" as any,
+        anchoring: { anchored: true, transactionHash: "hash123" } as any,
       };
       proofsService.revokeProof.mockResolvedValueOnce(revokeResult);
 
       const result = await controller.revokeProof(authenticatedUser, proofId);
 
-      expect(result.anchorRevoked).toBe(true);
+      expect(result.anchoring.anchored).toBe(true);
     });
   });
 
@@ -593,16 +584,17 @@ describe("ProofsController", () => {
 
     it("should verify a proof without authentication", async () => {
       const verification: VerifyProofResponseDto = {
-        id: proofId,
-        valid: true,
+        result: "VALID" as any,
+        status: "valid",
         credential: {
-          credentialSubject: {
-            income: {
-              amount: "1000.00",
-              asset: "USDC",
-            },
-          },
-        },
+          id: proofId,
+          type: "EarnProofMinimumIncomeCredential",
+          schemaVersion: "earnproof.minimum-income.v1",
+          issuer: "earnproof-backend",
+          subject: { walletHash: "hash" },
+          claim: {} as any,
+          proof: { type: "hmac-sha256", signature: "sig" } as any,
+        } as any,
       };
       proofsService.verifyProof.mockResolvedValueOnce(verification);
 
@@ -616,15 +608,14 @@ describe("ProofsController", () => {
 
     it("should return valid=false for tampered proof", async () => {
       const verification: VerifyProofResponseDto = {
-        id: proofId,
-        valid: false,
-        credential: null,
+        result: "INVALID_SIGNATURE" as any,
+        status: "invalid",
       };
       proofsService.verifyProof.mockResolvedValueOnce(verification);
 
       const result = await controller.verifyProof(proofId, request);
 
-      expect(result.valid).toBe(false);
+      expect(result.status).toBe("invalid");
     });
 
     it("should return 404 for non-existent proof", async () => {
@@ -646,10 +637,12 @@ describe("ProofsController", () => {
   describe("getVerificationStats", () => {
     it("should get verification statistics for a proof", async () => {
       const stats: VerificationStatsDto = {
-        id: proofId,
-        validCount: 42,
-        invalidCount: 3,
-        totalVerifications: 45,
+        VALID: 42,
+        INVALID_SIGNATURE: 3,
+        EXPIRED: 0,
+        REVOKED: 0,
+        UNKNOWN: 0,
+        ISSUER_WARNING: 0,
       };
       proofsService.getVerificationStats.mockResolvedValueOnce(stats);
 
@@ -728,7 +721,7 @@ describe("ProofsController", () => {
       const error = new Error("Database connection failed");
       proofsService.listProofs.mockRejectedValueOnce(error);
 
-      await expect(controller.listProofs(authenticatedUser, {})).rejects.toThrow(
+      await expect(controller.listProofs(authenticatedUser, { limit: 20 })).rejects.toThrow(
         error,
       );
     });

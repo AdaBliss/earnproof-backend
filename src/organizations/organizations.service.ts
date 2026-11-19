@@ -1,5 +1,4 @@
-﻿import {
-  ConflictException,
+import {
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -84,6 +83,7 @@ export class OrganizationsService {
     if (current.archivedAt || current.deletedAt) {
       throw new ConflictException(
         "Organization is archived; restore it before changing its profile",
+        current.revision,
       );
     }
 

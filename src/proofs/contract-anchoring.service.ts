@@ -5,6 +5,13 @@ import { promisify } from "util";
 import { sha256 } from "../common/crypto/hash";
 import { redact } from "../common/observability/redaction";
 import { StructuredLogger } from "../common/logger";
+import { CircuitBreakerRegistry } from "../common/resilience/circuit-breaker.registry";
+import {
+  CircuitBreaker,
+  CircuitOpenError,
+  CircuitState,
+} from "../common/resilience/circuit-breaker";
+import { classifyContractError } from "./contract-error";
 
 const execFileAsync = promisify(execFile);
 

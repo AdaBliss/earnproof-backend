@@ -34,6 +34,13 @@ import {
 } from "./dto/payment-classification-history.dto";
 import { PaymentsService } from "./payments.service";
 import { PaymentClassificationHistoryService } from "./payment-classification-history.service";
+import { PaymentCheckpointHealthService } from "./payment-checkpoint-health.service";
+import {
+  CheckpointHealthSnapshotDto,
+  CheckpointHealthSummaryDto,
+  QueryCheckpointHealthDto,
+  RetryCheckpointSyncDto,
+} from "./dto/checkpoint-health.dto";
 
 @ApiBearerAuth()
 @ApiTags("payments")
@@ -43,6 +50,7 @@ export class PaymentsController {
   constructor(
     private readonly paymentsService: PaymentsService,
     private readonly classificationHistoryService: PaymentClassificationHistoryService,
+    private readonly checkpointHealthService: PaymentCheckpointHealthService,
   ) {}
 
   @ApiOperation({
@@ -90,13 +98,31 @@ export class PaymentsController {
   @ApiOperation({
     summary: "List payments for the authenticated user",
     description:
-      "Returns up to 100 payments owned by the authenticated wallet, ordered by `occurredAt` " +
-      "descending. Filter by `classification` and/or `assetCode` as needed.",
+      "Returns a cursor-paginated page of payments owned by the authenticated wallet, " +
+      "ordered deterministically by `occurredAt` then `id` (both descending). Filter by " +
+      "`classification` and/or `assetCode` as needed. Pass `pageInfo.nextCursor` from a " +
+      "response as the next request's `cursor` to page further.",
   })
   @ApiResponse({
     status: HttpStatus.OK,
-    description: "Array of payment records. `amountEncrypted` is excluded from the response.",
-    type: [PaymentResponseDto],
+    description:
+      "A page of payment records plus pagination metadata. `amountEncrypted` is excluded " +
+      "from the response.",
+    schema: {
+      properties: {
+        data: {
+          type: "array",
+          items: { type: "object" },
+        },
+        pageInfo: {
+          type: "object",
+          properties: {
+            hasMore: { type: "boolean" },
+            nextCursor: { type: "string", nullable: true },
+          },
+        },
+      },
+    },
   })
   @ApiResponse({
     status: HttpStatus.UNPROCESSABLE_ENTITY,
@@ -252,5 +278,57 @@ export class PaymentsController {
     @Query() query: ListPaymentClassificationHistoryDto,
   ) {
     return this.classificationHistoryService.getPaymentHistory(user, paymentId, query);
+  }
+
+  @ApiOperation({
+    summary: "Get tenant checkpoint health summary",
+    description: "Returns aggregated operational health and lag projection for a tenant organization.",
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Tenant operational health summary.",
+    type: CheckpointHealthSummaryDto,
+  })
+  @Get("checkpoint-health/summary")
+  @AuthenticatedRoute({ ownership: "user" })
+  getCheckpointHealthSummary(
+    @Query("organizationId") organizationId: string,
+  ) {
+    return this.checkpointHealthService.getTenantSummary(organizationId);
+  }
+
+  @ApiOperation({
+    summary: "List checkpoint health snapshots",
+    description: "Returns privacy-safe checkpoint operational snapshots for the caller or tenant.",
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "List of checkpoint health snapshots.",
+    type: [CheckpointHealthSnapshotDto],
+  })
+  @Get("checkpoint-health")
+  @AuthenticatedRoute({ ownership: "user" })
+  listCheckpointHealth(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: QueryCheckpointHealthDto,
+  ) {
+    return this.checkpointHealthService.listSnapshots(user.id, query);
+  }
+
+  @ApiOperation({
+    summary: "Trigger bounded checkpoint sync retry",
+    description: "Triggers a bounded retry action for stalled or recovering payment sync checkpoints.",
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Retry action triggered.",
+  })
+  @Post("checkpoint-health/retry")
+  @AuthenticatedRoute({ ownership: "user" })
+  retryCheckpointSync(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: RetryCheckpointSyncDto,
+  ) {
+    return this.checkpointHealthService.retrySync(user, dto);
   }
 }

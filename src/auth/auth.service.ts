@@ -107,14 +107,16 @@ export class AuthService {
     return challenge;
   }
 
-  async verifyChallenge(input: {
-    challengeId: string;
-    walletAddress: string;
-    signature: string;
-    clientMetadata?: string;
-  }, headers?: SessionDeviceHeaders) {
-    requestOrigin?: string;
-  }) {
+  async verifyChallenge(
+    input: {
+      challengeId: string;
+      walletAddress: string;
+      signature: string;
+      clientMetadata?: string;
+      requestOrigin?: string;
+    },
+    headers?: SessionDeviceHeaders,
+  ) {
     this.assertValidPublicKey(input.walletAddress);
 
     // Check rate limits before verification attempt
@@ -123,17 +125,9 @@ export class AuthService {
       input.clientMetadata,
     );
 
-    // Atomically mark the challenge as consumed only if it exists, is not
-    // used, and is not expired. This prevents TOCTOU race conditions where
-    // multiple concurrent requests could both pass an existence check before
-    // any of them are marked as used — only one caller can ever win this
-    // conditional update.
     // Atomically mark the challenge as consumed only if it exists, is not used,
     // and is not expired. This closes the TOCTOU window in which two concurrent
     // requests could both pass an existence check before either marked it used.
-    // Atomically mark challenge as consumed only if it exists, is not used, and is not expired.
-    // This prevents TOCTOU race conditions where multiple concurrent requests could both
-    // pass the existence check before any are marked as used.
     const consumedChallenge = await this.prisma.walletChallenge.updateMany({
       where: {
         id: input.challengeId,
@@ -209,14 +203,6 @@ export class AuthService {
 
     if (!challenge) {
       // Should never happen: we just consumed this row atomically above.
-      throw new UnauthorizedException("Challenge is expired or unavailable");
-    }
-
-      // Unreachable unless the row was deleted between the two statements;
-      // safeguarded rather than dereferenced.
-      // Should be unreachable: updateMany just matched and updated this row,
-      // so it exists. Safeguard against a concurrent deletion between the
-      // two statements.
       throw new UnauthorizedException("Challenge is expired or unavailable");
     }
 

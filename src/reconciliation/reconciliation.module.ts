@@ -1,30 +1,11 @@
 import { Module } from "@nestjs/common";
-import { ScheduleModule } from "@nestjs/schedule";
-import { ConfigModule } from "@nestjs/config";
 import { DatabaseModule } from "../database/database.module";
-import { ContractDigestClient } from "./contract-digest-client";
-import { BackendStateDigestCalculator } from "./backend-state-digest-calculator";
-import { ContractStateReconciliationService } from "./contract-state-reconciliation.service";
-import { ContractReconciliationController } from "./contract-reconciliation.controller";
+import { ApprovalsModule } from "../approvals/approvals.module";
+import { ReconciliationConflictService } from "./reconciliation-conflict.service";
 
-/**
- * ReconciliationModule
- *
- * Exports services and controllers for contract state reconciliation.
- * Compares backend projections against live contract digests to detect drift.
- */
 @Module({
-  imports: [ScheduleModule.forRoot(), ConfigModule, DatabaseModule],
-  providers: [
-    ContractDigestClient,
-    BackendStateDigestCalculator,
-    ContractStateReconciliationService,
-  ],
-  controllers: [ContractReconciliationController],
-  exports: [
-    ContractDigestClient,
-    BackendStateDigestCalculator,
-    ContractStateReconciliationService,
-  ],
+  imports: [DatabaseModule, ApprovalsModule],
+  providers: [ReconciliationConflictService],
+  exports: [ReconciliationConflictService],
 })
 export class ReconciliationModule {}

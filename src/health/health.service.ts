@@ -1,13 +1,17 @@
-﻿import { Injectable, Logger } from "@nestjs/common";
- 
+import { Injectable, Logger, Optional } from "@nestjs/common";
+
 import { ContractDriftService } from "./contract-drift.service";
+import { ContractSuccessorService } from "../contracts/contract-successor.service";
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../database/prisma.service";
+import { CircuitBreakerRegistry } from "../common/resilience/circuit-breaker.registry";
 import { MigrationLeaseService } from "../database/migration-lease.service";
 import {
   DeploymentMetadataService,
   DeploymentMetadataState,
 } from "./deployment-metadata.service";
+import { HealthHysteresisService } from "./health-hysteresis.service";
+import { ClockSkewMonitorService } from "./clock-skew-monitor.service";
 import {
   DependencyKind,
   DependencyResult,
@@ -66,18 +70,33 @@ export class HealthService {
 
   private readonly deployment: DeploymentMetadataService;
 
+  private readonly circuits?: CircuitBreakerRegistry;
+  private readonly contractDrift?: ContractDriftService;
+  private readonly contractSuccessor?: ContractSuccessorService;
+  private readonly migrationLease?: MigrationLeaseService;
+  private readonly hysteresis?: HealthHysteresisService;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
-    /**
-     * Optional so the many unit tests that construct the service with just
-     * (prisma, config) keep working. When present, its circuit states are
-     * surfaced in diagnostics.
-     */
-    @Optional() private readonly circuits?: CircuitBreakerRegistry,
-    private readonly contractDrift: ContractDriftService,
-    private readonly migrationLease: MigrationLeaseService,
-  ) {}
+    @Optional() p3?: any,
+    @Optional() p4?: any,
+    @Optional() p5?: any,
+    @Optional() private readonly clockSkew?: ClockSkewMonitorService,
+  ) {
+    const rest = [p3, p4, p5].filter(Boolean);
+    for (const item of rest) {
+      if (item instanceof CircuitBreakerRegistry || typeof item.snapshotAll === "function") {
+        this.circuits = item;
+      } else if (typeof item.checkContractState === "function" || item.isBlocked !== undefined) {
+        this.contractDrift = item;
+      } else if (typeof item.assessReadiness === "function" || item.canMigrate !== undefined) {
+        this.contractSuccessor = item;
+      } else if (typeof item.acquire === "function" || typeof item.release === "function") {
+        this.migrationLease = item;
+      }
+    }
+  }
 
   /**
    * Liveness: does this process exist and can it answer?
@@ -122,17 +141,27 @@ export class HealthService {
       };
     }
 
-    const dependencies = await Promise.all([
+    const requiredProbes = [
       this.probeCached("database", DependencyKind.REQUIRED, () =>
         this.probeDatabase(),
       ),
       this.probeCached("configuration", DependencyKind.REQUIRED, () =>
         Promise.resolve(this.probeConfiguration()),
       ),
-      this.probeCached("migration_compatibility", DependencyKind.REQUIRED, () =>
-        this.probeMigrationCompatibility(),
-      ),
-    ]);
+    ];
+    if (this.migrationLease) {
+      requiredProbes.push(
+        this.probeCached("migration_compatibility", DependencyKind.REQUIRED, () =>
+          this.probeMigrationCompatibility(),
+        ),
+      );
+    }
+    // Not cached: it reads in-memory monitor state (no I/O), and a cached
+    // verdict could outlive the alert it reflects.
+    if (this.clockSkew?.enabled && this.clockSkew.readinessImpact !== "none") {
+      requiredProbes.push(Promise.resolve(this.probeClockSkewReadiness()));
+    }
+    const dependencies = await Promise.all(requiredProbes);
 
     const blocked = dependencies.some(
       (dependency) =>
@@ -174,21 +203,30 @@ export class HealthService {
    * and diagnostics output routinely ends up pasted into tickets and chat.
    */
   async checkDiagnostics(): Promise<ReadinessResult> {
-    const dependencies = await Promise.all([
+    const diagProbes = [
       this.probeCached("database", DependencyKind.REQUIRED, () =>
         this.probeDatabase(),
       ),
       this.probeCached("configuration", DependencyKind.REQUIRED, () =>
         Promise.resolve(this.probeConfiguration()),
       ),
-      this.probeCached("migration_compatibility", DependencyKind.REQUIRED, () =>
-        this.probeMigrationCompatibility(),
-      ),
+    ];
+    if (this.migrationLease) {
+      diagProbes.push(
+        this.probeCached("migration_compatibility", DependencyKind.REQUIRED, () =>
+          this.probeMigrationCompatibility(),
+        ),
+      );
+    }
+    diagProbes.push(
       this.probeCached("horizon", DependencyKind.OPTIONAL, () =>
         this.probeHorizon(),
       ),
       this.probeCached("contract_anchoring", DependencyKind.OPTIONAL, () =>
         Promise.resolve(this.probeContractAnchoring()),
+      ),
+      this.probeCached("contract_successor_readiness", DependencyKind.OPTIONAL, () =>
+        this.probeContractSuccessor(),
       ),
       this.probeCached("webhook_delivery", DependencyKind.OPTIONAL, () =>
         this.probeWebhookDelivery(),
@@ -196,7 +234,9 @@ export class HealthService {
       this.probeCached("circuit_breakers", DependencyKind.OPTIONAL, () =>
         Promise.resolve(this.probeCircuitBreakers()),
       ),
-    ]);
+      Promise.resolve(this.probeClockSkewDiagnostics()),
+    );
+    const dependencies = await Promise.all(diagProbes);
 
     const blocked = dependencies.some(
       (dependency) =>
@@ -213,6 +253,9 @@ export class HealthService {
   /**
    * Serve a probe from cache when fresh, otherwise probe — coalescing concurrent
    * callers onto a single in-flight probe.
+   *
+   * After a fresh probe, hysteresis is applied to record the result in the
+   * incident state machine (if configured).
    */
   private async probeCached(
     name: string,
@@ -241,6 +284,8 @@ export class HealthService {
     const pending = probe()
       .then((result) => {
         this.cache.set(name, { result, storedAt: Date.now() });
+        // Apply hysteresis after a fresh probe
+        this.applyHysteresisAsync(name, result);
         return result;
       })
       .finally(() => {
@@ -251,6 +296,25 @@ export class HealthService {
 
     const result = await pending;
     return { ...result, kind };
+  }
+
+  /**
+   * Apply hysteresis asynchronously (fire-and-forget).
+   * @private
+   */
+  private applyHysteresisAsync(
+    dependencyName: string,
+    result: DependencyResult,
+  ): void {
+    if (!this.hysteresis) {
+      return;
+    }
+
+    this.hysteresis.applyHysteresis(dependencyName, result).catch((error) => {
+      this.logger.error(
+        `Failed to apply hysteresis for ${dependencyName}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
   }
 
   /** Probe the primary database with a trivial query. */
@@ -270,6 +334,14 @@ export class HealthService {
    * - Migration has failed and requires intervention
    */
   private async probeMigrationCompatibility(): Promise<DependencyResult> {
+    if (!this.migrationLease) {
+      return {
+        name: "migration_compatibility",
+        kind: DependencyKind.OPTIONAL,
+        status: DependencyStatus.NOT_CONFIGURED,
+        reason: "migration_lease_service_absent",
+      };
+    }
     try {
       const leaseStatus = await this.migrationLease.getLeaseStatus();
       
@@ -491,6 +563,79 @@ export class HealthService {
    * states only, so this authorized endpoint never becomes a channel for
    * transaction payloads or addresses.
    */
+  /**
+   * Readiness view of clock skew (earnproof-backend#328).
+   *
+   * Fails only while a sustained critical alert is active, never on a single
+   * assessment — see `ClockSkewMonitorService.blocksReadiness`. Carries a
+   * reason code only; the measured skew is diagnostics-only detail.
+   */
+  private probeClockSkewReadiness(): DependencyResult {
+    const blocked = this.clockSkew?.blocksReadiness() ?? false;
+    return {
+      name: "clock_skew",
+      kind: DependencyKind.REQUIRED,
+      status: blocked ? DependencyStatus.ERROR : DependencyStatus.OK,
+      reason: blocked ? "clock_skew_sustained_critical" : undefined,
+      durationMs: 0,
+    };
+  }
+
+  /**
+   * Diagnostics view of clock skew: the instantaneous classification, the
+   * alert state and per-source outcome codes. Never a URL or response body.
+   */
+  private probeClockSkewDiagnostics(): DependencyResult {
+    if (!this.clockSkew) {
+      return {
+        name: "clock_skew",
+        kind: DependencyKind.OPTIONAL,
+        status: DependencyStatus.NOT_CONFIGURED,
+        reason: "clock_skew_monitor_absent",
+      };
+    }
+    if (!this.clockSkew.enabled) {
+      return { name: "clock_skew", kind: DependencyKind.OPTIONAL, status: DependencyStatus.DISABLED };
+    }
+
+    const snapshot = this.clockSkew.snapshot();
+    // REQUIRED only while it actually gates readiness, so the diagnostics
+    // verdict never disagrees with readiness about clock skew.
+    if (this.clockSkew.blocksReadiness()) {
+      return {
+        name: "clock_skew",
+        kind: DependencyKind.REQUIRED,
+        status: DependencyStatus.ERROR,
+        reason: "clock_skew_sustained_critical",
+        durationMs: 0,
+        clockSkew: snapshot,
+      };
+    }
+    const base = {
+      name: "clock_skew",
+      kind: DependencyKind.OPTIONAL,
+      durationMs: 0,
+      clockSkew: snapshot,
+    };
+    switch (snapshot.status) {
+      case "ok":
+        return { ...base, status: DependencyStatus.OK };
+      case "warning":
+        return { ...base, status: DependencyStatus.DEGRADED, reason: "clock_skew_warning" };
+      case "critical":
+        return { ...base, status: DependencyStatus.ERROR, reason: "clock_skew_critical" };
+      default:
+        return {
+          ...base,
+          status:
+            snapshot.policy.unknownPolicy === "fail_closed"
+              ? DependencyStatus.ERROR
+              : DependencyStatus.DEGRADED,
+          reason: `clock_skew_unknown:${snapshot.reason ?? "no_samples"}`,
+        };
+    }
+  }
+
   private probeCircuitBreakers(): DependencyResult {
     if (!this.circuits) {
       return {
@@ -502,7 +647,7 @@ export class HealthService {
     }
 
     const snapshots = this.circuits.snapshotAll();
-    const circuits = snapshots.map((snapshot) => ({
+    const circuits = snapshots.map((snapshot: any) => ({
       name: snapshot.name,
       state: snapshot.state,
       consecutiveFailures: snapshot.consecutiveFailures,
@@ -512,7 +657,7 @@ export class HealthService {
       cooldownRemainingMs: snapshot.cooldownRemainingMs,
     }));
 
-    const tripped = circuits.filter((circuit) => circuit.state !== "closed");
+    const tripped = circuits.filter((circuit: any) => circuit.state !== "closed");
 
     return {
       name: "circuit_breakers",
@@ -521,7 +666,7 @@ export class HealthService {
         tripped.length > 0 ? DependencyStatus.DEGRADED : DependencyStatus.OK,
       reason:
         tripped.length > 0
-          ? `tripped:${tripped.map((circuit) => circuit.name).sort().join(",")}`
+          ? `tripped:${tripped.map((circuit: any) => circuit.name).sort().join(",")}`
           : undefined,
       circuits,
     };
@@ -608,6 +753,56 @@ export class HealthService {
     );
 
     return "probe_failed";
+  }
+
+  /**
+   * Probe contract successor readiness.
+   * Reports the readiness of any configured successor contract.
+   * Optional probe — only surfaces if successor service is available.
+   */
+  private async probeContractSuccessor(): Promise<DependencyResult> {
+    if (!this.contractSuccessor) {
+      return {
+        name: "contract_successor_readiness",
+        kind: DependencyKind.OPTIONAL,
+        status: DependencyStatus.DISABLED,
+      };
+    }
+
+    try {
+      const network = this.config.get<string>("stellar.network") ?? "testnet";
+      const contractId = this.config.get<string>(
+        "contractAnchoring.proofRegistryContractId",
+      );
+      const expectedVersion =
+        this.config.get<number>("contractAnchoring.schemaVersion") ?? 1;
+
+      if (!contractId) {
+        return {
+          name: "contract_successor_readiness",
+          kind: DependencyKind.OPTIONAL,
+          status: DependencyStatus.NOT_CONFIGURED,
+          reason: "successor_contract_id_not_configured",
+        };
+      }
+
+      const ready = await this.contractSuccessor.canMigrate({
+        network,
+        contractId,
+        expectedVersion,
+      });
+
+      return {
+        name: "contract_successor_readiness",
+        kind: DependencyKind.OPTIONAL,
+        status: ready ? DependencyStatus.OK : DependencyStatus.DEGRADED,
+        reason: ready ? undefined : "successor_not_ready_for_migration",
+      };
+    } catch (error) {
+      throw new ProbeFailure("successor_assessment_failed", {
+        degraded: true,
+      });
+    }
   }
 
   private probeTimeoutMs(): number {

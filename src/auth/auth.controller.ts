@@ -1,4 +1,20 @@
-import { Body, Controller, Get, Headers, HttpCode, HttpStatus, Param, Patch, Post, UseGuards } from "@nestjs/common";
+import {
+  Body,
+  Controller,
+  ForbiddenException,
+  Get,
+  Headers,
+  HttpCode,
+  HttpStatus,
+  NotFoundException,
+  Param,
+  Patch,
+  Post,
+  Query,
+  Req,
+  UseGuards,
+  Optional,
+} from "@nestjs/common";
 import {
   ApiBearerAuth,
   ApiOperation,
@@ -24,13 +40,17 @@ import { SessionResponseDto } from "./dto/session-response.dto";
 import { VerifyChallengeDto } from "./dto/verify-challenge.dto";
 import { VerifyResponseDto } from "./dto/verify-response.dto";
 import { SessionService } from "./session.service";
-import { RenameSessionDto } from "./dto/rename-session.dto";
-import { SessionInventoryItemDto } from "./dto/session-inventory.dto";
-import { SessionInventoryResponseDto, SessionInventoryItemDto } from "./dto/session-inventory.dto";
+import {
+  SessionInventoryItemDto,
+  SessionInventoryResponseDto,
+} from "./dto/session-inventory.dto";
 import { RevokeSingleSessionResponseDto, RevokeAllOtherSessionsResponseDto } from "./dto/revoke-session.dto";
 import { RecentAuthService } from "./recent-auth.service";
+import { RenameSessionDto } from "./dto/rename-session.dto";
 import { IssueAssertionDto } from "./dto/issue-assertion.dto";
 import { AssertionResponseDto } from "./dto/assertion-response.dto";
+import { SessionRiskService } from "./session-risk.service";
+import { ListReauthHistoryDto, ListRiskEventsDto } from "./dto/session-risk.dto";
 
 @ApiTags("auth")
 @Controller("auth")
@@ -39,6 +59,8 @@ export class AuthController {
     private readonly authService: AuthService,
     private readonly sessionService: SessionService,
     private readonly recentAuthService: RecentAuthService,
+    @Optional()
+    private readonly sessionRiskService?: SessionRiskService,
   ) {}
 
   @ApiOperation({
@@ -96,14 +118,12 @@ export class AuthController {
     type: ApiErrorDto,
   })
   @Post("verify")
+  @PublicRoute()
   verifyChallenge(
     @Body() body: VerifyChallengeDto,
     @Headers() headers?: Record<string, string | string[] | undefined>,
   ) {
     return this.authService.verifyChallenge(body, headers);
-  @PublicRoute()
-  verifyChallenge(@Body() body: VerifyChallengeDto) {
-    return this.authService.verifyChallenge(body);
   }
 
   @ApiOperation({
@@ -202,12 +222,11 @@ export class AuthController {
   @UseGuards(AuthGuard)
   @HttpCode(HttpStatus.OK)
   @Post("rotate")
+  @AuthenticatedRoute({ ownership: "user" })
   async rotate(
     @CurrentUser() session: AuthenticatedSession,
     @Headers() headers?: Record<string, string | string[] | undefined>,
   ) {
-  @AuthenticatedRoute({ ownership: "user" })
-  async rotate(@CurrentUser() session: AuthenticatedSession) {
     const { token, sessionId, expiresAt } = await this.sessionService.rotate(
       session.sessionId,
       session,
@@ -348,7 +367,8 @@ export class AuthController {
       revokedCount,
     };
   }
-}
+
+  @ApiOperation({
     summary: "Issue a recent-auth assertion",
     description:
       "Issues a short-lived (5 minute), single-use assertion token that proves the " +
@@ -387,5 +407,57 @@ export class AuthController {
       action: body.action,
       resourceId,
     };
+  }
+
+  @ApiOperation({
+    summary: "List session risk events",
+    description: "Returns paginated session risk events recorded for the authenticated user.",
+  })
+  @ApiBearerAuth()
+  @UseGuards(AuthGuard)
+  @Get("sessions/risk-events")
+  async getRiskEvents(
+    @CurrentUser() session: AuthenticatedSession,
+    @Query() query: ListRiskEventsDto,
+  ) {
+    if (!this.sessionRiskService) {
+      throw new NotFoundException("Session risk service not configured");
+    }
+    return this.sessionRiskService.listRiskEvents(session.id, query);
+  }
+
+  @ApiOperation({
+    summary: "Revoke sessions related to a risk event",
+    description: "Revokes sessions associated with the flagged risk event (idempotent).",
+  })
+  @ApiBearerAuth()
+  @UseGuards(AuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @Post("sessions/risk-events/:id/revoke-sessions")
+  async revokeRiskEventSessions(
+    @CurrentUser() session: AuthenticatedSession,
+    @Param("id") riskEventId: string,
+  ) {
+    if (!this.sessionRiskService) {
+      throw new NotFoundException("Session risk service not configured");
+    }
+    return this.sessionRiskService.revokeRelatedSessions(session.id, riskEventId);
+  }
+
+  @ApiOperation({
+    summary: "List reauthentication history",
+    description: "Returns privacy-safe history of recent-auth assertions without sensitive tokens.",
+  })
+  @ApiBearerAuth()
+  @UseGuards(AuthGuard)
+  @Get("reauthentication-history")
+  async getReauthenticationHistory(
+    @CurrentUser() session: AuthenticatedSession,
+    @Query() query: ListReauthHistoryDto,
+  ) {
+    if (!this.sessionRiskService) {
+      throw new NotFoundException("Session risk service not configured");
+    }
+    return this.sessionRiskService.getReauthenticationHistory(session.id, query);
   }
 }

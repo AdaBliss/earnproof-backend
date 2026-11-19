@@ -140,9 +140,12 @@ function buildPrisma(delegates: Record<string, RecordingDelegate>) {
   }
 
   const clientAccess: string[] = [];
+  // Read-only legal-hold lookup (#311): no holds, so audit selection is unchanged.
+  const noHolds = { findMany: async () => [] };
   const prisma = new Proxy(byModel, {
     get(target, property) {
       if (typeof property === "string") clientAccess.push(property);
+      if (property === "auditLegalHold") return noHolds;
       return target[property as string];
     },
   }) as unknown as PrismaService;

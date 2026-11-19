@@ -15,6 +15,7 @@ import { ProofsService } from "../../proofs/proofs.service";
 import { TrustedSourcesService } from "../../trusted-sources/trusted-sources.service";
 import { UsersService } from "../../users/users.service";
 import { WebhooksService } from "../../webhooks/webhooks.service";
+import { unlimitedQuotas } from "../../testing/quotas";
 import { findForbiddenAuditContent } from "./audit-redaction";
 import {
   AUDIT_EVENTS,
@@ -501,10 +502,23 @@ const scenarios: Scenario[] = [
       };
       const delivery = { replay: jest.fn().mockResolvedValue("delivery_2") };
 
+      const circuitBreaker = {
+        initializeCircuit: jest.fn(),
+        deleteCircuitState: jest.fn(),
+      };
+
+      const verification = {
+        issueChallenge: jest.fn(),
+        verifyChallenge: jest.fn(),
+      };
+
       return new WebhooksService(
         prisma as never,
         delivery as never,
+        circuitBreaker as never,
+        verification as never,
         configDouble({ paymentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=" }),
+        unlimitedQuotas() as never,
       ).replayDelivery(ORGANIZATION_ID, "delivery_1", USER_ID);
     },
   },
@@ -873,6 +887,9 @@ const scenarios: Scenario[] = [
       return new UsersService(prisma as never).changeRole(ADMIN, "user_target", {
         role: "DEVELOPER",
       } as never);
+    },
+  },
+  {
     event: "operator.payment_backfill_requested",
     outcome: "success",
     name: "requesting a payment backfill",

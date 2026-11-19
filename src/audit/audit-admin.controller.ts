@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query, UseGuards } from "@nestjs/common";
+import { Controller, Get, Optional, Param, Query, UseGuards } from "@nestjs/common";
 import {
   ApiBearerAuth,
   ApiOperation,
@@ -10,9 +10,11 @@ import { AuthGuard } from "../common/guards/auth.guard";
 import { RoleGuard } from "../common/guards/role.guard";
 import { AuditAdminService } from "./audit-admin.service";
 import { AuditVerificationService } from "./audit-verification.service";
+import { AuditGraphService } from "./audit-graph.service";
 import { ExportAuditLogsDto } from "./dto/export-audit-logs.dto";
 import { ListAuditLogsDto } from "./dto/list-audit-logs.dto";
 import { VerifyAuditChainParamsDto } from "./dto/verify-audit-chain.dto";
+import { AuditGraphQueryDto, AuditGraphResponseDto } from "./dto/audit-graph.dto";
 
 /**
  * Administrator retrieval path for tamper-evident AuditLog records.
@@ -29,6 +31,8 @@ export class AuditAdminController {
   constructor(
     private readonly auditAdminService: AuditAdminService,
     private readonly auditVerificationService: AuditVerificationService,
+    @Optional()
+    private readonly auditGraphService?: AuditGraphService,
   ) {}
 
   @Get()
@@ -60,6 +64,24 @@ export class AuditAdminController {
   @ApiResponse({ status: 403, description: "Unauthorized - admin role required" })
   export(@Query() query: ExportAuditLogsDto) {
     return this.auditAdminService.export(query);
+  }
+
+  @Get("graph")
+  @UseGuards(AuthGuard, RoleGuard)
+  @RequiredRole("ADMIN")
+  @ApiOperation({
+    summary: "Query causal and correlation audit graph",
+    description:
+      "Bounded graph traversal across parent and correlation references within a tenant organization. " +
+      "Enforces depth limits, cycle detection, tenant boundaries, and metadata redaction.",
+  })
+  @ApiResponse({ status: 200, description: "Audit correlation graph returned", type: AuditGraphResponseDto })
+  @ApiResponse({ status: 403, description: "Unauthorized - admin role required" })
+  getGraph(@Query() query: AuditGraphQueryDto) {
+    if (!this.auditGraphService) {
+      throw new Error("AuditGraphService is not configured");
+    }
+    return this.auditGraphService.buildCorrelationGraph(query);
   }
 
   @Get(":organizationId/verify")

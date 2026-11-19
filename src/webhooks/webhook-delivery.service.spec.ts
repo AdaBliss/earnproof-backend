@@ -27,6 +27,13 @@ function makeConfig() {
   };
 }
 
+/** No webhook in these existing tests requires mTLS, so this is never consulted. */
+function makeNoMtlsCertificateService() {
+  return {
+    selectActiveCertificate: jest.fn().mockResolvedValue(null),
+  };
+}
+
 function makeEnvelope(overrides: Partial<WebhookEnvelope> = {}): WebhookEnvelope {
   return {
     specVersion: "1",
@@ -101,6 +108,7 @@ describe("WebhookDeliveryService", () => {
       const service = new WebhookDeliveryService(
         prisma as never,
         new WebhookSigningService(),
+        makeNoMtlsCertificateService() as never,
         makeConfig() as never,
       );
 
@@ -150,6 +158,7 @@ describe("WebhookDeliveryService", () => {
       const service = new WebhookDeliveryService(
         prisma as never,
         new WebhookSigningService(),
+        makeNoMtlsCertificateService() as never,
         makeConfig() as never,
       );
 
@@ -205,6 +214,7 @@ describe("WebhookDeliveryService", () => {
       const service = new WebhookDeliveryService(
         prisma as never,
         new WebhookSigningService(),
+        makeNoMtlsCertificateService() as never,
         makeConfig() as never,
       );
 
@@ -253,6 +263,7 @@ describe("WebhookDeliveryService", () => {
       const service = new WebhookDeliveryService(
         prisma as never,
         new WebhookSigningService(),
+        makeNoMtlsCertificateService() as never,
         makeConfig() as never,
       );
 
@@ -316,6 +327,7 @@ describe("WebhookDeliveryService", () => {
         const service = new WebhookDeliveryService(
           prisma as never,
           new WebhookSigningService(),
+          makeNoMtlsCertificateService() as never,
           makeConfig() as never,
         );
 
@@ -374,6 +386,7 @@ describe("WebhookDeliveryService", () => {
       const service = new WebhookDeliveryService(
         prisma as never,
         new WebhookSigningService(),
+        makeNoMtlsCertificateService() as never,
         makeConfig() as never,
       );
 
@@ -426,6 +439,7 @@ describe("WebhookDeliveryService", () => {
       const service = new WebhookDeliveryService(
         prisma as never,
         new WebhookSigningService(),
+        makeNoMtlsCertificateService() as never,
         makeConfig() as never,
       );
 
@@ -490,6 +504,7 @@ describe("WebhookDeliveryService", () => {
       const service = new WebhookDeliveryService(
         prisma as never,
         signing,
+        makeNoMtlsCertificateService() as never,
         makeConfig() as never,
       );
 
@@ -552,6 +567,7 @@ describe("WebhookDeliveryService", () => {
       const service = new WebhookDeliveryService(
         prisma as never,
         new WebhookSigningService(),
+        makeNoMtlsCertificateService() as never,
         makeConfig() as never,
       );
 
@@ -599,6 +615,7 @@ describe("WebhookDeliveryService", () => {
       const service = new WebhookDeliveryService(
         prisma as never,
         new WebhookSigningService(),
+        makeNoMtlsCertificateService() as never,
         makeConfig() as never,
       );
 
@@ -613,6 +630,7 @@ describe("WebhookDeliveryService", () => {
       const service = new WebhookDeliveryService(
         prisma as never,
         new WebhookSigningService(),
+        makeNoMtlsCertificateService() as never,
         makeConfig() as never,
       );
 

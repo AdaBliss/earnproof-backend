@@ -127,6 +127,26 @@ export const WEBHOOK_PAYLOAD_REGISTRY: PayloadRegistry = {
         verifiedAt: iso(s.verifiedAt),
       }),
     },
+    "attestation.expired": {
+      fields: [
+        "attestationId",
+        "issuerId",
+        "subjectWalletHash",
+        "previousStatus",
+        "effectiveStatus",
+        "expiresAt",
+        "reconciledAt",
+      ],
+      serialize: (s) => ({
+        attestationId: s.attestationId,
+        issuerId: s.issuerId,
+        subjectWalletHash: s.subjectWalletHash,
+        previousStatus: s.previousStatus,
+        effectiveStatus: s.effectiveStatus,
+        expiresAt: typeof s.expiresAt === "string" ? s.expiresAt : iso(s.expiresAt),
+        reconciledAt: typeof s.reconciledAt === "string" ? s.reconciledAt : iso(s.reconciledAt),
+      }),
+    },
   },
 };
 

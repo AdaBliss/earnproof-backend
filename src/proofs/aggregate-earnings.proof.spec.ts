@@ -98,15 +98,19 @@ function harness(payments: StoredPayment[], options: { anchoring?: boolean } = {
   };
   prisma.$transaction = jest.fn(async (callback: (tx: unknown) => unknown) => callback(prisma));
 
+  const CONFIG_VALUES: Record<string, unknown> = {
+    credentialSigningSecret: "test-signing-secret",
+    paymentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+    "stellar.network": "testnet",
+    "contractAnchoring.enabled": Boolean(options.anchoring),
+    "contractAnchoring.required": false,
+  };
   const config = {
-    get: jest.fn((key: string) => (key === "contractAnchoring.enabled" ? Boolean(options.anchoring) : false)),
-    getOrThrow: jest.fn((key: string) =>
-      ({
-        credentialSigningSecret: "test-signing-secret",
-        paymentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
-        "stellar.network": "testnet",
-      })[key],
-    ),
+    get: jest.fn((key: string) => CONFIG_VALUES[key] ?? false),
+    getOrThrow: jest.fn((key: string) => {
+      if (key in CONFIG_VALUES) return CONFIG_VALUES[key];
+      throw new Error(`Config key not found: ${key}`);
+    }),
   };
   const events = { recordEvent: jest.fn().mockResolvedValue(undefined), getAggregateStats: jest.fn() };
   const attestations = {

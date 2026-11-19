@@ -159,7 +159,7 @@ export class IssuerReconciliationService {
     const localStatus = issuer.status;
     const contractStatus = simulatedContractState.status;
 
-    if (localStatus !== contractStatus) {
+    if (contractStatus && localStatus !== contractStatus) {
       // Status mismatch detected
       if (this.isAuthorizedTransition(localStatus, contractStatus)) {
         // Auto-repair: update local status to match contract
@@ -241,7 +241,7 @@ export class IssuerReconciliationService {
       const driftStatuses = [ResourceStatus.SUSPENDED, ResourceStatus.REVOKED];
       const driftStatus = driftStatuses[randomFactor % driftStatuses.length];
       
-      if (issuer.status === ResourceStatus.ACTIVE && driftStatus !== issuer.status) {
+      if (issuer.status === ResourceStatus.ACTIVE && (driftStatus as ResourceStatus) !== issuer.status) {
         return {
           available: true,
           status: driftStatus,
@@ -269,6 +269,7 @@ export class IssuerReconciliationService {
       [ResourceStatus.PENDING]: [ResourceStatus.ACTIVE],
       [ResourceStatus.REVOKED]: [], // Revocation is final
       [ResourceStatus.DELETED]: [], // Deletion is final
+      [ResourceStatus.EXPIRED]: [],
     };
 
     return allowedTransitions[fromStatus]?.includes(toStatus) ?? false;

@@ -28,7 +28,7 @@ type EvaluablePayment = {
   assetCode: string;
   assetIssuer: string | null;
   classification: PaymentClassification;
-  sourceAddress: string;
+  sourceAddress: string | null;
 };
 
 const EVALUABLE_SELECT = {

@@ -7,6 +7,11 @@ import { Prisma, ResourceStatus } from "@prisma/client";
 import { StrKey } from "@stellar/stellar-base";
 import { AuthenticatedUser } from "../auth/auth.types";
 import { sha256 } from "../common/crypto/hash";
+import {
+  buildPage,
+  cursorOrderBy,
+  cursorWhereFragment,
+} from "../common/pagination/keyset-paginate";
 import { PrismaService } from "../database/prisma.service";
 import { PaymentEligibilityService } from "../payments/payment-eligibility.service";
 import { ConflictException } from "../common/exceptions/domain.exceptions";
@@ -148,9 +153,12 @@ export class TrustedSourcesService {
     user: AuthenticatedUser,
     filters: ListTrustedSourcesDto,
   ) {
+    const limit = filters.limit ?? 20;
+    const cursorWhere = cursorWhereFragment(filters.cursor, "createdAt");
     const where: Prisma.TrustedSourceWhereInput = {
       userId: user.id,
       status: ResourceStatus.ACTIVE,
+      ...(cursorWhere as Prisma.TrustedSourceWhereInput),
     };
 
     if (filters.sourceAddress) {
@@ -163,7 +171,7 @@ export class TrustedSourcesService {
       where.sourceType = filters.sourceType;
     }
 
-    const trustedSources = await this.prisma.trustedSource.findMany({
+    const rows = await this.prisma.trustedSource.findMany({
       where,
       include: {
         issuer: {
@@ -179,12 +187,16 @@ export class TrustedSourcesService {
           },
         },
       },
-      orderBy: {
-        createdAt: "desc",
-      },
+      orderBy: cursorOrderBy("createdAt"),
+      take: limit + 1,
     });
 
-    return trustedSources.map((ts) => this.formatTrustedSource(ts));
+    const { data, pageInfo } = buildPage(rows, limit, "createdAt");
+
+    return {
+      data: data.map((ts) => this.formatTrustedSource(ts)),
+      pageInfo,
+    };
   }
 
   /**
@@ -336,11 +348,10 @@ export class TrustedSourcesService {
     });
 
     // An issuer link change can change SOURCE_ISSUER_VERIFIED.
-    if ((existing.issuerId || null) !== (updated.issuerId || null)) {
-      await this.eligibility.reevaluateSource(user.id, updated.sourceAddress);
+    if ((existing.issuerId || null) !== (result.issuerId || null)) {
+      await this.eligibility.reevaluateSource(user.id, result.sourceAddress);
     }
 
-    return this.formatTrustedSource(updated);
     return this.formatTrustedSource(result);
   }
 

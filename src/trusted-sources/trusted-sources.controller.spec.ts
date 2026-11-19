@@ -166,14 +166,20 @@ describe("TrustedSourcesController (HTTP)", () => {
 
   describe("GET /trusted-sources", () => {
     it("returns 200 with the user's trusted sources", async () => {
-      service.listTrustedSources.mockResolvedValue([TRUSTED_SOURCE]);
+      service.listTrustedSources.mockResolvedValue({
+        data: [TRUSTED_SOURCE],
+        pageInfo: { hasMore: false, nextCursor: null },
+      });
 
       const res = await request(app.getHttpServer()).get(
         "/api/v1/trusted-sources",
       );
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual([TRUSTED_SOURCE]);
+      expect(res.body).toEqual({
+        data: [TRUSTED_SOURCE],
+        pageInfo: { hasMore: false, nextCursor: null },
+      });
       expect(service.listTrustedSources).toHaveBeenCalledWith(
         AUTHENTICATED_SESSION,
         expect.objectContaining({}),
@@ -181,7 +187,10 @@ describe("TrustedSourcesController (HTTP)", () => {
     });
 
     it("passes query filters through to the service", async () => {
-      service.listTrustedSources.mockResolvedValue([]);
+      service.listTrustedSources.mockResolvedValue({
+        data: [],
+        pageInfo: { hasMore: false, nextCursor: null },
+      });
 
       await request(app.getHttpServer())
         .get("/api/v1/trusted-sources")
@@ -246,7 +255,7 @@ describe("TrustedSourcesController (HTTP)", () => {
 
       const res = await request(app.getHttpServer())
         .patch("/api/v1/trusted-sources/ts_abc123")
-        .send({ displayName: "Updated Name" });
+        .send({ displayName: "Updated Name", expectedRevision: 0 });
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual(updated);
@@ -266,7 +275,7 @@ describe("TrustedSourcesController (HTTP)", () => {
 
       const res = await request(app.getHttpServer())
         .patch("/api/v1/trusted-sources/ts_other_user")
-        .send({ displayName: "Updated Name" });
+        .send({ displayName: "Updated Name", expectedRevision: 0 });
 
       expect(res.status).toBe(403);
     });
@@ -420,7 +429,7 @@ describe("TrustedSourcesController (HTTP)", () => {
 
       const res = await request(app.getHttpServer())
         .patch("/api/v1/trusted-sources/ts_abc123")
-        .send({ displayName: "New Name" });
+        .send({ displayName: "New Name", expectedRevision: 0 });
 
       expect(res.status).toBe(200);
       expect(res.body.displayName).toBe("New Name");
@@ -432,7 +441,7 @@ describe("TrustedSourcesController (HTTP)", () => {
 
       const res = await request(app.getHttpServer())
         .patch("/api/v1/trusted-sources/ts_abc123")
-        .send({ issuerId: "issuer_new" });
+        .send({ issuerId: "issuer_new", expectedRevision: 0 });
 
       expect(res.status).toBe(200);
       expect(service.updateTrustedSource).toHaveBeenCalledWith(
@@ -445,7 +454,7 @@ describe("TrustedSourcesController (HTTP)", () => {
     it("PATCH rejects if displayName exceeds max length", async () => {
       const res = await request(app.getHttpServer())
         .patch("/api/v1/trusted-sources/ts_abc123")
-        .send({ displayName: "X".repeat(121) });
+        .send({ displayName: "X".repeat(121), expectedRevision: 0 });
 
       expect(res.status).toBe(422);
     });
@@ -453,7 +462,7 @@ describe("TrustedSourcesController (HTTP)", () => {
     it("PATCH rejects if issuerId is empty string", async () => {
       const res = await request(app.getHttpServer())
         .patch("/api/v1/trusted-sources/ts_abc123")
-        .send({ issuerId: "" });
+        .send({ issuerId: "", expectedRevision: 0 });
 
       expect(res.status).toBe(422);
     });
@@ -498,6 +507,7 @@ describe("TrustedSourcesController (HTTP)", () => {
         .patch("/api/v1/trusted-sources/ts_abc123")
         .send({
           displayName: "New Name",
+          expectedRevision: 0,
           unknownField: "should-not-be-allowed",
         });
 
@@ -554,7 +564,7 @@ describe("TrustedSourcesController (HTTP)", () => {
 
       const res = await request(app.getHttpServer())
         .patch("/api/v1/trusted-sources/ts_abc123")
-        .send({ displayName: "Updated" });
+        .send({ displayName: "Updated", expectedRevision: 0 });
 
       expect(res.status).toBe(200);
     });

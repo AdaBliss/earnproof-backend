@@ -1,4 +1,10 @@
 import { Injectable, Logger, Optional } from "@nestjs/common";
+import {
+  auditLogHoldExclusion,
+  holdsInEffectWhere,
+  MAX_HOLDS_IN_EFFECT,
+  type HoldCoverage,
+} from "../../audit/legal-holds/legal-hold-scope";
 import { Clock, SystemClock } from "../../common/time/clock";
 import { PrismaService } from "../../database/prisma.service";
 import {
@@ -43,6 +49,13 @@ import {
  * Both modes go through `selectPage`, so under a fixed clock and unchanged data
  * they select the same rows by construction, not by two query builders
  * happening to agree.
+ *
+ * **Held.** Audit records covered by a legal hold in effect at the evaluation
+ * instant are excluded from both the selection and the delete statement (#311).
+ * Holds are re-read before every select and again before every delete, so a
+ * hold committed mid-sweep protects the next statement. If the holds cannot be
+ * read, or more than {@link MAX_HOLDS_IN_EFFECT} are in effect, audit cleanup
+ * fails closed for that run instead of deleting with an incomplete hold list.
  */
 
 /** Rows removed per statement. Small enough to keep lock duration short. */
@@ -330,6 +343,7 @@ export class RetentionCleanupService {
         delegate,
         cutoff,
         dryRun ? selected : 0,
+        await this.holdExclusion(entry, now),
       );
 
       if (page.length === 0) {
@@ -339,7 +353,11 @@ export class RetentionCleanupService {
 
       if (!dryRun) {
         const ids = page.map((row) => row.id);
-        const result = await delegate.deleteMany({ where: { id: { in: ids } } });
+        // The exclusion is applied again so a hold that committed after the
+        // select still protects its records from this statement.
+        const result = await delegate.deleteMany({
+          where: { id: { in: ids }, ...(await this.holdExclusion(entry, now)) },
+        });
         affected += result.count;
       }
 
@@ -408,9 +426,10 @@ export class RetentionCleanupService {
     delegate: PrismaDelegate,
     cutoff: Date,
     skip: number,
+    exclusion: Record<string, unknown> = {},
   ): Promise<SelectedRow[]> {
     const rows = await delegate.findMany({
-      where: this.eligibilityFilter(entry, cutoff),
+      where: { ...this.eligibilityFilter(entry, cutoff), ...exclusion },
       select: selectionFor(entry),
       orderBy: [{ [entry.cutoffColumn]: "asc" }, { id: "asc" }],
       take: BATCH_SIZE,
@@ -455,6 +474,32 @@ export class RetentionCleanupService {
     }
 
     return base;
+  }
+
+  /**
+   * Where-clause fragment excluding legally held records. Only audit logs can
+   * be held; every other class gets an empty fragment and an unchanged query.
+   */
+  private async holdExclusion(
+    entry: RetentionClass,
+    now: Date,
+  ): Promise<Record<string, unknown>> {
+    if (entry.key !== "audit_logs") return {};
+
+    const holds: HoldCoverage[] = await this.prisma.auditLegalHold.findMany({
+      where: holdsInEffectWhere(now),
+      select: { scope: true, organizationId: true, rangeStart: true, rangeEnd: true },
+      take: MAX_HOLDS_IN_EFFECT + 1,
+    });
+
+    if (holds.length > MAX_HOLDS_IN_EFFECT) {
+      throw new RetentionConfigError(
+        `More than ${MAX_HOLDS_IN_EFFECT} legal holds are in effect; audit cleanup ` +
+          "is skipped rather than run with a truncated hold list.",
+      );
+    }
+
+    return auditLogHoldExclusion(holds);
   }
 
   /**

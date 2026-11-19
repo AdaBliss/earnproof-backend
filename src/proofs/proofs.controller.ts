@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   HttpCode,
   HttpStatus,
   Param,
@@ -16,12 +17,14 @@ import {
 import {
   ApiBearerAuth,
   ApiBody,
+  ApiHeader,
   ApiOperation,
   ApiParam,
   ApiResponse,
   ApiTags,
 } from "@nestjs/swagger";
 import { SkipThrottle, Throttle } from "@nestjs/throttler";
+import { ApiKeyScope, SharingOutcome } from "@prisma/client";
 import { Request } from "express";
 import { AuthenticatedUser } from "../auth/auth.types";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
@@ -45,9 +48,12 @@ import {
   SharingAccessQueryDto,
 } from "./dto/proof-sharing.dto";
 import { ThrottleCost } from "../common/rate-limit/throttle-cost.decorator";
+import { CreateAggregateEarningsProofDto } from "./dto/create-aggregate-earnings-proof.dto";
 import { CreateMinimumIncomeProofDto } from "./dto/create-minimum-income-proof.dto";
 import { CreatePaymentReceiptProofDto } from "./dto/create-payment-receipt-proof.dto";
 import { CreateRecurringIncomeProofDto } from "./dto/create-recurring-income-proof.dto";
+import { CreateEmployerPaymentProofDto } from "./dto/create-employer-payment-proof.dto";
+import { CreateEmploymentContinuityProofDto } from "./dto/create-employment-continuity-proof.dto";
 import { ListProofsDto } from "./dto/list-proofs.dto";
 import { ProofCreatedDto } from "./dto/proof-created.dto";
 import {
@@ -66,10 +72,13 @@ import { VerifyProofResponseDto } from "./dto/verify-proof-response.dto";
 import { VerifyProofsBatchResponseDto } from "./dto/verify-proofs-batch-response.dto";
 import { VerifyProofsBatchDto } from "./dto/verify-proofs-batch.dto";
 import { VerificationStatsDto } from "./dto/verification-stats.dto";
+import { RefreshProofRequestDto, RefreshProofResponseDto } from "./dto/refresh-proof.dto";
 import { ProofsService } from "./proofs.service";
 import { ProofSharingService } from "./proof-sharing.service";
 import { PrismaService } from "../database/prisma.service";
-import type { Request } from "express";
+import { ProofCapacityPreflightService } from "./proof-capacity-preflight.service";
+import { ProofCapacityPreflightDto } from "./dto/capacity-preflight.dto";
+import { BoundedRefreshService } from "./bounded-refresh.service";
 
 @ApiTags("proofs")
 @Controller("proofs")
@@ -78,6 +87,8 @@ export class ProofsController {
     private readonly proofsService: ProofsService,
     private readonly proofSharingService: ProofSharingService,
     private readonly prisma: PrismaService,
+    private readonly boundedRefreshService: BoundedRefreshService,
+    private readonly preflightService?: ProofCapacityPreflightService,
   ) {}
 
   @ApiBearerAuth()
@@ -109,6 +120,29 @@ export class ProofsController {
     @Query() query: ListProofsDto,
   ) {
     return this.proofsService.listProofs(user.id, query);
+  }
+
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: "Preflight check proof issuance capacity and quotas",
+    description:
+      "Returns advisory capacity evaluation combining organization quota and live contract status. Does not grant authorization.",
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Proof capacity preflight response.",
+  })
+  @UseGuards(AuthGuard)
+  @Get("preflight")
+  @AuthenticatedRoute({ ownership: "user" })
+  async getCapacityPreflight(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: ProofCapacityPreflightDto,
+  ) {
+    if (!this.preflightService) {
+      throw new BadRequestException("Preflight service not available");
+    }
+    return this.preflightService.evaluatePreflight(user.id, query);
   }
 
   @ApiBearerAuth()
@@ -234,6 +268,7 @@ export class ProofsController {
     type: ApiErrorDto,
   })
   @UseGuards(AuthGuard)
+  @AuthenticatedRoute({ ownership: "user" })
   @Post("invoice-settlement")
   createInvoiceSettlementProof(
     @CurrentUser() user: AuthenticatedUser,
@@ -335,6 +370,7 @@ export class ProofsController {
     type: ApiErrorDto,
   })
   @UseGuards(AuthGuard)
+  @AuthenticatedRoute({ ownership: "user" })
   @Post("income-range")
   createIncomeRangeProof(
     @CurrentUser() user: AuthenticatedUser,
@@ -421,6 +457,7 @@ export class ProofsController {
     type: ApiErrorDto,
   })
   @UseGuards(AuthGuard)
+  @AuthenticatedRoute({ ownership: "user" })
   @SkipThrottle({ default: true, verification: true })
   @Throttle({ strict: {} })
   @Post("aggregate-earnings")
@@ -429,6 +466,126 @@ export class ProofsController {
     @Body() body: CreateAggregateEarningsProofDto,
   ) {
     return this.proofsService.createAggregateEarningsProof(user, body);
+  }
+
+  @ApiOperation({
+    summary: "Create an employer-payment proof",
+    description:
+      "Issues a credential stating that the caller received an eligible income payment from a " +
+      "verified employer source within the specified period. The credential commits only to " +
+      "the employer's identity, the asset, the period, and the policy parameters. Exact amounts, " +
+      "source accounts, and individual payments are not disclosed.",
+  })
+  @ApiBearerAuth()
+  @ApiResponse({
+    status: HttpStatus.CREATED,
+    description: "Employer-payment proof created.",
+    type: ProofCreatedDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description:
+      "The period is invalid, longer than 366 days, or ends in the future.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: "Trusted source does not exist or belongs to another user.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    description:
+      "The source is untrusted, revoked or ambiguous (EMPLOYER_SOURCE_UNTRUSTED, EMPLOYER_SOURCE_AMBIGUOUS), " +
+      "no eligible payment falls inside the period (EMPLOYER_PAYMENT_NOT_FOUND), or request validation failed.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Bearer token is missing, malformed, invalid, or expired.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description: "Idempotency key was used with a different request payload.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.REQUEST_TIMEOUT,
+    description: "Previous idempotent request is still being processed.",
+    type: ApiErrorDto,
+  })
+  @UseGuards(AuthGuard)
+  @SkipThrottle({ default: true, verification: true })
+  @Throttle({ strict: {} })
+  @Idempotent({ headerName: "idempotency-key", required: true })
+  @Post("employer-payment")
+  @AuthenticatedRoute({ ownership: "user" })
+  createEmployerPaymentProof(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: CreateEmployerPaymentProofDto,
+  ) {
+    return this.proofsService.createEmployerPaymentProof(user, body);
+  }
+
+  @ApiOperation({
+    summary: "Create an employment-continuity proof",
+    description:
+      "Issues a credential stating that corroborated income payments from one verified employer source cover " +
+      "a completed window of consecutive UTC calendar months, allowing at most one missing month and requiring " +
+      "the first and last months to be covered. The credential commits only to the continuity result and the " +
+      "policy version and parameters it was evaluated under.",
+  })
+  @ApiBearerAuth()
+  @ApiResponse({
+    status: HttpStatus.CREATED,
+    description: "Employment-continuity proof created.",
+    type: ProofCreatedDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description:
+      "periodStart is not the first instant of a UTC month, observedPeriods is out of range, or the window has not ended.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: "Trusted source does not exist or belongs to another user.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    description:
+      "The source is untrusted, revoked or ambiguous, the continuity rule is not met (CONTINUITY_NOT_SATISFIED), " +
+      "the window holds too many payments (CONTINUITY_LIMIT_EXCEEDED), or request validation failed.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Bearer token is missing, malformed, invalid, or expired.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description: "Idempotency key was used with a different request payload.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.REQUEST_TIMEOUT,
+    description: "Previous idempotent request is still being processed.",
+    type: ApiErrorDto,
+  })
+  @UseGuards(AuthGuard)
+  @SkipThrottle({ default: true, verification: true })
+  @Throttle({ strict: {} })
+  @Idempotent({ headerName: "idempotency-key", required: true })
+  @Post("employment-continuity")
+  @AuthenticatedRoute({ ownership: "user" })
+  createEmploymentContinuityProof(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: CreateEmploymentContinuityProofDto,
+  ) {
+    return this.proofsService.createEmploymentContinuityProof(user, body);
   }
 
   @ApiOperation({
@@ -466,13 +623,17 @@ export class ProofsController {
     type: ApiErrorDto,
   })
   @UseGuards(AuthGuard)
+  @AuthenticatedRoute({ ownership: "user" })
   @Patch(":id/revoke")
   revokeProof(
     @CurrentUser() user: AuthenticatedUser,
     @Param("id") id: string,
     @Body() body?: RevokeProofDto,
   ) {
-    return this.proofsService.revokeProof(user, id, body);
+    if (body !== undefined) {
+      return this.proofsService.revokeProof(user, id, body);
+    }
+    return this.proofsService.revokeProof(user, id);
   }
 
   @ApiOperation({
@@ -505,6 +666,7 @@ export class ProofsController {
     type: ApiErrorDto,
   })
   @UseGuards(AuthGuard)
+  @AuthenticatedRoute({ ownership: "user" })
   @Get(":id/anchoring")
   getProofAnchoringStatus(
     @CurrentUser() user: AuthenticatedUser,
@@ -556,6 +718,7 @@ export class ProofsController {
     type: ApiErrorDto,
   })
   @UseGuards(AuthGuard)
+  @AuthenticatedRoute({ ownership: "user" })
   @Post(":id/anchoring/:intentId/retry")
   retryProofAnchoring(
     @CurrentUser() user: AuthenticatedUser,
@@ -608,6 +771,7 @@ export class ProofsController {
     type: ApiErrorDto,
   })
   @UseGuards(AuthGuard)
+  @AuthenticatedRoute({ ownership: "user" })
   @Post(":id/anchoring/:intentId/abandon")
   abandonProofAnchoring(
     @CurrentUser() user: AuthenticatedUser,
@@ -615,9 +779,6 @@ export class ProofsController {
     @Param("intentId") intentId: string,
   ) {
     return this.proofsService.abandonProofAnchoring(user, id, intentId);
-  @AuthenticatedRoute({ ownership: "user" })
-  revokeProof(@CurrentUser() user: AuthenticatedUser, @Param("id") id: string) {
-    return this.proofsService.revokeProof(user.id, id);
   }
 
   @ApiBearerAuth()
@@ -650,6 +811,7 @@ export class ProofsController {
     type: ApiErrorDto,
   })
   @UseGuards(AuthGuard)
+  @AuthenticatedRoute({ ownership: "user" })
   @Get(":id/renewal-eligibility")
   getRenewalEligibility(
     @CurrentUser() user: AuthenticatedUser,
@@ -714,6 +876,7 @@ export class ProofsController {
     type: ApiErrorDto,
   })
   @UseGuards(AuthGuard)
+  @AuthenticatedRoute({ ownership: "user" })
   // Renewal issues a credential, so it shares proof creation's strict budget.
   @SkipThrottle({ default: true, verification: true })
   @Throttle({ strict: {} })
@@ -764,8 +927,8 @@ export class ProofsController {
         },
       );
 
-      if (sharingResult.proofId && sharingResult.outcome === "ACCEPTED") {
-        actualProofId = sharingResult.proofId;
+      if (sharingResult.isValid && (sharingResult.proof as any)?.id) {
+        actualProofId = (sharingResult.proof as any).id;
         usedSharingToken = true;
       } else {
         // Sharing token verification failed
@@ -826,6 +989,7 @@ export class ProofsController {
     const proofIds = (request.body as { proofIds?: unknown[] })?.proofIds;
     return Array.isArray(proofIds) ? proofIds.length : 1;
   })
+  @PublicRoute()
   @HttpCode(HttpStatus.OK)
   @Post("verify/batch")
   verifyProofsBatch(
@@ -862,7 +1026,7 @@ export class ProofsController {
     type: ApiErrorDto,
   })
   @UseGuards(AuthGuard)
-  @RequireApiKeyScopes(["PROOF_READ"]) // Example of API key quota enforcement
+  @RequireApiKeyScopes(ApiKeyScope.PROOF_READ) // Example of API key quota enforcement
   @RequireConsent("PRIVACY_POLICY") // Example of consent requirement
   @Get(":id/verification-stats")
   @AuthenticatedRoute({ ownership: "user" })
@@ -910,6 +1074,7 @@ export class ProofsController {
     @CurrentUser() user: AuthenticatedUser,
     @Param("id") proofId: string,
     @Body() body: CreateSharingTokenDto,
+    @Req() request: Request,
   ): Promise<SharingTokenResponseDto> {
     // Get user's organization (simplified - assumes single org membership)
     const orgMember = await this.getUserPrimaryOrganization(user.id);
@@ -926,12 +1091,12 @@ export class ProofsController {
       orgMember.organizationId,
       proofId,
       {
-        purpose: body.purpose || "Proof sharing",
+        purpose: "Proof sharing",
         requestedBy: user.id,
       },
       {
         ipAddress: request.ip || "0.0.0.0",
-        userAgent: request.headers["user-agent"] || "unknown",
+        userAgent: (request.headers["user-agent"] as string) || "unknown",
       },
     );
 
@@ -979,14 +1144,34 @@ export class ProofsController {
       organizationId = orgMember.organizationId;
     }
 
-    const summary = await this.proofSharingService.getSharingEvents(
+    const events = await this.proofSharingService.getSharingEvents(
       organizationId,
       {
         proofId: query.proofId,
       },
     );
 
-    return summary;
+    const aggregateMap = new Map<SharingOutcome, { count: number; lastAccessedAt: Date | null }>();
+    for (const event of events) {
+      const existing = aggregateMap.get(event.outcome) ?? { count: 0, lastAccessedAt: null };
+      existing.count += 1;
+      if (!existing.lastAccessedAt || event.createdAt > existing.lastAccessedAt) {
+        existing.lastAccessedAt = event.createdAt;
+      }
+      aggregateMap.set(event.outcome, existing);
+    }
+    const aggregates = Array.from(aggregateMap.entries()).map(([outcome, data]) => ({
+      outcome,
+      count: data.count,
+      lastAccessedAt: data.lastAccessedAt,
+    }));
+    const recentEvents = events.slice(0, 50).map((e: any) => ({
+      proofId: e.proofId,
+      outcome: e.outcome,
+      accessedAt: e.createdAt,
+    }));
+
+    return { aggregates, recentEvents };
   }
 
   /**
@@ -1007,4 +1192,178 @@ export class ProofsController {
       },
     });
   }
+
+  /**
+   * Refresh verification for an authenticated user's proof.
+   * Allows explicit fresh-read path that bypasses stale cache under controlled latency and concurrency budgets.
+   */
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: "Refresh bounded live verification for a proof (authenticated owner)",
+    description:
+      "Allows proof owners to perform a fresh verification with source selection and latency bounds. " +
+      "Supports CACHE (local only), LIVE (on-chain within latency bound), or PREFER_LIVE (attempt live, fallback to cache). " +
+      "Result includes provenance metadata indicating whether source was live, cached, or fallback. " +
+      "On-chain invalidity (fail-closed) overrides local state. " +
+      "Live checks are subject to concurrency limits to prevent thundering herd. " +
+      "Endpoint respects global verification rate limits and cannot bypass abuse controls.",
+  })
+  @ApiParam({ name: "id", description: "Proof ID (uuid)." })
+  @ApiBody({
+    type: RefreshProofRequestDto,
+    description: "Refresh request with source selection and latency bounds.",
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Verification result with freshness provenance.",
+    type: RefreshProofResponseDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: "Invalid source selection or latency bounds.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Bearer token is missing, malformed, invalid, or expired.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.FORBIDDEN,
+    description: "The proof belongs to another user.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: "Proof not found.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.REQUEST_TIMEOUT,
+    description: "Live verification latency bound exceeded.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.TOO_MANY_REQUESTS,
+    description: "Rate limit exceeded or concurrency limit reached.",
+    type: ApiErrorDto,
+  })
+  @UseGuards(AuthGuard)
+  @SkipThrottle({ default: true, strict: true })
+  @Throttle({ verification: {} })
+  @AuthenticatedRoute({ ownership: "user" })
+  @HttpCode(HttpStatus.OK)
+  @Post(":id/verify/refresh")
+  async refreshProofAuthenticated(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") proofId: string,
+    @Body() request: RefreshProofRequestDto,
+    @Req() httpRequest: Request,
+  ): Promise<RefreshProofResponseDto> {
+    // Verify ownership and proof exists
+    const proof = await this.prisma.proof.findUnique({
+      where: { id: proofId },
+      select: { userId: true },
+    });
+
+    if (!proof) {
+      throw new ForbiddenException("Proof not found");
+    }
+
+    if (proof.userId !== user.id) {
+      throw new ForbiddenException("Proof belongs to another user");
+    }
+
+    // Perform bounded refresh
+    return this.boundedRefreshService.refreshProof(
+      proofId,
+      request,
+      {
+        ip: httpRequest.ip,
+      },
+    );
+  }
+
+  /**
+   * Refresh verification for a shared proof using sharing token.
+   * Allows verifiers with a sharing token to perform fresh verification.
+   */
+  @ApiOperation({
+    summary: "Refresh bounded live verification for a shared proof",
+    description:
+      "Allows verifiers with a valid sharing token to perform a fresh verification with source selection and latency bounds. " +
+      "Token is provided as URL query parameter and must be valid and not expired. " +
+      "Shares all safety guarantees with the authenticated refresh endpoint: " +
+      "Cannot bypass abuse limits, cannot report stale results as live, and deterministic timeout behavior.",
+  })
+  @ApiParam({ name: "id", description: "Proof ID (uuid) or sharing token (share_*)." })
+  @ApiBody({
+    type: RefreshProofRequestDto,
+    description: "Refresh request with source selection and latency bounds.",
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Verification result with freshness provenance.",
+    type: RefreshProofResponseDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: "Invalid source selection, latency bounds, or sharing token format.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: "Proof not found or sharing token invalid/expired.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.REQUEST_TIMEOUT,
+    description: "Live verification latency bound exceeded.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.TOO_MANY_REQUESTS,
+    description: "Rate limit exceeded or concurrency limit reached.",
+    type: ApiErrorDto,
+  })
+  @SkipThrottle({ default: true, strict: true })
+  @Throttle({ verification: {} })
+  @PublicRoute()
+  @HttpCode(HttpStatus.OK)
+  @Post(":id/verify/refresh")
+  async refreshProofShared(
+    @Param("id") proofIdOrToken: string,
+    @Body() request: RefreshProofRequestDto,
+    @Req() httpRequest: Request,
+  ): Promise<RefreshProofResponseDto> {
+    // Check if this is a sharing token
+    let actualProofId = proofIdOrToken;
+
+    if (proofIdOrToken.startsWith("share_")) {
+      // Verify sharing token and get the actual proof ID
+      const sharingResult = await this.proofSharingService.verifyWithSharingToken(
+        proofIdOrToken,
+        {
+          ipAddress: httpRequest.ip || "0.0.0.0",
+          userAgent: httpRequest.headers["user-agent"] || "unknown",
+        },
+      );
+
+      if (!sharingResult.isValid || !(sharingResult.proof as any)?.id) {
+        throw new ForbiddenException("Invalid or expired sharing token");
+      }
+
+      actualProofId = (sharingResult.proof as any).id;
+    }
+
+    // Perform bounded refresh with sharing context
+    return this.boundedRefreshService.refreshProof(
+      actualProofId,
+      request,
+      {
+        ip: httpRequest.ip,
+      },
+    );
+  }
 }
+

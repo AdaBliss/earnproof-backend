@@ -48,6 +48,7 @@ export const ACCOUNT_STATUS_TRANSITIONS: Readonly<
   [ResourceStatus.SUSPENDED]: [ResourceStatus.ACTIVE, ResourceStatus.REVOKED],
   [ResourceStatus.REVOKED]: [],
   [ResourceStatus.DELETED]: [],
+  [ResourceStatus.EXPIRED]: [],
 };
 
 /** Statuses an administrator may request. `DELETED` is deliberately absent. */

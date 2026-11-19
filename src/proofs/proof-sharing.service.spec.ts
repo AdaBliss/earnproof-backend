@@ -26,7 +26,7 @@ function makePrismaMock() {
 function makeConfigMock() {
   return {
     get: jest.fn().mockImplementation((key: string) => {
-      const defaults = {
+      const defaults: Record<string, any> = {
         "proofSharingTokenTtl": 86400, // 24 hours
         "proofSharingEventRetentionDays": 90,
       };
@@ -65,6 +65,7 @@ function createSharingEvent(overrides: Partial<{
   proofId: string;
   tokenHash: string;
   outcome: string;
+  expiresAt: Date;
 }> = {}) {
   return {
     id: overrides.id ?? "event_123",
@@ -74,8 +75,8 @@ function createSharingEvent(overrides: Partial<{
     ipHash: "ip_hash",
     userAgentHash: "ua_hash",
     outcome: overrides.outcome ?? "SUCCESS",
-    createdAt: new Date("2024-01-01T10:00:00Z"),
-    expiresAt: new Date("2024-04-01T10:00:00Z"),
+    createdAt: new Date(),
+    expiresAt: overrides.expiresAt ?? new Date(Date.now() + 86400000),
   };
 }
 

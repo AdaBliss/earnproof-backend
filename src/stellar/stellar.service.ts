@@ -185,4 +185,11 @@ export class StellarService {
     const transaction = (await response.json()) as HorizonTransactionRecord;
     return transaction && typeof transaction === "object" ? transaction : null;
   }
+
+  async readPaymentsPageAscending(
+    walletAddress: string,
+    options: AscendingPageOptions,
+  ): Promise<AscendingPaymentsPage> {
+    return this.horizon.readPaymentsPageAscending(walletAddress, options);
+  }
 }

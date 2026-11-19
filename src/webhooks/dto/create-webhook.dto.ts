@@ -1,5 +1,4 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
-import { ApiProperty } from "@nestjs/swagger";
 import {
   ArrayMaxSize,
   ArrayMinSize,
@@ -7,7 +6,12 @@ import {
   IsIn,
   IsOptional,
   IsUrl,
+  MaxLength,
+  ValidateNested,
 } from "class-validator";
+import { Type } from "class-transformer";
+import { FIELD_LIMITS } from "../../common/limits/request-limits";
+import { IsSafeUrl } from "../../common/validation/url.validator";
 import {
   CURRENT_WEBHOOK_PAYLOAD_VERSION,
   WEBHOOK_EVENT_TYPES,
@@ -15,12 +19,7 @@ import {
   WebhookEventType,
   WebhookPayloadVersion,
 } from "../webhook-event.types";
-  IsUrl,
-  MaxLength,
-} from "class-validator";
-import { FIELD_LIMITS } from "../../common/limits/request-limits";
-import { IsSafeUrl } from "../../common/validation/url.validator";
-import { WEBHOOK_EVENT_TYPES, WebhookEventType } from "../webhook-event.types";
+import { PredicateDto } from "./predicate.dto";
 
 export class CreateWebhookDto {
   @ApiProperty({
@@ -54,4 +53,17 @@ export class CreateWebhookDto {
   @IsOptional()
   @IsIn(WEBHOOK_PAYLOAD_VERSIONS as unknown as string[])
   payloadVersion?: WebhookPayloadVersion;
+
+  @ApiPropertyOptional({
+    description:
+      "Optional predicate to narrow which events trigger this webhook. " +
+      "If omitted or null, all subscribed event types match. " +
+      "If provided, both event type AND predicate must match. " +
+      "Predicate is a bounded, declarative JSON structure over resource, outcome, and schemaVersion.",
+    type: PredicateDto,
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => PredicateDto)
+  predicate?: PredicateDto | null;
 }

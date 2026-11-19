@@ -46,6 +46,7 @@ export class ProofSharingService {
    * Anonymize IP address to subnet for privacy
    */
   private anonymizeIpAddress(ip: string): string {
+    if (ip === "::1") return "::1";
     // IPv4: Use /24 subnet (e.g., 192.168.1.50 -> 192.168.1.0)
     // IPv6: Use /64 subnet approximation
     if (ip.includes(".")) {
@@ -53,6 +54,9 @@ export class ProofSharingService {
       if (parts.length === 4) {
         return `${parts[0]}.${parts[1]}.${parts[2]}.0`;
       }
+    } else if (ip.includes("::")) {
+      const prefix = ip.split("::")[0];
+      return prefix ? `${prefix}::` : ip;
     } else if (ip.includes(":")) {
       // IPv6 - use first 4 segments for /64 approximation
       const parts = ip.split(":");
@@ -202,7 +206,7 @@ export class ProofSharingService {
         take: 1,
       });
 
-      if (tokenEvents.length === 0) {
+      if (tokenEvents.length === 0 || (tokenEvents[0].expiresAt && tokenEvents[0].expiresAt <= new Date())) {
         // Check if token exists but is expired
         const expiredEvents = await this.prisma.proofSharingEvent.findMany({
           where: {
@@ -212,7 +216,7 @@ export class ProofSharingService {
           take: 1,
         });
 
-        outcome = expiredEvents.length > 0 
+        outcome = (expiredEvents.length > 0 || (tokenEvents.length > 0 && tokenEvents[0].expiresAt && tokenEvents[0].expiresAt <= new Date()))
           ? SharingOutcome.EXPIRED_TOKEN 
           : SharingOutcome.INVALID_TOKEN;
       } else {

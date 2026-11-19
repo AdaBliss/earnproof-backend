@@ -120,6 +120,8 @@ function serviceWith(delegates: Record<string, FakeDelegate>): {
     verificationEventLog: delegates.verification_events ?? new FakeDelegate([]),
     auditLog: delegates.audit_logs ?? new FakeDelegate([]),
     anchoringIntent: delegates.failed_anchoring_intents ?? new FakeDelegate([]),
+    // No legal holds: audit-log selection is unchanged (#311).
+    auditLegalHold: { findMany: async () => [] },
   } as unknown as PrismaService;
 
   return { service: new RetentionCleanupService(prisma), delegates };

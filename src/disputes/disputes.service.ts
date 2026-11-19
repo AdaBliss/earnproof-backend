@@ -10,6 +10,10 @@ import { PrismaService } from "../database/prisma.service";
 import { WebhookDeliveryService } from "../webhooks/webhook-delivery.service";
 import { sha256 } from "../common/crypto/hash";
 import { StructuredLogger } from "../common/logger";
+import { DomainEventOutboxService } from "../common/events/domain-event-outbox.service";
+import { DisputeDecisionNotificationPayload } from "./events/dispute-decision-notification.types";
+import { SignedCursorService } from "../common/pagination/signed-cursor.service";
+import { computeFilterIdFromDto } from "../common/pagination/filter-id";
 
 export type CreateDisputeDto = {
   proofId: string;
@@ -56,7 +60,9 @@ export class DisputesService {
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly signedCursorService: SignedCursorService,
     private readonly webhookDeliveryService?: WebhookDeliveryService,
+    private readonly domainEventOutbox?: DomainEventOutboxService,
   ) {}
 
   /**
@@ -162,6 +168,28 @@ export class DisputesService {
           },
         });
 
+        // Emit DISPUTE_FILED domain event for notifications
+        if (this.domainEventOutbox) {
+          await this.domainEventOutbox.publish<DisputeDecisionNotificationPayload>(tx, {
+            organizationId,
+            eventType: "DISPUTE_FILED",
+            aggregateType: "ProofDispute",
+            aggregateId: dispute.id,
+            payload: {
+              disputeId: dispute.id,
+              proofId: dispute.proofId,
+              organizationId,
+              category: dispute.category!,
+              decisionType: "FILED",
+              status: dispute.status,
+              participants: {
+                proofOwnerId: dispute.proof.userId,
+                disputeSubmitterId: user.id,
+              },
+            },
+          });
+        }
+
         return dispute;
       });
     } catch (error) {
@@ -181,7 +209,13 @@ export class DisputesService {
   }
 
   /**
-   * List disputes with filtering and pagination.
+   * List disputes with filtering and pagination using signed cursor tokens.
+   * 
+   * Cursor tokens are signed with:
+   * - Tenant binding (organizationId) to prevent cross-tenant data leaks
+   * - Filter binding to prevent using cursors across different filter sets
+   * - Expiry (15 minutes) for time-bound validity
+   * - HMAC-SHA256 signatures for tamper protection
    */
   async listDisputes(
     user: AuthenticatedUser,
@@ -192,16 +226,28 @@ export class DisputesService {
     await this.verifyOrganizationAccess(user, organizationId);
 
     const limit = Math.min(query.limit ?? 20, 100);
-    
-    // Validate cursor if provided
+
+    // Compute filter ID from query parameters (binds cursor to specific filters)
+    const filterId = computeFilterIdFromDto(query, ["status", "category", "assignedTo"]);
+
+    // Validate and decode cursor if provided
+    let cursorId: string | undefined;
     if (query.cursor) {
-      const cursorDispute = await this.prisma.proofDispute.findFirst({
-        where: { id: query.cursor, organizationId },
-        select: { id: true },
+      const verifyResult = this.signedCursorService.verify({
+        token: query.cursor,
+        tenantId: organizationId,
+        filterId,
       });
-      if (!cursorDispute) {
-        throw new BadRequestException("Invalid dispute cursor");
+
+      if (!verifyResult.ok) {
+        // Return stable error messages for all validation failures
+        const reason = verifyResult.reason;
+        throw new BadRequestException(
+          `Invalid pagination cursor: ${reason}. Please restart pagination.`
+        );
       }
+
+      cursorId = verifyResult.data.cursorId;
     }
 
     const where: any = {
@@ -220,17 +266,26 @@ export class DisputesService {
       },
       orderBy: [{ submittedAt: "desc" }, { id: "desc" }],
       take: limit + 1,
-      ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
+      ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
     });
 
     const hasMore = disputes.length > limit;
     const items = hasMore ? disputes.slice(0, limit) : disputes;
 
+    // Sign the next cursor token if there are more items
+    const nextCursor = hasMore
+      ? this.signedCursorService.sign({
+          cursorId: items[items.length - 1]?.id ?? "",
+          tenantId: organizationId,
+          filterId,
+        })
+      : null;
+
     return {
       items: items.map((dispute) => this.formatDisputeResponse(dispute)),
       pageInfo: {
         hasMore,
-        nextCursor: hasMore ? items[items.length - 1]?.id ?? null : null,
+        nextCursor,
       },
     };
   }
@@ -301,6 +356,11 @@ export class DisputesService {
           status: DisputeStatus.WITHDRAWN,
           withdrawnAt: new Date(),
         },
+        include: {
+          proof: {
+            select: { userId: true },
+          },
+        },
       });
 
       // Create audit log
@@ -317,6 +377,30 @@ export class DisputesService {
           },
         },
       });
+
+      // Emit DISPUTE_WITHDRAWN domain event for notifications
+      if (this.domainEventOutbox) {
+        await this.domainEventOutbox.publish<DisputeDecisionNotificationPayload>(tx, {
+          organizationId,
+          eventType: "DISPUTE_WITHDRAWN",
+          aggregateType: "ProofDispute",
+          aggregateId: updated.id,
+          payload: {
+            disputeId: updated.id,
+            proofId: updated.proofId,
+            organizationId,
+            category: updated.category!,
+            decisionType: "WITHDRAWN",
+            status: updated.status,
+            withdrawnBy: user.id,
+            withdrawnAt: updated.withdrawnAt?.toISOString(),
+            participants: {
+              proofOwnerId: updated.proof.userId,
+              disputeSubmitterId: updated.submittedBy!,
+            },
+          },
+        });
+      }
 
       this.emitWebhookEvent(organizationId, "dispute.withdrawn", {
         disputeId: updated.id,
@@ -381,6 +465,11 @@ export class DisputesService {
           assignedTo: input.assignedTo,
           assignedAt: new Date(),
         },
+        include: {
+          proof: {
+            select: { userId: true },
+          },
+        },
       });
 
       // Create audit log
@@ -398,6 +487,29 @@ export class DisputesService {
           },
         },
       });
+
+      // Emit DISPUTE_ASSIGNED domain event
+      if (this.domainEventOutbox) {
+        await this.domainEventOutbox.publish<DisputeDecisionNotificationPayload>(tx, {
+          organizationId,
+          eventType: "DISPUTE_ASSIGNED",
+          aggregateType: "ProofDispute",
+          aggregateId: updated.id,
+          payload: {
+            disputeId: updated.id,
+            proofId: updated.proofId,
+            organizationId,
+            category: updated.category!,
+            decisionType: "ASSIGNED",
+            status: updated.status,
+            participants: {
+              proofOwnerId: updated.proof.userId,
+              disputeSubmitterId: updated.submittedBy!,
+              assignedReviewerId: input.assignedTo,
+            },
+          },
+        });
+      }
 
       this.emitWebhookEvent(organizationId, "dispute.assigned", {
         disputeId: updated.id,
@@ -438,7 +550,7 @@ export class DisputesService {
       throw new NotFoundException("Dispute not found");
     }
 
-    if (!dispute.status || ![DisputeStatus.OPEN, DisputeStatus.ASSIGNED].includes(dispute.status)) {
+    if (!dispute.status || (dispute.status !== DisputeStatus.OPEN && dispute.status !== DisputeStatus.ASSIGNED)) {
       throw new BadRequestException("Only open or assigned disputes can be resolved");
     }
 
@@ -468,6 +580,11 @@ export class DisputesService {
           resolvedBy: user.id,
           resolvedAt: new Date(),
         },
+        include: {
+          proof: {
+            select: { userId: true },
+          },
+        },
       });
 
       // Create audit log
@@ -485,6 +602,33 @@ export class DisputesService {
           },
         },
       });
+
+      // Emit DISPUTE_RESOLVED domain event for notifications
+      if (this.domainEventOutbox) {
+        await this.domainEventOutbox.publish<DisputeDecisionNotificationPayload>(tx, {
+          organizationId,
+          eventType: "DISPUTE_RESOLVED",
+          aggregateType: "ProofDispute",
+          aggregateId: updated.id,
+          payload: {
+            disputeId: updated.id,
+            proofId: updated.proofId,
+            organizationId,
+            category: updated.category!,
+            decisionType: "RESOLVED",
+            status: updated.status,
+            resolutionOutcome: updated.resolutionOutcome || undefined,
+            resolutionReason: updated.resolutionReason || undefined,
+            resolvedBy: user.id,
+            resolvedAt: updated.resolvedAt?.toISOString(),
+            participants: {
+              proofOwnerId: updated.proof.userId,
+              disputeSubmitterId: updated.submittedBy!,
+              assignedReviewerId: updated.assignedTo || undefined,
+            },
+          },
+        });
+      }
 
       this.emitWebhookEvent(organizationId, "dispute.resolved", {
         disputeId: updated.id,
@@ -517,7 +661,7 @@ export class DisputesService {
       if (!result[stat.status]) {
         result[stat.status] = {};
       }
-      result[stat.status][stat.category] = stat._count;
+      result[stat.status][stat.category ?? "UNKNOWN"] = stat._count;
     }
 
     return result;
@@ -584,9 +728,9 @@ export class DisputesService {
     eventType: string,
     data: Record<string, any>,
   ): void {
-    this.webhookDeliveryService
-      ?.enqueueForOrganization(organizationId, eventType, { event: eventType, data } as never)
-      .catch((error) => {
+    (this.webhookDeliveryService as any)
+      ?.enqueueForOrganization(organizationId, eventType as any, { event: eventType, data } as never)
+      .catch((error: any) => {
         this.logger.warn("Failed to enqueue webhook event", {
           organizationId,
           eventType,

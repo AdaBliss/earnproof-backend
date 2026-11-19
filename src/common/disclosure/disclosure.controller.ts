@@ -18,9 +18,9 @@ import {
   ApiBearerAuth,
   ApiQuery,
 } from "@nestjs/swagger";
-import { AuthGuard } from "@nestjs/passport";
+import { AuthGuard } from "../guards/auth.guard";
 import { ApiKeyGuard } from "../guards/api-key.guard";
-import { RequireApiKeyScopes } from "../decorators/require-api-key-scopes.decorator";
+import { RequireApiKeyScopes } from "../guards/api-key-quota.guard";
 import { ReceiptService } from "./receipt.service";
 import {
   GenerateDisclosureReceiptDto,
@@ -57,7 +57,7 @@ export class DisclosureController {
    * Requires authentication and API key with disclosure permissions.
    */
   @Post("receipts")
-  @UseGuards(AuthGuard("jwt"), ApiKeyGuard)
+  @UseGuards(AuthGuard, ApiKeyGuard)
   @RequireApiKeyScopes("disclosure:create")
   @ApiBearerAuth()
   @ApiOperation({
@@ -183,7 +183,7 @@ export class DisclosureController {
    * Supports filtering by proof ID and pagination.
    */
   @Get("receipts")
-  @UseGuards(AuthGuard("jwt"), ApiKeyGuard)
+  @UseGuards(AuthGuard, ApiKeyGuard)
   @RequireApiKeyScopes("disclosure:read")
   @ApiBearerAuth()
   @ApiOperation({

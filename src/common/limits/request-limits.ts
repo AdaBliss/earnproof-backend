@@ -34,7 +34,7 @@ export const GLOBAL_BODY_LIMIT_BYTES = 64 * KB;
 /**
  * Route-specific overrides, matched by path prefix, longest prefix first.
  *
- * Only two exist, and both tighten rather than loosen:
+ * All tighten rather than loosen:
  *
  * - Authentication is unauthenticated and therefore the cheapest place to
  *   attack. A challenge or verification carries an address, an id and a
@@ -43,6 +43,10 @@ export const GLOBAL_BODY_LIMIT_BYTES = 64 * KB;
  *   document. Its DTO caps the credential at 32 KB, so the transport limit sits
  *   just above that; a larger body cannot become a valid request and there is
  *   no reason to parse it.
+ * - CSP violation reports are unauthenticated and carry four closed-enum
+ *   fields plus a short version string — a legitimate report is a few dozen
+ *   bytes. 2 KB is generous by nearly two orders of magnitude while bounding
+ *   what a flood of reports can cost to merely parse.
  */
 export const ROUTE_BODY_LIMITS: ReadonlyArray<{
   readonly prefix: string;
@@ -50,6 +54,7 @@ export const ROUTE_BODY_LIMITS: ReadonlyArray<{
 }> = [
   { prefix: "/api/v1/auth", bytes: 8 * KB },
   { prefix: "/api/v1/credentials/verify", bytes: 40 * KB },
+  { prefix: "/api/v1/security/csp-reports", bytes: 2 * KB },
 ];
 
 /** The body limit that applies to a path. */
@@ -156,6 +161,7 @@ export const FIELD_LIMITS = {
    * smuggle an unbounded document into an audit-log row.
    */
   revocationReason: 500,
+  /**
    * Proof ids per batch verification request.
    *
    * A relying party reconciling a page of proofs verifies tens at a time, not
@@ -190,4 +196,12 @@ export const FIELD_LIMITS = {
   /** Signed credential payloads for attestations */
   credentialBytes: 32 * KB,
   credentialDepth: 5,
+  /**
+   * Frontend-reported app release/version string on a CSP violation report.
+   *
+   * Mirrors the deployment manifest's own version-string bound
+   * (`[A-Za-z0-9][A-Za-z0-9._+-]{0,63}`) so a release identifier can never
+   * become a vector for an unbounded or binary value.
+   */
+  cspRelease: 64,
 } as const;

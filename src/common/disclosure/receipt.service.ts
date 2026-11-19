@@ -112,7 +112,7 @@ export class ReceiptService {
     const receiptHash = sha256(canonicalPayload);
     
     // Sign the receipt using existing credential signing infrastructure
-    const signatureProof = this.credentialKeyService.signCredential(receiptPayload);
+    const signatureProof = this.credentialKeyService.signCredential(receiptPayload as unknown as Record<string, unknown>);
     
     const signature: ReceiptSignature = {
       algorithm: signatureProof.algorithm,
@@ -181,7 +181,7 @@ export class ReceiptService {
 
       // Verify signature using existing credential verification
       const isSignatureValid = this.credentialKeyService.verifyCredential(
-        receipt,
+        receipt as unknown as Record<string, unknown>,
         {
           type: "Ed25519",
           algorithm: signature.algorithm,
@@ -272,14 +272,17 @@ export class ReceiptService {
       take: options.limit || 50,
     });
 
-    return receipts.map((receipt) => ({
-      id: receipt.id,
-      proofId: receipt.proofId,
-      receiptHash: receipt.receiptHash,
-      issuedAt: new Date(receipt.signatureData.issuedAt as string),
-      expiresAt: receipt.expiresAt,
-      signatureKeyId: receipt.signatureData.keyId as string,
-    }));
+    return receipts.map((receipt) => {
+      const sigData = (receipt.signatureData ?? {}) as Record<string, any>;
+      return {
+        id: receipt.id,
+        proofId: receipt.proofId,
+        receiptHash: receipt.receiptHash,
+        issuedAt: new Date((sigData.issuedAt as string) ?? receipt.createdAt),
+        expiresAt: receipt.expiresAt,
+        signatureKeyId: (sigData.keyId as string) ?? "",
+      };
+    });
   }
 
   /**

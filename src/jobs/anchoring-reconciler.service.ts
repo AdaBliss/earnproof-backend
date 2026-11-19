@@ -24,6 +24,18 @@ const RECONCILER_JOB_VERSION = "1";
 const RECONCILE_BATCH_SIZE = 20;
 
 /**
+ * Duration to hold the anchoring reconciliation lease (24 hours).
+ * Sufficient for 5-min interval reconciliation jobs; gives ample time.
+ */
+const ANCHORING_RECONCILIATION_LEASE_DURATION_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Unique identifier for the anchoring reconciliation job lease.
+ * Used across all instances to coordinate single execution.
+ */
+const ANCHORING_RECONCILIATION_JOB_NAME = "anchoring_reconciliation";
+
+/**
  * AnchoringReconcilerService
  *
  * Runs every 5 minutes. For proofs that have a confirmed on-chain transaction,
@@ -44,6 +56,9 @@ const RECONCILE_BATCH_SIZE = 20;
  *
  * Secret safety: only proof IDs appear in structured logs; no signing key or
  * CLI credentials are ever logged or stored.
+ *
+ * Distributed coordination: With multiple instances, only one executes
+ * reconciliation at a time via the distributed lease service.
  */
 @Injectable()
 export class AnchoringReconcilerService {

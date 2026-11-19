@@ -17,6 +17,7 @@ import {
   ApiOperation,
   ApiPayloadTooLargeResponse,
   ApiRequestTimeoutResponse,
+  ApiResponse,
   ApiTags,
   ApiTooManyRequestsResponse,
 } from "@nestjs/swagger";
@@ -29,6 +30,13 @@ import { ThrottleCost } from "../common/rate-limit/throttle-cost.decorator";
 import { CredentialVerificationKeyService } from "../common/crypto/credential-verification-key.service";
 import { Response } from "express";
 import { CredentialsService } from "./credentials.service";
+import { EvidenceBundleService } from "./evidence-bundle.service";
+import {
+  GenerateEvidenceBundleDto,
+  SignedEvidenceBundle,
+  VerifyEvidenceBundleDto,
+  VerifyEvidenceBundleResponseDto,
+} from "./dto/evidence-bundle.dto";
 import { VerifyCredentialResponseDto } from "./dto/verify-credential-response.dto";
 import { VerifyCredentialDto } from "./dto/verify-credential.dto";
 import { VerifyCredentialsBatchResponseDto } from "./dto/verify-credentials-batch-response.dto";
@@ -89,6 +97,8 @@ export class CredentialsController {
     private readonly credentialsService: CredentialsService,
     @Optional()
     private readonly credentialVerificationKeyService?: CredentialVerificationKeyService,
+    @Optional()
+    private readonly evidenceBundleService?: EvidenceBundleService,
   ) {}
 
   @Get("keys")
@@ -287,5 +297,50 @@ export class CredentialsController {
     @Body() body: VerifyCredentialsBatchDto,
   ): Promise<VerifyCredentialsBatchResponseDto> {
     return this.credentialsService.verifyCredentialsBatch(body.credentials);
+  }
+
+  @ApiOperation({
+    summary: "Generate a signed verification evidence bundle",
+    description:
+      "Generates a portable, tamper-evident manifest binding public proof outputs " +
+      "to verified contract state, Stellar evidence, and freshness without exposing private records.",
+  })
+  @ApiResponse({
+    status: HttpStatus.CREATED,
+    description: "Signed verification evidence bundle generated.",
+  })
+  @PublicRoute()
+  @Post("evidence-bundle/generate")
+  @HttpCode(HttpStatus.CREATED)
+  generateEvidenceBundle(
+    @Body() body: GenerateEvidenceBundleDto,
+  ): Promise<SignedEvidenceBundle> {
+    if (!this.evidenceBundleService) {
+      throw new Error("EvidenceBundleService is not configured");
+    }
+    return this.evidenceBundleService.generateBundle(body.proofId, body.network);
+  }
+
+  @ApiOperation({
+    summary: "Verify a signed verification evidence bundle",
+    description:
+      "Public verification for portable signed evidence bundles. Fails on tampering, " +
+      "unsupported versions, network mismatch, expired evidence, or retired key IDs.",
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Verification verdict and details.",
+    type: VerifyEvidenceBundleResponseDto,
+  })
+  @PublicRoute()
+  @Post("evidence-bundle/verify")
+  @HttpCode(HttpStatus.OK)
+  verifyEvidenceBundle(
+    @Body() body: VerifyEvidenceBundleDto,
+  ): Promise<VerifyEvidenceBundleResponseDto> {
+    if (!this.evidenceBundleService) {
+      throw new Error("EvidenceBundleService is not configured");
+    }
+    return this.evidenceBundleService.verifyBundle(body.bundle, body.expectedNetwork);
   }
 }

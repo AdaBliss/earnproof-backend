@@ -21,6 +21,7 @@ const VALID_TRANSITIONS: Record<ResourceStatus, ResourceStatus[]> = {
   [ResourceStatus.SUSPENDED]: [ResourceStatus.ACTIVE, ResourceStatus.REVOKED],
   [ResourceStatus.REVOKED]: [],
   [ResourceStatus.DELETED]: [],
+  [ResourceStatus.EXPIRED]: [],
 };
 
 @Injectable()

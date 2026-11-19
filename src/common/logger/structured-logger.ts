@@ -86,7 +86,7 @@ export class StructuredLogger {
    * - module: the logger's context (class name)
    */
   private enrichContext(additionalContext?: LogContext): Record<string, unknown> {
-    const ctx = { ...additionalContext };
+    const ctx: Record<string, unknown> = { ...additionalContext };
 
     const requestCtx = getRequestContext();
     if (requestCtx) {

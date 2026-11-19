@@ -507,11 +507,11 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
       const chainRejected =
         !poisonInput && (explicitlyPermanent || isPermanentError(message));
       const attemptsExhausted = newAttemptCount >= MAX_ATTEMPTS;
-      const permanent = poisonInput || chainRejected || attemptsExhausted;
       const permanent =
-        (err instanceof Error && (err as Error & { permanent?: boolean }).permanent) ||
-        isPermanentContractError(message) ||
-        newAttemptCount >= MAX_ATTEMPTS;
+        poisonInput ||
+        chainRejected ||
+        attemptsExhausted ||
+        isPermanentContractError(message);
 
       const safeError = redactError(err);
 

@@ -303,7 +303,8 @@ describe("PaymentsService", () => {
       {} as never,
     );
 
-    const [listed] = await service.listPayments("user_1", {});
+    const { data } = await service.listPayments("user_1", {});
+    const [listed] = data;
     const detail = await service.getPayment("user_1", "payment_1");
 
     const expected = { type: "text", value: "Salary June", truncated: false };

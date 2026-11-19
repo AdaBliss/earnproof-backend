@@ -24,31 +24,32 @@ describe("ProofsService lifecycle", () => {
       "contractAnchoring.enabled": false,
       "contractAnchoring.required": false,
     };
-    const service = new ProofsService(store.prisma as never, {
-      getOrThrow: jest.fn((key: string) => configValues[key]),
-      get: jest.fn((key: string) => configValues[key]),
-    } as never, mockVerificationEventService);
     const mockAttestationsService = {
       getValidAttestationsForSubject: jest.fn().mockResolvedValue([]),
     } as unknown as AttestationsService;
-    const service = new ProofsService(store.prisma as never, {
-      getOrThrow: jest.fn((key: string) => {
-        const values: Record<string, string> = {
-          credentialSigningSecret: "lifecycle-signing-secret",
-          paymentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
-          "stellar.network": "testnet",
-        };
-        return values[key];
-      }),
-      get: jest.fn((key: string) => {
-        const values: Record<string, boolean | undefined> = {
-          "contractAnchoring.enabled": false,
-          "contractAnchoring.required": false,
-        };
-        return values[key];
-      }),
-    } as never, mockVerificationEventService, unlimitedQuotas() as never);
-    } as never, mockVerificationEventService, mockAttestationsService);
+    const service = new ProofsService(
+      store.prisma as never,
+      {
+        getOrThrow: jest.fn((key: string) => {
+          const values: Record<string, string> = {
+            credentialSigningSecret: "lifecycle-signing-secret",
+            paymentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+            "stellar.network": "testnet",
+          };
+          return values[key];
+        }),
+        get: jest.fn((key: string) => {
+          const values: Record<string, boolean | undefined> = {
+            "contractAnchoring.enabled": false,
+            "contractAnchoring.required": false,
+          };
+          return values[key];
+        }),
+      } as never,
+      mockVerificationEventService as never,
+      unlimitedQuotas() as never,
+      mockAttestationsService,
+    );
     const user = {
       id: "user_lifecycle",
       walletAddress: "GB_TEST",
@@ -319,25 +320,26 @@ describe("ProofsService lifecycle – recurring-income", () => {
       paymentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
       "stellar.network": "testnet",
     };
-    const service = new ProofsService(store.prisma as never, {
-      getOrThrow: jest.fn((key: string) => riConfigValues[key]),
-      get: jest.fn((key: string) => (key in riConfigValues ? riConfigValues[key] : false)),
-    } as never, mockVerificationEventService);
     const mockAttestationsService = {
       getValidAttestationsForSubject: jest.fn().mockResolvedValue([]),
     } as unknown as AttestationsService;
-    const service = new ProofsService(store.prisma as never, {
-      getOrThrow: jest.fn((key: string) => {
-        const values: Record<string, string> = {
-          credentialSigningSecret: "lifecycle-signing-secret",
-          paymentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
-          "stellar.network": "testnet",
-        };
-        return values[key];
-      }),
-      get: jest.fn(() => false),
-    } as never, mockVerificationEventService, unlimitedQuotas() as never);
-    } as never, mockVerificationEventService, mockAttestationsService);
+    const service = new ProofsService(
+      store.prisma as never,
+      {
+        getOrThrow: jest.fn((key: string) => {
+          const values: Record<string, string> = {
+            credentialSigningSecret: "lifecycle-signing-secret",
+            paymentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+            "stellar.network": "testnet",
+          };
+          return values[key];
+        }),
+        get: jest.fn(() => false),
+      } as never,
+      mockVerificationEventService as never,
+      unlimitedQuotas() as never,
+      mockAttestationsService,
+    );
     const user = {
       id: "user_ri_lifecycle",
       walletAddress: "GB_TEST",

@@ -50,6 +50,15 @@ const FROZEN_V1_FIELDS: Record<WebhookEventType, string[]> = {
   ],
   "proof.revoked": ["proofId", "status", "revokedAt"],
   "proof.verified": ["proofId", "result", "verifiedAt"],
+  "attestation.expired": [
+    "attestationId",
+    "issuerId",
+    "subjectWalletHash",
+    "previousStatus",
+    "effectiveStatus",
+    "expiresAt",
+    "reconciledAt",
+  ],
 };
 
 const FROZEN_ENVELOPE_FIELDS = [

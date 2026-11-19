@@ -67,7 +67,9 @@ export function configureApp(
 
   // ── Request context middleware (must run after structural limits but before
   //    other middleware, to establish AsyncLocalStorage for request/user IDs).
-  app.use(new RequestContextMiddleware());
+  app.use((req: any, res: any, next: any) =>
+    new RequestContextMiddleware().use(req, res, next),
+  );
 
   app.use(helmet());
 

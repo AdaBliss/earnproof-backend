@@ -3,13 +3,26 @@ import { Cron, CronExpression } from "@nestjs/schedule";
 import { JobExecutionService } from "../execution/job-execution.service";
 import { workerIdentity } from "../execution/worker-identity";
 import { RetentionCleanupService } from "./retention-cleanup.service";
+import { DistributedLeaseService } from "../distributed-lease.service";
 
 /** Job identity recorded in the execution history for this cleanup job. */
 const RETENTION_JOB_NAME = "retention-cleanup";
 const RETENTION_JOB_VERSION = "1";
 
 /**
- * Schedules the retention sweep.
+ * Duration to hold the retention cleanup job lease (24 hours).
+ * Sufficient for daily cleanup jobs; gives ample time for slow runs.
+ */
+const RETENTION_CLEANUP_LEASE_DURATION_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Unique identifier for the retention cleanup job lease.
+ * Used across all instances to coordinate single execution.
+ */
+const RETENTION_CLEANUP_JOB_NAME = "retention_cleanup";
+
+/**
+ * Schedules the retention sweep with distributed lease coordination.
  *
  * Kept separate from {@link RetentionCleanupService} so the sweep can be
  * exercised — and invoked manually by an operator — without a scheduler
@@ -18,6 +31,9 @@ const RETENTION_JOB_VERSION = "1";
  *
  * Defaults to a daily run outside peak hours. Retention is measured in days, so
  * running more often buys nothing and only adds database contention.
+ *
+ * With distributed leases, only one instance executes the sweep at a time,
+ * preventing duplicate deletions and reducing database load in multi-instance deployments.
  */
 @Injectable()
 export class RetentionJob {
@@ -57,12 +73,6 @@ export class RetentionJob {
     const dryRun = process.env.RETENTION_DRY_RUN === "true";
 
     const result = await this.cleanup.run({ dryRun });
-
-    if (result.skipped) {
-      // Not an error. A previous run outlasted its interval, which the
-      // in-process guard handles; the next tick picks the work up.
-      return;
-    }
 
     // Counts only, per class. Never the identity of what was removed. The
     // policy version and cutoff are recorded for every run so a real run can

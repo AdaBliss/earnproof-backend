@@ -17,8 +17,8 @@
     "start": "node dist/main.js",
     "start:nest": "nest start",
     "start:dev": "nest start --watch",
+    "security:malware-scan": "node scripts/security/scan-malware.mjs",
     "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\" \"scripts/**/*.ts\"",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
     "typecheck": "tsc --noEmit",
     "test": "jest",
     "test:watch": "jest --watch",
@@ -62,8 +62,10 @@
     "class-validator": "^0.14.3",
     "helmet": "^8.1.0",
     "prisma": "^6.19.3",
+    "range_check": "^4.1.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
+    "undici": "^7.30.1",
     "zod": "^4.2.1"
   },
   "devDependencies": {
@@ -72,6 +74,7 @@
     "@nestjs/testing": "^11.1.9",
     "@types/jest": "^30.0.0",
     "@types/node": "^24.10.2",
+    "@types/range_check": "^1.4.2",
     "@types/supertest": "^7.2.1",
     "@typescript-eslint/eslint-plugin": "^8.50.0",
     "@typescript-eslint/parser": "^8.50.0",

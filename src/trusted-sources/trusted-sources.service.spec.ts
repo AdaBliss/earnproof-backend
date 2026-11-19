@@ -244,20 +244,37 @@ describe("TrustedSourcesService", () => {
         },
       };
 
-      const service = new TrustedSourcesService(prisma as never, { reevaluateSource: jest.fn().mockResolvedValue(0) } as never);
-      const result = await service.listTrustedSources(user, {});
+      const service = new TrustedSourcesService(
+        prisma as never,
+        { reevaluateSource: jest.fn().mockResolvedValue(0) } as never,
+      );
+      const { data } = await service.listTrustedSources(user, {});
 
-      expect(result).toHaveLength(1);
-      expect(result[0].sourceAddress).toBe(validStellarAddress);
-      expect(result[0].displayName).toBe("Employer 1");
+      expect(data).toHaveLength(1);
+      expect(data[0].sourceAddress).toBe(validStellarAddress);
+      expect(data[0].displayName).toBe("Employer 1");
       expect(prisma.trustedSource.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: {
             userId: user.id,
             status: ResourceStatus.ACTIVE,
           },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         }),
       );
+    });
+
+    it("rejects a malformed cursor without querying the database", async () => {
+      const prisma = { trustedSource: { findMany: jest.fn() } };
+      const service = new TrustedSourcesService(
+        prisma as never,
+        { reevaluateSource: jest.fn().mockResolvedValue(0) } as never,
+      );
+
+      await expect(
+        service.listTrustedSources(user, { cursor: "garbage" }),
+      ).rejects.toThrow(BadRequestException);
+      expect(prisma.trustedSource.findMany).not.toHaveBeenCalled();
     });
 
     it("filters by source address", async () => {

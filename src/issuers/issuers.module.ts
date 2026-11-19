@@ -9,19 +9,35 @@ import { IssuersService } from "./issuers.service";
 import { IssuersController } from "./issuers.controller";
 import { IssuerRegistryService } from "./issuer-registry.service";
 import { IssuerReconciliationService } from "./issuer-reconciliation.service";
+import { IssuerPolicyCommitmentsService } from "./issuer-policy-commitments.service";
+
+import { IssuerSigningKeysController } from "./issuer-signing-keys.controller";
+import { IssuerSigningKeysService } from "./issuer-signing-keys.service";
 
 @Module({
   imports: [DatabaseModule, AuthModule],
-  controllers: [IssuersController, IssuerAddressRotationController],
+  controllers: [
+    IssuersController,
+    IssuerAddressRotationController,
+    IssuerSigningKeysController,
+  ],
   providers: [
     IssuerRegistryService,
     IssuersService,
+    IssuerReconciliationService,
     IssuerAddressRotationService,
+    IssuerSigningKeysService,
+    IssuerPolicyCommitmentsService,
+    AttestationsService,
     { provide: Clock, useClass: SystemClock },
   ],
-  exports: [IssuersService, IssuerAddressRotationService],
-  controllers: [IssuersController],
-  providers: [IssuerRegistryService, IssuersService, IssuerReconciliationService],
-  exports: [IssuersService, IssuerReconciliationService],
+  exports: [
+    IssuersService,
+    IssuerReconciliationService,
+    IssuerAddressRotationService,
+    IssuerSigningKeysService,
+    IssuerPolicyCommitmentsService,
+    AttestationsService,
+  ],
 })
 export class IssuersModule {}

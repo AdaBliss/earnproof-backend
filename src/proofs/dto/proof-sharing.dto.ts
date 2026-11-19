@@ -21,6 +21,14 @@ export class CreateSharingTokenDto {
   @IsInt()
   @Min(1)
   maxUses?: number;
+
+  @ApiProperty({
+    description: "Purpose for creating this sharing token",
+    example: "Verification by third-party lender",
+    required: false,
+  })
+  @IsOptional()
+  purpose?: string;
 }
 
 export class SharingTokenResponseDto {

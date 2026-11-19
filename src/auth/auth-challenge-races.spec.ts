@@ -64,10 +64,6 @@ describe("Auth challenge replay and race-condition tests", () => {
         return values[key];
       },
     } as any;
-
-    // The collaborators are inert doubles: this suite is about the challenge
-    // consume race, and a session or an audit write must not decide its result.
-    authService = buildAuthService(mockPrisma, mockConfig);
   });
 
   // Helper function to generate SEP-53 message hash
@@ -143,7 +139,6 @@ describe("Auth challenge replay and race-condition tests", () => {
             .mockResolvedValue({ message, walletAddress: walletAddressA, usedAt: new Date() }),
           findUnique: jest
             .fn()
-            .mockResolvedValueOnce({ message, walletAddress: walletAddressA }),
             .mockResolvedValueOnce({ message, walletAddress: walletAddressA, networkPassphrase: "Test SDF Network ; September 2015", origin: "http://localhost:3000" })
             .mockResolvedValueOnce({ message, walletAddress: walletAddressA, networkPassphrase: "Test SDF Network ; September 2015", origin: "http://localhost:3000" }),
         },
@@ -161,8 +156,7 @@ describe("Auth challenge replay and race-condition tests", () => {
         },
       };
 
-      const authService = buildAuthService(mockPrisma);
-      authService = buildAuthService(mockPrisma, mockConfig);
+      const authService = buildAuthService(mockPrisma, mockConfig);
 
       // First verification succeeds
       const result1 = await authService.verifyChallenge({
@@ -227,7 +221,6 @@ describe("Auth challenge replay and race-condition tests", () => {
       };
 
       const authService = buildAuthService(mockPrisma);
-      authService = buildAuthService(mockPrisma, mockConfig);
 
       // Fire 5 concurrent verification requests for the same challenge
       const results = await Promise.allSettled([
@@ -611,7 +604,6 @@ describe("Auth challenge replay and race-condition tests", () => {
       };
 
       const authService = buildAuthService(mockPrisma);
-      authService = buildAuthService(mockPrisma, mockConfig);
 
       try {
         await authService.verifyChallenge({
@@ -646,7 +638,6 @@ describe("Auth challenge replay and race-condition tests", () => {
       };
 
       const authService = buildAuthService(mockPrisma);
-      authService = buildAuthService(mockPrisma, mockConfig);
 
       let expiredError: any;
       let invalidError: any;
@@ -710,7 +701,6 @@ describe("Auth challenge replay and race-condition tests", () => {
       };
 
       const authService = buildAuthService(mockPrisma);
-      authService = buildAuthService(mockPrisma, mockConfig);
 
       const result = await authService.verifyChallenge({
         challengeId,
@@ -752,7 +742,6 @@ describe("Auth challenge replay and race-condition tests", () => {
       };
 
       const authService = buildAuthService(mockPrisma);
-      authService = buildAuthService(mockPrisma, mockConfig);
 
       // Attempt with bad signature
       try {
@@ -799,7 +788,6 @@ describe("Auth challenge replay and race-condition tests", () => {
       };
 
       const authService = buildAuthService(mockPrisma);
-      authService = buildAuthService(mockPrisma, mockConfig);
 
       // First attempt with bad signature fails after consuming
       try {

@@ -47,6 +47,8 @@ hope.
 Three layers, and the direction of dependency matters:
 
 1. **Edge** — `auth`, `api-keys`. Establish who is calling.
+2. **Domain** — `organizations`, `issuers`, `payments`, `proofs`, `credentials`,
+   `trusted-sources`, `approvals`, `schemas`. Own product state.
 2. **Domain** — `users`, `organizations`, `issuers`, `payments`, `proofs`,
    `credentials`, `trusted-sources`. Own product state.
 3. **Infrastructure** — `common`, `config`, `database`, `stellar`, `audit`,
@@ -134,6 +136,43 @@ enforce it on every request. A status change, its session revocation and its
 audit record commit in one transaction; role is read live by the guard, so a
 role change needs no session revocation.
 
+`organizations/residency/` enforces per-organization, per-data-class region
+allow-lists: an explicit, versioned policy that writes, exports, backups, and
+queued work are checked against before a resource is placed in a region.
+
+### `approvals` — [`src/approvals/`](../src/approvals/)
+
+A queue for privileged, side-effecting operations that require a decision
+from someone other than the requester before they run.
+
+| | |
+|---|---|
+| **Public interface** | `POST /approvals`, `/approvals/:id/approve`, `/reject`, `/cancel` |
+| **Owned tables** | `ApprovalRequest` |
+| **Key files** | [`approvals.service.ts`](../src/approvals/approvals.service.ts) |
+| **Must not depend on** | `proofs`, `payments`, `webhooks` |
+
+Self-approval is rejected outright. The PENDING → APPROVED/REJECTED/CANCELLED
+transition and the execution lease are both single conditional `updateMany`
+calls, so exactly one decision and one execution ever win under concurrency —
+see [`approvals.service.ts`](../src/approvals/approvals.service.ts).
+
+### `schemas` — [`src/schemas/`](../src/schemas/)
+
+Bulk schema-metadata imports with a zero-mutation dry-run phase.
+
+| | |
+|---|---|
+| **Public interface** | `POST /organizations/:id/schema-imports`, `/:id/approve`, `/:id/apply` |
+| **Owned tables** | `SchemaImportJob`, `SchemaImportRow`, `SchemaDefinition` |
+| **Key files** | [`schema-imports.service.ts`](../src/schemas/schema-imports.service.ts) |
+| **Must not depend on** | `proofs`, `payments`, `webhooks` |
+
+Upload and dry-run only ever write to the staging tables
+(`SchemaImportJob`/`SchemaImportRow`); `SchemaDefinition` is touched only by
+`apply`, and only when the caller's `reviewedHash` matches the dry run's
+`canonicalHash` exactly.
+
 ### `issuers` — [`src/issuers/`](../src/issuers/)
 
 Trusted attestation sources and their on-chain registry mirror.
@@ -206,6 +245,12 @@ Signed outbound event delivery.
 
 The only module that makes outbound HTTP to customer-controlled URLs, which is
 why the SSRF guard lives here.
+
+`webhook-client-certificate.service.ts` manages optional mutual TLS for
+delivery: at most one certificate is ever ACTIVE per webhook, a rotation
+demotes the outgoing one to ROTATING rather than deleting it, and
+`webhook-delivery.service.ts` refuses to fall back to a plain connection when
+mTLS is required but no valid certificate is selected.
 
 ### `jobs` — [`src/jobs/`](../src/jobs/)
 

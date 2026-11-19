@@ -472,7 +472,24 @@ export const AUDIT_EVENTS: readonly AuditEventDefinition[] = [
     writeFailure: "fail_closed",
     requiredMetadata: ["prefix", "organizationId"],
     description:
-      "A machine credential's secret was replaced; the old secret stopped working immediately.",
+      "A machine credential was rotated with an overlap window or immediate cutover.",
+  },
+  {
+    type: "api_key.cutover",
+    domain: "api_key",
+    store: "audit_log",
+    match: {
+      store: "audit_log",
+      action: "api_key.cutover",
+      resourceType: "api_key",
+    },
+    actorTypes: ["user", "system"],
+    outcomes: ["success"],
+    tenant: "metadata_organization_id",
+    writeFailure: "fail_closed",
+    requiredMetadata: ["prefix", "organizationId", "familyId", "receiptId"],
+    description:
+      "An API key rotation overlap window was cut over; the old key was retired.",
   },
   {
     type: "api_key.revoked",
@@ -483,7 +500,7 @@ export const AUDIT_EVENTS: readonly AuditEventDefinition[] = [
       action: "api_key.revoked",
       resourceType: "api_key",
     },
-    actorTypes: ["user"],
+    actorTypes: ["user", "system"],
     outcomes: ["success"],
     tenant: "metadata_organization_id",
     writeFailure: "fail_closed",
@@ -687,7 +704,6 @@ export const AUDIT_EVENTS: readonly AuditEventDefinition[] = [
   },
   {
     type: "operator.user_status_changed",
-    type: "operator.payment_backfill_requested",
     domain: "operator",
     store: "audit_log",
     match: {
@@ -705,6 +721,26 @@ export const AUDIT_EVENTS: readonly AuditEventDefinition[] = [
   },
   {
     type: "operator.user_role_changed",
+    domain: "operator",
+    store: "audit_log",
+    match: {
+      store: "audit_log",
+      action: "user.role_changed",
+      resourceType: "user",
+    },
+    actorTypes: ["user"],
+    outcomes: ["success"],
+    tenant: "resource_id",
+    writeFailure: "fail_closed",
+    requiredMetadata: ["previousRole", "newRole"],
+    description: "An administrator changed an account's global role.",
+  },
+  {
+    type: "operator.payment_backfill_requested",
+    domain: "operator",
+    store: "audit_log",
+    match: {
+      store: "audit_log",
       action: "payment_backfill.requested",
       resourceType: "payment_backfill",
     },
@@ -722,15 +758,6 @@ export const AUDIT_EVENTS: readonly AuditEventDefinition[] = [
     store: "audit_log",
     match: {
       store: "audit_log",
-      action: "user.role_changed",
-      resourceType: "user",
-    },
-    actorTypes: ["user"],
-    outcomes: ["success"],
-    tenant: "resource_id",
-    writeFailure: "fail_closed",
-    requiredMetadata: ["previousRole", "newRole"],
-    description: "An administrator changed an account's global role.",
       action: "payment_backfill.cancelled",
       resourceType: "payment_backfill",
     },
@@ -821,4 +848,41 @@ export function verificationOutcomeToAuditOutcome(
   outcome: VerificationOutcome,
 ): AuditOutcome {
   return outcome === VerificationOutcome.VALID ? "success" : "denied";
+}
+
+// ---------------------------------------------------------------------------
+// Audit Correlation Graph Types (#283)
+// ---------------------------------------------------------------------------
+
+export type AuditMissingLinkReason =
+  | "RETENTION_EXPIRED"
+  | "CROSS_TENANT_BLOCKED"
+  | "NOT_FOUND"
+  | "DEPTH_LIMIT_REACHED";
+
+export interface AuditCorrelationGraphNode {
+  id: string;
+  action: string;
+  domain?: string;
+  actorType: string;
+  actorId: string | null;
+  resourceType: string;
+  resourceId: string | null;
+  correlationId: string | null;
+  parentId: string | null;
+  depth: number;
+  createdAt: string;
+  metadata: Record<string, unknown> | null;
+}
+
+export interface AuditCorrelationEdge {
+  fromNodeId: string;
+  toNodeId: string;
+  relationship: "PARENT" | "CHILD" | "CORRELATION";
+}
+
+export interface AuditMissingLink {
+  sourceNodeId: string;
+  targetId: string;
+  reason: AuditMissingLinkReason;
 }

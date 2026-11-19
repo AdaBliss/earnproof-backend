@@ -1,4 +1,4 @@
-﻿import { Module } from "@nestjs/common";
+import { Module } from "@nestjs/common";
 import { AuthController } from "./auth.controller";
 import { AuthService } from "./auth.service";
 import { AuthTokenService } from "./auth-token.service";
@@ -13,6 +13,7 @@ import { WalletRotationService } from "./wallet-rotation.service";
 import { RecentAuthService } from "./recent-auth.service";
 import { RecentAuthGuard } from "../common/guards/recent-auth.guard";
 import { VersionedHashService } from "../common/crypto/versioned-hash.service";
+import { SessionRiskService } from "./session-risk.service";
 
 @Module({
   controllers: [AuthController, WalletRotationController],
@@ -29,6 +30,7 @@ import { VersionedHashService } from "../common/crypto/versioned-hash.service";
     RecentAuthService,
     RecentAuthGuard,
     VersionedHashService,
+    SessionRiskService,
   ],
   exports: [
     SessionService,
@@ -38,6 +40,7 @@ import { VersionedHashService } from "../common/crypto/versioned-hash.service";
     RecentAuthService,
     RecentAuthGuard,
     VersionedHashService,
+    SessionRiskService,
   ],
 })
 export class AuthModule {}

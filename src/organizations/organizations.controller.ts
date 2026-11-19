@@ -1,4 +1,4 @@
-﻿﻿import {
+﻿import {
   Body,
   Controller,
   Delete,
@@ -358,6 +358,8 @@ async getReadiness(
     @Param("memberId") memberId: string,
   ) {
     return this.membersService.removeMember(user, organizationId, memberId);
+  }
+
   @Delete(":id")
   @HttpCode(HttpStatus.NO_CONTENT)
   @UseGuards(AuthGuard, RoleGuard, RecentAuthGuard)

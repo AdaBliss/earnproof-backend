@@ -53,13 +53,20 @@ export class CredentialSigningKeyringService {
   constructor(configService: ConfigService) {
     const safeGet = <T>(key: string): T | undefined => {
       if (typeof configService.get === "function") {
-        return configService.get<T>(key);
+        const val = configService.get<T>(key);
+        if (val !== undefined && val !== null && typeof val !== "boolean") {
+          return val;
+        }
       }
       try {
-        return configService.getOrThrow<T>(key);
+        const val = configService.getOrThrow<T>(key);
+        if (val !== undefined && val !== null && typeof val !== "boolean") {
+          return val;
+        }
       } catch {
         return undefined;
       }
+      return undefined;
     };
 
     const keys = new Map<number, string>();

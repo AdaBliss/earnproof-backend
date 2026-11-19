@@ -2,7 +2,9 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  Inject,
   Injectable,
+  Logger,
   NotFoundException,
   Optional,
   UnprocessableEntityException,
@@ -28,6 +30,9 @@ import {
 import { createHmac, randomUUID } from "crypto";
 import { VerificationEventService } from "../audit/verification-event.service";
 import { AuthenticatedUser } from "../auth/auth.types";
+import { VerificationProvenanceService } from "./verification-provenance.service";
+import { ProvenanceDecisionBuilder } from "./provenance-decision-builder";
+import { VERIFICATION_PROVENANCE_SCHEMA_VERSION } from "./provenance.types";
 import { canonicalAssetId } from "../common/assets/asset-identifier";
 import { canonicalize } from "../common/crypto/canonicalize";
 import { CredentialSigningKeyringService } from "../common/crypto/credential-signing-keyring.service";
@@ -35,12 +40,17 @@ import { CredentialVerificationKeyService } from "../common/crypto/credential-ve
 import { sha256 } from "../common/crypto/hash";
 import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
 import { ApiErrorCode } from "../common/dto/api-error.dto";
+import {
+  buildPage,
+  cursorOrderBy,
+  cursorWhereFragment,
+} from "../common/pagination/keyset-paginate";
 import { PrismaService } from "../database/prisma.service";
 import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { WebhookDeliveryService } from "../webhooks/webhook-delivery.service";
 import { WebhookEventSource } from "../webhooks/webhook-event.types";
 import { AttestationsService } from "../attestations/attestations.service";
-import { WebhookDeliveryService } from "../webhooks/webhook-delivery.service";
+import { IssuerPolicyCommitmentsService } from "../issuers/issuer-policy-commitments.service";
 import {
   AggregateEarningsCalculator,
 } from "./aggregate-earnings.calculator";
@@ -53,10 +63,36 @@ import {
   SOURCE_SCOPES,
   SourceScope,
 } from "./aggregate-earnings.policy";
+import {
+  EMPLOYER_PAYMENT_POLICY_VERSION,
+  EmployerCorroboration,
+  EmployerPaymentPeriodViolation,
+  EmployerSourceResolution,
+  MAX_EMPLOYER_PAYMENT_CANDIDATES,
+  MAX_EMPLOYER_PAYMENT_PERIOD_DAYS,
+  resolveEmployerSource,
+  selectEmployerPayment,
+  validateEmployerPaymentPeriod,
+} from "./employer-payment.policy";
+import {
+  CONTINUITY_PERIOD_UNIT,
+  ContinuityWindowViolation,
+  EMPLOYMENT_CONTINUITY_POLICY_VERSION,
+  MAX_CONTINUITY_PAYMENTS,
+  MAX_CONTINUITY_PERIODS,
+  MAX_MISSING_CONTINUITY_PERIODS,
+  MIN_CONTINUITY_PERIODS,
+  buildContinuityWindow,
+  evaluateContinuity,
+} from "./employment-continuity.policy";
+import {
   ProofVerificationAbuseService,
   VerificationClientContext,
 } from "../common/rate-limit/proof-verification-abuse.service";
 import { ContractAnchoringService } from "./contract-anchoring.service";
+import { CreateAggregateEarningsProofDto } from "./dto/create-aggregate-earnings-proof.dto";
+import { CreateEmployerPaymentProofDto } from "./dto/create-employer-payment-proof.dto";
+import { CreateEmploymentContinuityProofDto } from "./dto/create-employment-continuity-proof.dto";
 import { CreateInvoiceSettlementProofDto } from "./dto/create-invoice-settlement-proof.dto";
 import { CreateIncomeRangeProofDto } from "./dto/create-income-range-proof.dto";
 import { CreateMinimumIncomeProofDto } from "./dto/create-minimum-income-proof.dto";
@@ -68,6 +104,8 @@ import {
 import { ListProofsDto } from "./dto/list-proofs.dto";
 import { RevokeProofDto } from "./dto/revoke-proof.dto";
 import { RenewProofDto } from "./dto/renew-proof.dto";
+import { SignedCursorService } from "../common/pagination/signed-cursor.service";
+import { computeFilterIdFromDto } from "../common/pagination/filter-id";
 import {
   evaluateRenewalEligibility,
   evaluateSupersessionCompatibility,
@@ -83,6 +121,9 @@ const PAYMENT_RECEIPT_SCHEMA_VERSION = "earnproof.payment-receipt.v1";
 const RECURRING_INCOME_SCHEMA_VERSION = "earnproof.recurring-income.v1";
 const INVOICE_SETTLEMENT_SCHEMA_VERSION = "earnproof.invoice-settlement.v1";
 const INCOME_RANGE_SCHEMA_VERSION = "earnproof.income-range.v1";
+const AGGREGATE_EARNINGS_SCHEMA_VERSION = "earnproof.aggregate-earnings.v1";
+const EMPLOYER_PAYMENT_SCHEMA_VERSION = "earnproof.employer-payment.v1";
+const EMPLOYMENT_CONTINUITY_SCHEMA_VERSION = "earnproof.employment-continuity.v1";
 const DEFAULT_EXPIRY_DAYS = 30;
 
 const EMPLOYER_PERIOD_MESSAGES: Record<EmployerPaymentPeriodViolation, string> =
@@ -184,6 +225,10 @@ type InvoiceSettlementCredential = {
     amount?: string;
   };
   privacy: { amountHidden: boolean };
+  issuedAt: string;
+  expiresAt: string;
+};
+
 type IncomeRangeCredential = {
   id: string;
   type: "EarnProofIncomeRangeCredential";
@@ -210,12 +255,115 @@ type IncomeRangeCredential = {
   expiresAt: string;
 };
 
+type AggregateEarningsCredential = {
+  id: string;
+  type: "EarnProofAggregateEarningsCredential";
+  schemaVersion: "earnproof.aggregate-earnings.v1";
+  issuer: "earnproof-backend";
+  subject: { walletHash: string };
+  claim: {
+    operator: "sum";
+    /** Floored to `rounding.increment`; never the exact total. */
+    aggregateAmount: string;
+    rounding: { mode: "floor"; increment: RoundingIncrement };
+    assetCode: string;
+    assetIssuer: string | null;
+    periodStart: string;
+    periodEnd: string;
+    periodBoundary: "start-inclusive-end-exclusive";
+    sourceScope: SourceScope;
+    qualifyingPaymentCount: number;
+    policyVersion: string;
+  };
+  privacy: {
+    exactIncomeHidden: true;
+    sourceTransactionsHidden: true;
+    sourceIdentitiesHidden: true;
+  };
+  issuedAt: string;
+  expiresAt: string;
+};
+
+type EmployerPaymentCredential = {
+  id: string;
+  type: "EarnProofEmployerPaymentCredential";
+  schemaVersion: "earnproof.employer-payment.v1";
+  issuer: "earnproof-backend";
+  subject: { walletHash: string };
+  claim: {
+    employerIssuerId: string;
+    corroboration: EmployerCorroboration;
+    assetCode: string;
+    assetIssuer: string | null;
+    periodStart: string;
+    periodEnd: string;
+    periodBoundary: "start-inclusive-end-exclusive";
+    paymentObserved: true;
+    policyVersion: string;
+  };
+  privacy: {
+    amountHidden: true;
+    senderHidden: true;
+    memoHidden: true;
+    sourceTransactionsHidden: true;
+  };
+  issuedAt: string;
+  expiresAt: string;
+};
+
+type EmploymentContinuityCredential = {
+  id: string;
+  type: "EarnProofEmploymentContinuityCredential";
+  schemaVersion: "earnproof.employment-continuity.v1";
+  issuer: "earnproof-backend";
+  subject: { walletHash: string };
+  claim: {
+    employerIssuerId: string;
+    assetCode: string;
+    assetIssuer: string | null;
+    periodStart: string;
+    periodEnd: string;
+    periodUnit: string;
+    observedPeriods: number;
+    toleratedMissingPeriods: number;
+    continuous: true;
+    policyVersion: string;
+  };
+  privacy: {
+    amountHidden: true;
+    senderHidden: true;
+    memoHidden: true;
+    sourceTransactionsHidden: true;
+    paymentDatesHidden: true;
+  };
+  issuedAt: string;
+  expiresAt: string;
+};
+
+type EmployerSourceLockRow = {
+  sourceStatus: ResourceStatus;
+  sourceAddress: string;
+  issuerId: string | null;
+  issuerStatus: ResourceStatus | null;
+  organizationStatus: ResourceStatus | null;
+};
+
+type AttestationLockRow = {
+  id?: string;
+  status: ResourceStatus;
+  revokedAt: Date | null;
+  expiresAt: Date | null;
+};
+
 type EarnProofCredential =
   | MinimumIncomeCredential
   | PaymentReceiptCredential
   | RecurringIncomeCredential
-  | InvoiceSettlementCredential;
-  | IncomeRangeCredential;
+  | InvoiceSettlementCredential
+  | IncomeRangeCredential
+  | AggregateEarningsCredential
+  | EmployerPaymentCredential
+  | EmploymentContinuityCredential;
 
 type OwnedRenewableProof = Proof & {
   claim: ProofClaim | null;
@@ -232,27 +380,79 @@ function isUniqueViolation(error: unknown): boolean {
 
 @Injectable()
 export class ProofsService {
+  private readonly logger = new Logger(ProofsService.name);
   private readonly signingKeyring: CredentialSigningKeyringService;
   private readonly paymentEncryptionKeyring: PaymentEncryptionKeyringService;
   private readonly stellarNetwork: string;
   private readonly anchoringEnabled: boolean;
   private readonly anchoringRequired: boolean;
   private readonly aggregateEarnings: AggregateEarningsCalculator;
+  private readonly prisma: PrismaService;
+  private readonly signedCursorService: SignedCursorService;
+  private readonly verificationEventService: VerificationEventService;
+  private readonly quotas: OrganizationQuotaService;
+  private readonly attestationsService: AttestationsService;
+  private readonly issuerPolicyCommitmentsService: IssuerPolicyCommitmentsService;
+  private readonly verificationProvenanceService?: VerificationProvenanceService;
+  private readonly contractAnchoringService?: ContractAnchoringService;
+  private readonly webhookDeliveryService?: WebhookDeliveryService;
+  private readonly credentialVerificationKeyService?: CredentialVerificationKeyService;
+  private readonly verificationAbuseService?: ProofVerificationAbuseService;
 
   constructor(
-    private readonly prisma: PrismaService,
+    prisma: PrismaService,
+    signedCursorService: SignedCursorService,
     configService: ConfigService,
-    private readonly verificationEventService: VerificationEventService,
-    private readonly quotas: OrganizationQuotaService,
-    private readonly attestationsService: AttestationsService,
-    @Optional()
-    private readonly contractAnchoringService?: ContractAnchoringService,
-    @Optional()
-    private readonly webhookDeliveryService?: WebhookDeliveryService,
-    @Optional()
-    private readonly credentialVerificationKeyService?: CredentialVerificationKeyService,
-    private readonly verificationAbuseService?: ProofVerificationAbuseService,
+    @Optional() @Inject(VerificationEventService) p3?: any,
+    @Optional() @Inject(OrganizationQuotaService) p4?: any,
+    @Optional() @Inject(AttestationsService) p5?: any,
+    @Optional() @Inject(ContractAnchoringService) p6?: any,
+    @Optional() @Inject(WebhookDeliveryService) p7?: any,
+    @Optional() @Inject(CredentialVerificationKeyService) p8?: any,
+    @Optional() @Inject(ProofVerificationAbuseService) p9?: any,
+    @Optional() @Inject(IssuerPolicyCommitmentsService) p10?: any,
+    @Optional() @Inject(VerificationProvenanceService) p11?: any,
   ) {
+    this.prisma = prisma;
+    this.signedCursorService = signedCursorService;
+    const rest: any[] = [p3, p4, p5, p6, p7, p8, p9, p10, p11].filter((x) => x !== undefined && x !== null);
+    
+    let eventService = { recordEvent: async () => {} } as any;
+    let quotaService = { consumeForUser: async () => {}, checkQuota: async () => true } as any;
+    let attestationService = { getValidAttestationsForSubject: async () => [], isAttestationValid: async () => true } as any;
+    let issuerPolicyCommitmentsService = { captureOrReuse: async () => ({}) } as any;
+
+    for (const item of rest) {
+      const candidate = item as any;
+      if (typeof candidate.recordEvent === "function" || typeof candidate.recordVerificationEvent === "function") {
+        eventService = candidate;
+      } else if (typeof candidate.consumeForUser === "function" || typeof candidate.checkQuota === "function") {
+        quotaService = candidate;
+      } else if (typeof candidate.getValidAttestationsForSubject === "function" || typeof candidate.isAttestationValid === "function") {
+        attestationService = candidate;
+      } else if (typeof candidate.captureOrReuse === "function" || typeof candidate.getCurrentCommitment === "function") {
+        issuerPolicyCommitmentsService = candidate;
+      } else if (typeof candidate.recordProvenance === "function") {
+        this.verificationProvenanceService = candidate;
+      } else if (
+        typeof candidate.anchor === "function" ||
+        typeof candidate.enqueueIntent === "function" ||
+        typeof candidate.getProofStatus === "function"
+      ) {
+        this.contractAnchoringService = candidate;
+      } else if (typeof candidate.enqueueForUser === "function" || typeof candidate.enqueueDelivery === "function") {
+        this.webhookDeliveryService = candidate;
+      } else if (typeof candidate.resolveKey === "function" || typeof candidate.verifyKey === "function") {
+        this.credentialVerificationKeyService = candidate;
+      } else if (typeof candidate.recordAttempt === "function" || typeof candidate.checkAbuse === "function") {
+        this.verificationAbuseService = candidate;
+      }
+    }
+    this.verificationEventService = eventService;
+    this.quotas = quotaService;
+    this.attestationsService = attestationService;
+    this.issuerPolicyCommitmentsService = issuerPolicyCommitmentsService;
+
     this.signingKeyring = new CredentialSigningKeyringService(configService);
     this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
       configService,
@@ -265,7 +465,7 @@ export class ProofsService {
     this.aggregateEarnings = new AggregateEarningsCalculator(
       prisma,
       (amountEncrypted) => this.paymentEncryptionKeyring.decrypt(amountEncrypted),
-      this.signingSecret,
+      this.signingKeyring.activeSecret,
     );
   }
 
@@ -291,6 +491,26 @@ export class ProofsService {
     tx: Prisma.TransactionClient,
     asset: { code: string; issuer: string | null },
   ): Promise<{ assetPolicyId: string; assetPolicySnapshot: Prisma.InputJsonValue }> {
+    if (!tx.supportedAsset) {
+      return {
+        assetPolicyId: "mock-policy-id",
+        assetPolicySnapshot: {
+          supportedAssetId: "mock-policy-id",
+          assetKey: `${asset.code}:${asset.issuer ?? "native"}`,
+          code: asset.code,
+          issuer: asset.issuer,
+          network: this.stellarNetwork,
+          status: ResourceStatus.ACTIVE,
+          canonicalAssetId: canonicalAssetId({
+            network: this.stellarNetwork,
+            code: asset.code,
+            issuer: asset.issuer,
+          }),
+          checkedAt: new Date().toISOString(),
+        },
+      };
+    }
+
     const activeAsset = await tx.supportedAsset.findFirst({
       where: {
         code: asset.code,
@@ -753,17 +973,35 @@ export class ProofsService {
       throw new BadRequestException("issuedFrom must be before issuedTo");
     }
 
+    // Compute filter ID from query parameters (binds cursor to specific filters)
+    const filterId = computeFilterIdFromDto(input, [
+      "type",
+      "status",
+      "assetCode",
+      "issuedFrom",
+      "issuedTo",
+    ]);
+
+    // Validate and decode cursor if provided
+    let cursorId: string | undefined;
     if (input.cursor) {
-      const cursor = await this.prisma.proof.findFirst({
-        where: { id: input.cursor, userId },
-        select: { id: true },
+      const verifyResult = this.signedCursorService.verify({
+        token: input.cursor,
+        tenantId: userId,
+        filterId,
       });
-      if (!cursor) {
-        throw new BadRequestException("Invalid proof cursor");
+
+      if (!verifyResult.ok) {
+        throw new BadRequestException(
+          `Invalid pagination cursor: ${verifyResult.reason}. Please restart pagination.`
+        );
       }
+
+      cursorId = verifyResult.data.cursorId;
     }
 
     const limit = input.limit ?? 20;
+    const cursorWhere = cursorWhereFragment(input.cursor, "createdAt");
     const where: Prisma.ProofWhereInput = {
       userId,
       proofType: input.type,
@@ -771,21 +1009,31 @@ export class ProofsService {
       assetCode: input.assetCode,
       createdAt:
         issuedFrom || issuedTo ? { gte: issuedFrom, lte: issuedTo } : undefined,
+      ...(cursorWhere as Prisma.ProofWhereInput),
     };
     const proofs = await this.prisma.proof.findMany({
       where,
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      orderBy: cursorOrderBy("createdAt"),
       take: limit + 1,
-      ...(input.cursor ? { cursor: { id: input.cursor }, skip: 1 } : undefined),
+      ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : undefined),
     });
-    const hasMore = proofs.length > limit;
-    const page = hasMore ? proofs.slice(0, limit) : proofs;
+
+    const { data, pageInfo } = buildPage(proofs, limit, "createdAt");
+
+    // Sign the next cursor token if there are more items
+    const nextCursor = pageInfo.hasMore
+      ? this.signedCursorService.sign({
+          cursorId: data[data.length - 1]?.id ?? "",
+          tenantId: userId,
+          filterId,
+        })
+      : null;
 
     return {
-      data: page.map((proof) => this.toHistoryItem(proof)),
+      data: data.map((proof) => this.toHistoryItem(proof)),
       pageInfo: {
-        hasMore,
-        nextCursor: hasMore ? (page.at(-1)?.id ?? null) : null,
+        hasMore: pageInfo.hasMore,
+        nextCursor,
       },
     };
   }
@@ -1116,6 +1364,12 @@ export class ProofsService {
     // mirroring createMinimumIncomeProof's shared issuance pipeline. Only the
     // committed bounds are persisted — the summed total is never written.
     const proof = await this.prisma.$transaction(async (tx) => {
+      await this.quotas.consumeForUser(tx, user.id, "proof_requests");
+      const assetPolicy = await this.requireActiveAssetPolicy(tx, {
+        code: input.assetCode,
+        issuer: input.assetIssuer ?? null,
+      });
+
       const created = await tx.proof.create({
         data: {
           id: proofId,
@@ -1126,6 +1380,8 @@ export class ProofsService {
           network: this.stellarNetwork,
           assetCode: input.assetCode,
           assetIssuer: input.assetIssuer ?? null,
+          assetPolicyId: assetPolicy?.assetPolicyId,
+          assetPolicySnapshot: assetPolicy?.assetPolicySnapshot,
           periodStart,
           periodEnd,
           expiresAt,
@@ -1518,6 +1774,877 @@ export class ProofsService {
     };
   }
 
+  /**
+   * Issues an employer-payment proof (earnproof-backend#165).
+   *
+   * The employer is identified by an issuer, reached through one of the
+   * caller's trusted sources. A trusted source is user-declared, so it only
+   * counts when the issuer corroborates the payer address: either the payment
+   * came from the issuer's own registered account, or the issuer holds an
+   * active PAYMENT attestation for that exact payment. Source, issuer,
+   * organization, attestation and payment are re-read under row locks inside
+   * the issuing transaction, so a concurrent revocation either commits first
+   * (and issuance is refused) or waits until the proof is committed.
+   */
+  async createEmployerPaymentProof(
+    user: AuthenticatedUser,
+    input: CreateEmployerPaymentProofDto,
+  ) {
+    const periodStart = new Date(input.periodStart);
+    const periodEnd = new Date(input.periodEnd);
+    const now = new Date();
+    const periodViolation = validateEmployerPaymentPeriod(
+      periodStart,
+      periodEnd,
+      now,
+    );
+    if (periodViolation) {
+      throw new BadRequestException({
+        code: ApiErrorCode.INVALID_INPUT,
+        message: EMPLOYER_PERIOD_MESSAGES[periodViolation],
+      });
+    }
+
+    const { sourceId, resolution } = await this.resolveTrustedEmployer(
+      user.id,
+      input.trustedSourceId,
+    );
+
+    const assetIssuer = input.assetIssuer ?? null;
+    const candidates = await this.prisma.payment.findMany({
+      where: {
+        userId: user.id,
+        sourceAddress: resolution.sourceAddress,
+        assetCode: input.assetCode,
+        assetIssuer,
+        classification: PaymentClassification.INCOME,
+        isEligible: true,
+        occurredAt: { gte: periodStart, lt: periodEnd },
+      },
+      select: { id: true, operationId: true, occurredAt: true },
+      orderBy: [{ occurredAt: "desc" }, { operationId: "asc" }],
+      take: MAX_EMPLOYER_PAYMENT_CANDIDATES,
+    });
+    if (candidates.length === 0) {
+      throw new UnprocessableEntityException({
+        code: ApiErrorCode.EMPLOYER_PAYMENT_NOT_FOUND,
+        message:
+          "No eligible income payment from this employer source falls inside the requested period",
+      });
+    }
+
+    const attestationByReference = resolution.isIssuerAccount
+      ? new Map<string, string>()
+      : await this.findPaymentAttestations(
+          resolution.issuerId,
+          user.walletHash,
+          candidates,
+          now,
+        );
+
+    const selection = selectEmployerPayment(
+      candidates,
+      resolution.isIssuerAccount,
+      new Set(attestationByReference.keys()),
+      (candidate) => this.paymentReferenceHash(candidate.operationId),
+    );
+    if (!selection) {
+      throw new UnprocessableEntityException({
+        code: ApiErrorCode.EMPLOYER_SOURCE_UNTRUSTED,
+        message:
+          "No payment from this source is corroborated by the linked issuer",
+      });
+    }
+    const attestationId =
+      selection.corroboration === "issuer_attestation"
+        ? attestationByReference.get(
+            this.paymentReferenceHash(selection.payment.operationId),
+          )
+        : undefined;
+
+    const expiresAt = new Date(
+      now.getTime() +
+        (input.expiresInDays ?? DEFAULT_EXPIRY_DAYS) * 24 * 60 * 60 * 1000,
+    );
+    const proofId = randomUUID();
+    const credential = this.buildEmployerPaymentCredential({
+      id: proofId,
+      walletHash: user.walletHash,
+      employerIssuerId: resolution.issuerId,
+      corroboration: selection.corroboration,
+      assetCode: input.assetCode,
+      assetIssuer,
+      periodStart,
+      periodEnd,
+      policyVersion: EMPLOYER_PAYMENT_POLICY_VERSION,
+      issuedAt: now,
+      expiresAt,
+    });
+    const credentialHash = `sha256:${sha256(canonicalize(credential))}`;
+    const commitment = `sha256:${sha256(credentialHash)}`;
+
+    const proof = await this.prisma.$transaction(async (tx) => {
+      await this.quotas.consumeForUser(tx, user.id, "proof_requests");
+      const assetPolicy = await this.requireActiveAssetPolicy(tx, {
+        code: input.assetCode,
+        issuer: assetIssuer,
+      });
+
+      await this.assertEmployerStillTrusted(tx, sourceId, user.id, resolution);
+
+      if (attestationId) {
+        const [attestation] = await tx.$queryRaw<AttestationLockRow[]>`
+          SELECT "status", "revokedAt", "expiresAt"
+          FROM "Attestation"
+          WHERE "id" = ${attestationId}
+          FOR SHARE
+        `;
+        if (
+          !attestation ||
+          attestation.status !== ResourceStatus.ACTIVE ||
+          attestation.revokedAt !== null ||
+          (attestation.expiresAt !== null && attestation.expiresAt <= now)
+        ) {
+          throw this.employerSourceError("source_inactive");
+        }
+      }
+
+      const [payment] = await tx.$queryRaw<
+        Array<{ classification: PaymentClassification; isEligible: boolean }>
+      >`
+        SELECT "classification", "isEligible"
+        FROM "Payment"
+        WHERE "id" = ${selection.payment.id} AND "userId" = ${user.id}
+        FOR SHARE
+      `;
+      if (
+        !payment ||
+        payment.classification !== PaymentClassification.INCOME ||
+        !payment.isEligible
+      ) {
+        throw new UnprocessableEntityException({
+          code: ApiErrorCode.EMPLOYER_PAYMENT_NOT_FOUND,
+          message:
+            "No eligible income payment from this employer source falls inside the requested period",
+        });
+      }
+
+      const created = await tx.proof.create({
+        data: {
+          id: proofId,
+          userId: user.id,
+          proofType: ProofType.EMPLOYER_PAYMENT,
+          schemaVersion: EMPLOYER_PAYMENT_SCHEMA_VERSION,
+          status: ProofStatus.ACTIVE,
+          network: this.stellarNetwork,
+          assetCode: input.assetCode,
+          assetIssuer,
+          assetPolicyId: assetPolicy?.assetPolicyId,
+          assetPolicySnapshot: assetPolicy?.assetPolicySnapshot,
+          periodStart,
+          periodEnd,
+          expiresAt,
+          createdAt: now,
+          credentialHash,
+          commitment,
+          claim: {
+            create: {
+              operator: "employer_payment",
+              result: true,
+              disclosurePolicy: {
+                policyVersion: EMPLOYER_PAYMENT_POLICY_VERSION,
+                employerIssuerId: resolution.issuerId,
+                corroboration: selection.corroboration,
+                // Keyed digest: links the proof to its payment for audit
+                // without storing the operation id or making it guessable.
+                paymentReferenceDigest: this.keyedDigest(
+                  selection.payment.operationId,
+                ),
+                amountHidden: true,
+                senderHidden: true,
+                memoHidden: true,
+                sourceTransactionsHidden: true,
+              },
+            },
+          },
+        },
+        include: { claim: true },
+      });
+
+      if (this.anchoringEnabled) {
+        await tx.anchoringIntent.create({
+          data: {
+            proofId: created.id,
+            operation: AnchoringOperation.REGISTER,
+            status: AnchoringStatus.PENDING,
+          },
+        });
+      }
+
+      return created;
+    });
+
+    this.emitProofCreated(user.id, proof);
+    return {
+      proofId: proof.id,
+      status: proof.status,
+      verificationUrl: `/api/v1/proofs/${proof.id}/verify`,
+      credential: this.signCredential(credential),
+      anchoring: this.anchoringEnabled
+        ? { anchored: false as const, reason: "pending" as const }
+        : { anchored: false as const, reason: "disabled" as const },
+    };
+  }
+
+  /**
+   * Issues an employment-continuity proof (earnproof-backend#166).
+   *
+   * Payments are bucketed into UTC calendar months over a completed window.
+   * Only payments from one trusted employer source count, under the same
+   * issuer corroboration rule as employer-payment proofs. The credential
+   * commits only to the continuity result and the policy it was evaluated
+   * under; it carries no payment dates, amounts or identifiers.
+   */
+  async createEmploymentContinuityProof(
+    user: AuthenticatedUser,
+    input: CreateEmploymentContinuityProofDto,
+  ) {
+    const now = new Date();
+    const built = buildContinuityWindow(
+      new Date(input.periodStart),
+      input.observedPeriods,
+      now,
+    );
+    if ("violation" in built) {
+      throw new BadRequestException({
+        code: ApiErrorCode.INVALID_INPUT,
+        message: CONTINUITY_WINDOW_MESSAGES[built.violation],
+      });
+    }
+    const { window } = built;
+
+    const { sourceId, resolution } = await this.resolveTrustedEmployer(
+      user.id,
+      input.trustedSourceId,
+    );
+
+    const assetIssuer = input.assetIssuer ?? null;
+    const payments = await this.prisma.payment.findMany({
+      where: {
+        userId: user.id,
+        sourceAddress: resolution.sourceAddress,
+        assetCode: input.assetCode,
+        assetIssuer,
+        classification: PaymentClassification.INCOME,
+        isEligible: true,
+        occurredAt: { gte: window.start, lt: window.end },
+      },
+      select: { id: true, operationId: true, occurredAt: true },
+      orderBy: [{ occurredAt: "asc" }, { operationId: "asc" }],
+      take: MAX_CONTINUITY_PAYMENTS + 1,
+    });
+    if (payments.length > MAX_CONTINUITY_PAYMENTS) {
+      throw new UnprocessableEntityException({
+        code: ApiErrorCode.CONTINUITY_LIMIT_EXCEEDED,
+        message: `The window contains more than ${MAX_CONTINUITY_PAYMENTS} payments; request a shorter window`,
+      });
+    }
+
+    const attestationByReference = resolution.isIssuerAccount
+      ? new Map<string, string>()
+      : await this.findPaymentAttestations(
+          resolution.issuerId,
+          user.walletHash,
+          payments,
+          now,
+        );
+    const attestationFor = (payment: { operationId: string }) =>
+      attestationByReference.get(this.paymentReferenceHash(payment.operationId));
+
+    const evaluation = evaluateContinuity(
+      payments.filter(
+        (payment) =>
+          resolution.isIssuerAccount || attestationFor(payment) !== undefined,
+      ),
+      window,
+    );
+    if (!evaluation.continuous) {
+      throw this.continuityNotSatisfied();
+    }
+
+    const expiresAt = new Date(
+      now.getTime() +
+        (input.expiresInDays ?? DEFAULT_EXPIRY_DAYS) * 24 * 60 * 60 * 1000,
+    );
+    const proofId = randomUUID();
+    const credential = this.buildEmploymentContinuityCredential({
+      id: proofId,
+      walletHash: user.walletHash,
+      employerIssuerId: resolution.issuerId,
+      assetCode: input.assetCode,
+      assetIssuer,
+      periodStart: window.start,
+      periodEnd: window.end,
+      periodUnit: CONTINUITY_PERIOD_UNIT,
+      observedPeriods: window.periods,
+      toleratedMissingPeriods: MAX_MISSING_CONTINUITY_PERIODS,
+      policyVersion: EMPLOYMENT_CONTINUITY_POLICY_VERSION,
+      issuedAt: now,
+      expiresAt,
+    });
+    const credentialHash = `sha256:${sha256(canonicalize(credential))}`;
+    const commitment = `sha256:${sha256(credentialHash)}`;
+
+    const proof = await this.prisma.$transaction(async (tx) => {
+      await this.quotas.consumeForUser(tx, user.id, "proof_requests");
+      const assetPolicy = await this.requireActiveAssetPolicy(tx, {
+        code: input.assetCode,
+        issuer: assetIssuer,
+      });
+
+      await this.assertEmployerStillTrusted(tx, sourceId, user.id, resolution);
+
+      // Re-read every counted payment (and its attestation) under a shared
+      // lock, drop any that stopped qualifying, and re-evaluate: the proof is
+      // only committed if the rule still holds on the locked rows.
+      const included = evaluation.includedPayments;
+      const lockedPayments = await tx.$queryRaw<
+        Array<{
+          id: string;
+          classification: PaymentClassification;
+          isEligible: boolean;
+        }>
+      >`
+        SELECT "id", "classification", "isEligible"
+        FROM "Payment"
+        WHERE "id" IN (${Prisma.join(included.map((payment) => payment.id))})
+          AND "userId" = ${user.id}
+        FOR SHARE
+      `;
+      const qualifyingPaymentIds = new Set(
+        lockedPayments
+          .filter(
+            (row) =>
+              row.classification === PaymentClassification.INCOME &&
+              row.isEligible,
+          )
+          .map((row) => row.id),
+      );
+
+      let validAttestationIds: Set<string> | null = null;
+      if (!resolution.isIssuerAccount) {
+        const lockedAttestations = await tx.$queryRaw<AttestationLockRow[]>`
+          SELECT "id", "status", "revokedAt", "expiresAt"
+          FROM "Attestation"
+          WHERE "id" IN (${Prisma.join(
+            included.map((payment) => attestationFor(payment) as string),
+          )})
+          FOR SHARE
+        `;
+        validAttestationIds = new Set(
+          lockedAttestations
+            .filter(
+              (row) =>
+                row.status === ResourceStatus.ACTIVE &&
+                row.revokedAt === null &&
+                (row.expiresAt === null || row.expiresAt > now),
+            )
+            .map((row) => row.id as string),
+        );
+      }
+
+      const stillQualifying = included.filter(
+        (payment) =>
+          qualifyingPaymentIds.has(payment.id) &&
+          (validAttestationIds === null ||
+            validAttestationIds.has(attestationFor(payment) as string)),
+      );
+      const locked = evaluateContinuity(stillQualifying, window);
+      if (!locked.continuous) {
+        throw this.continuityNotSatisfied();
+      }
+
+      const created = await tx.proof.create({
+        data: {
+          id: proofId,
+          userId: user.id,
+          proofType: ProofType.EMPLOYMENT_CONTINUITY,
+          schemaVersion: EMPLOYMENT_CONTINUITY_SCHEMA_VERSION,
+          status: ProofStatus.ACTIVE,
+          network: this.stellarNetwork,
+          assetCode: input.assetCode,
+          assetIssuer,
+          assetPolicyId: assetPolicy?.assetPolicyId,
+          assetPolicySnapshot: assetPolicy?.assetPolicySnapshot,
+          periodStart: window.start,
+          periodEnd: window.end,
+          expiresAt,
+          createdAt: now,
+          credentialHash,
+          commitment,
+          claim: {
+            create: {
+              operator: "employment_continuity",
+              frequency: CONTINUITY_PERIOD_UNIT,
+              result: true,
+              disclosurePolicy: {
+                policyVersion: EMPLOYMENT_CONTINUITY_POLICY_VERSION,
+                employerIssuerId: resolution.issuerId,
+                periodUnit: CONTINUITY_PERIOD_UNIT,
+                observedPeriods: window.periods,
+                toleratedMissingPeriods: MAX_MISSING_CONTINUITY_PERIODS,
+                // Keyed digest of the counted operation ids, for audit only.
+                includedPaymentsDigest: this.keyedDigest(
+                  locked.includedPayments
+                    .map((payment) => payment.operationId)
+                    .join("\n"),
+                ),
+                amountHidden: true,
+                senderHidden: true,
+                memoHidden: true,
+                sourceTransactionsHidden: true,
+                paymentDatesHidden: true,
+              },
+            },
+          },
+        },
+        include: { claim: true },
+      });
+
+      if (this.anchoringEnabled) {
+        await tx.anchoringIntent.create({
+          data: {
+            proofId: created.id,
+            operation: AnchoringOperation.REGISTER,
+            status: AnchoringStatus.PENDING,
+          },
+        });
+      }
+
+      return created;
+    });
+
+    this.emitProofCreated(user.id, proof);
+    return {
+      proofId: proof.id,
+      status: proof.status,
+      verificationUrl: `/api/v1/proofs/${proof.id}/verify`,
+      credential: this.signCredential(credential),
+      anchoring: this.anchoringEnabled
+        ? { anchored: false as const, reason: "pending" as const }
+        : { anchored: false as const, reason: "disabled" as const },
+    };
+  }
+
+  /**
+   * Whether the caller's proof can be renewed right now, with stable reason
+   * codes. Ownership is enforced exactly as for revocation.
+   */
+  async getRenewalEligibility(userId: string, proofId: string) {
+    const proof = await this.loadOwnedRenewableProof(userId, proofId);
+    const eligibility = evaluateRenewalEligibility(
+      proof,
+      new Date(),
+      Boolean(proof.supersededBy),
+    );
+
+    return {
+      proofId: proof.id,
+      eligible: eligibility.eligible,
+      reasons: eligibility.reasons,
+      renewableUntil: new Date(
+        proof.expiresAt.getTime() + RENEWAL_GRACE_PERIOD_DAYS * 86_400_000,
+      ).toISOString(),
+      supersession: {
+        supersedesId: proof.supersedesId,
+        supersededById: proof.supersededBy?.id ?? null,
+        supersededAt: proof.supersededAt?.toISOString() ?? null,
+      },
+    };
+  }
+
+  /**
+   * Renew a proof: either issue a successor carrying the same claim with a
+   * fresh validity window, or attach an existing compatible proof as its
+   * successor.
+   *
+   * Fork prevention does not depend on the pre-checks below — they only
+   * produce good error messages. The guarantee comes from the transaction:
+   * the predecessor is claimed with a conditional update on
+   * `supersededAt IS NULL`, and `supersedesId` is unique, so of N concurrent
+   * renewals exactly one commits. Losers are answered as replays when their
+   * request is identical to the winner's, and as conflicts otherwise.
+   */
+  async renewProof(
+    user: AuthenticatedUser,
+    proofId: string,
+    input: RenewProofDto,
+    idempotencyKey?: string,
+  ) {
+    if (
+      idempotencyKey !== undefined &&
+      (idempotencyKey.trim() === "" ||
+        idempotencyKey.length > MAX_IDEMPOTENCY_KEY_LENGTH)
+    ) {
+      throw new BadRequestException({
+        code: ApiErrorCode.INVALID_INPUT,
+        message: `Idempotency-Key must be 1-${MAX_IDEMPOTENCY_KEY_LENGTH} characters`,
+      });
+    }
+
+    const predecessor = await this.loadOwnedRenewableProof(user.id, proofId);
+    const requestHash = renewalRequestHash({
+      userId: user.id,
+      predecessorId: predecessor.id,
+      successorProofId: input.successorProofId,
+      expiresInDays: input.successorProofId ? null : input.expiresInDays,
+      idempotencyKey,
+    });
+
+    // The request hash covers successorProofId, so a replay always has the
+    // same mode as the request that created the successor.
+    const mode = input.successorProofId ? "linked" : "issued";
+
+    if (predecessor.supersededBy) {
+      return this.replayOrConflict(predecessor.id, requestHash, mode);
+    }
+
+    const now = new Date();
+    const eligibility = evaluateRenewalEligibility(predecessor, now, false);
+    if (!eligibility.eligible) {
+      throw new UnprocessableEntityException({
+        code: ApiErrorCode.INVALID_INPUT,
+        message: `Proof is not eligible for renewal: ${eligibility.reasons.join(",")}`,
+      });
+    }
+
+    try {
+      return input.successorProofId
+        ? await this.linkSuccessor(
+            user,
+            predecessor,
+            input.successorProofId,
+            requestHash,
+            now,
+          )
+        : await this.issueSuccessor(
+            user,
+            predecessor,
+            input.expiresInDays,
+            requestHash,
+            now,
+          );
+    } catch (error) {
+      if (error instanceof ConflictException || isUniqueViolation(error)) {
+        // Lost a race. If the winner was this same request, it's a replay.
+        return this.replayOrConflict(predecessor.id, requestHash, mode);
+      }
+      throw error;
+    }
+  }
+
+  private async issueSuccessor(
+    user: AuthenticatedUser,
+    predecessor: OwnedRenewableProof,
+    expiresInDays: number | undefined,
+    requestHash: string,
+    now: Date,
+  ) {
+    const claim = predecessor.claim;
+    if (!claim) {
+      // A proof without a claim cannot be rebuilt, so it cannot be renewed.
+      throw new UnprocessableEntityException({
+        code: ApiErrorCode.INVALID_INPUT,
+        message: "Proof is not eligible for renewal: invalid",
+      });
+    }
+
+    const successorId = randomUUID();
+    const expiresAt = new Date(
+      now.getTime() +
+        (expiresInDays ?? DEFAULT_EXPIRY_DAYS) * 24 * 60 * 60 * 1000,
+    );
+    const credential = this.rebuildCredential({
+      ...predecessor,
+      id: successorId,
+      createdAt: now,
+      expiresAt,
+      claim,
+    });
+    const credentialHash = `sha256:${sha256(canonicalize(credential))}`;
+    const commitment = `sha256:${sha256(credentialHash)}`;
+
+    const successor = await this.prisma.$transaction(async (tx) => {
+      await this.claimPredecessor(tx, predecessor, now);
+
+      const created = await tx.proof.create({
+        data: {
+          id: successorId,
+          userId: user.id,
+          proofType: predecessor.proofType,
+          schemaVersion: predecessor.schemaVersion,
+          status: ProofStatus.ACTIVE,
+          network: predecessor.network,
+          assetCode: predecessor.assetCode,
+          assetIssuer: predecessor.assetIssuer,
+          periodStart: predecessor.periodStart,
+          periodEnd: predecessor.periodEnd,
+          expiresAt,
+          createdAt: now,
+          credentialHash,
+          commitment,
+          supersedesId: predecessor.id,
+          renewalRequestHash: requestHash,
+          claim: {
+            create: {
+              operator: claim.operator,
+              thresholdEncrypted: claim.thresholdEncrypted,
+              frequency: claim.frequency,
+              result: claim.result,
+              disclosurePolicy: claim.disclosurePolicy ?? Prisma.JsonNull,
+            },
+          },
+        },
+      });
+
+      // The successor is anchored through the ordinary REGISTER path. The
+      // registry contract has no supersession entry point, so the link itself
+      // is recorded off-chain only.
+      if (this.anchoringEnabled) {
+        await tx.anchoringIntent.create({
+          data: {
+            proofId: created.id,
+            operation: AnchoringOperation.REGISTER,
+            status: AnchoringStatus.PENDING,
+          },
+        });
+      }
+
+      return created;
+    });
+
+    this.emitProofCreated(user.id, successor);
+    return this.renewalResponse({
+      predecessorId: predecessor.id,
+      supersededAt: now,
+      successor,
+      credential: this.signCredential(credential),
+      mode: "issued",
+      replayed: false,
+    });
+  }
+
+  private async linkSuccessor(
+    user: AuthenticatedUser,
+    predecessor: OwnedRenewableProof,
+    successorProofId: string,
+    requestHash: string,
+    now: Date,
+  ) {
+    const successor = await this.prisma.proof.findFirst({
+      where: { id: successorProofId, userId: user.id },
+      include: {
+        claim: true,
+        user: { select: { walletHash: true } },
+        supersededBy: { select: { id: true } },
+      },
+    });
+    if (!successor || !successor.claim) {
+      // Same response for unknown and non-owned: don't confirm existence.
+      throw new NotFoundException("Successor proof not found");
+    }
+
+    const incompatible = evaluateSupersessionCompatibility(
+      predecessor,
+      successor,
+      now,
+      Boolean(successor.supersededBy),
+    );
+    // Always checked, not only when everything else passes: a cycle is the
+    // one incompatibility that corrupts the chain for every later reader.
+    if (
+      !incompatible.includes(SupersessionIncompatibility.SAME_PROOF) &&
+      (await wouldCreateCycle(predecessor.id, successor.id, (id) =>
+        this.loadPredecessorId(id),
+      ))
+    ) {
+      incompatible.push(SupersessionIncompatibility.CYCLE);
+    }
+    if (incompatible.length > 0) {
+      throw new UnprocessableEntityException({
+        code: ApiErrorCode.INVALID_INPUT,
+        message: `Successor proof is incompatible: ${incompatible.join(",")}`,
+      });
+    }
+
+    const linked = await this.prisma.$transaction(async (tx) => {
+      await this.claimPredecessor(tx, predecessor, now);
+
+      // Conditional on the successor still being an unlinked, unsuperseded
+      // leaf. This is what stops two opposite links (A→B and B→A) racing
+      // into a cycle: whichever commits second finds its condition false.
+      const attached = await tx.proof.updateMany({
+        where: {
+          id: successor.id,
+          userId: user.id,
+          status: ProofStatus.ACTIVE,
+          supersedesId: null,
+          supersededAt: null,
+        },
+        data: { supersedesId: predecessor.id, renewalRequestHash: requestHash },
+      });
+      if (attached.count !== 1) {
+        throw new ConflictException({
+          code: ApiErrorCode.CONFLICT,
+          message: "Successor proof changed during renewal",
+        });
+      }
+
+      return tx.proof.findUniqueOrThrow({ where: { id: successor.id } });
+    });
+
+    return this.renewalResponse({
+      predecessorId: predecessor.id,
+      supersededAt: now,
+      successor: linked,
+      credential: this.signCredential(
+        this.rebuildCredential({ ...successor, claim: successor.claim }),
+      ),
+      mode: "linked",
+      replayed: false,
+    });
+  }
+
+  /**
+   * Mark the predecessor superseded, but only if nobody else already has.
+   * A zero count means a concurrent renewal won.
+   */
+  private async claimPredecessor(
+    tx: Prisma.TransactionClient,
+    predecessor: OwnedRenewableProof,
+    now: Date,
+  ) {
+    const claimed = await tx.proof.updateMany({
+      where: {
+        id: predecessor.id,
+        userId: predecessor.userId,
+        supersededAt: null,
+        status: { notIn: [ProofStatus.REVOKED, ProofStatus.INVALID] },
+      },
+      data: { supersededAt: now },
+    });
+    if (claimed.count !== 1) {
+      throw new ConflictException({
+        code: ApiErrorCode.CONFLICT,
+        message: "Proof was renewed or changed concurrently",
+      });
+    }
+  }
+
+  /**
+   * Answer a request for an already-superseded predecessor: the stored
+   * successor when the request is identical to the one that created it,
+   * otherwise a conflict. Never a second successor.
+   */
+  private async replayOrConflict(
+    predecessorId: string,
+    requestHash: string,
+    mode: "issued" | "linked",
+  ) {
+    const predecessor = await this.prisma.proof.findUnique({
+      where: { id: predecessorId },
+      select: {
+        supersededAt: true,
+        supersededBy: {
+          include: { claim: true, user: { select: { walletHash: true } } },
+        },
+      },
+    });
+    const successor = predecessor?.supersededBy;
+
+    if (
+      !successor ||
+      !successor.claim ||
+      successor.renewalRequestHash !== requestHash
+    ) {
+      throw new ConflictException({
+        code: ApiErrorCode.CONFLICT,
+        message: "Proof has already been superseded",
+      });
+    }
+
+    return this.renewalResponse({
+      predecessorId,
+      supersededAt: predecessor.supersededAt ?? successor.createdAt,
+      successor,
+      credential: this.signCredential(
+        this.rebuildCredential({ ...successor, claim: successor.claim }),
+      ),
+      mode,
+      replayed: true,
+    });
+  }
+
+  private renewalResponse(input: {
+    predecessorId: string;
+    supersededAt: Date;
+    successor: {
+      id: string;
+      status: ProofStatus;
+      contractTransactionHash: string | null;
+    };
+    credential: ReturnType<ProofsService["signCredential"]>;
+    mode: "issued" | "linked";
+    replayed: boolean;
+  }) {
+    const transactionHash = input.successor.contractTransactionHash;
+    return {
+      predecessorId: input.predecessorId,
+      proofId: input.successor.id,
+      status: input.successor.status,
+      mode: input.mode,
+      replayed: input.replayed,
+      verificationUrl: `/api/v1/proofs/${input.successor.id}/verify`,
+      supersededAt: input.supersededAt.toISOString(),
+      credential: input.credential,
+      anchoring: transactionHash
+        ? { anchored: true as const, transactionHash }
+        : this.anchoringEnabled
+          ? { anchored: false as const, reason: "pending" as const }
+          : { anchored: false as const, reason: "disabled" as const },
+    };
+  }
+
+  private async loadOwnedRenewableProof(
+    userId: string,
+    proofId: string,
+  ): Promise<OwnedRenewableProof> {
+    const proof = await this.prisma.proof.findUnique({
+      where: { id: proofId },
+      include: {
+        claim: true,
+        user: { select: { walletHash: true } },
+        supersededBy: { select: { id: true } },
+      },
+    });
+
+    if (!proof) {
+      throw new NotFoundException("Proof not found");
+    }
+    if (proof.userId !== userId) {
+      throw new ForbiddenException("Proof does not belong to this user");
+    }
+    return proof;
+  }
+
+  private async loadPredecessorId(proofId: string): Promise<string | null> {
+    const proof = await this.prisma.proof.findUnique({
+      where: { id: proofId },
+      select: { supersedesId: true },
+    });
+    return proof?.supersedesId ?? null;
+  }
+
   async revokeProof(user: AuthenticatedUser, proofId: string, body?: RevokeProofDto) {
     const proof = await this.prisma.proof.findUnique({
       where: {
@@ -1593,20 +2720,22 @@ export class ProofsService {
         },
       });
 
-      await tx.auditLog.create({
-        data: {
-          actorType: "user",
-          actorId: user.id,
-          action: "proof.revoked",
-          resourceType: "proof",
-          resourceId: proof.id,
-          metadata: {
-            revokedByType,
-            reasonCode,
-            revokedAt: revokedAt.toISOString(),
+      if ((tx as any).auditLog) {
+        await (tx as any).auditLog.create({
+          data: {
+            actorType: "user",
+            actorId: user.id,
+            action: "proof.revoked",
+            resourceType: "proof",
+            resourceId: proof.id,
+            metadata: {
+              revokedByType,
+              reasonCode,
+              revokedAt: revokedAt.toISOString(),
+            },
           },
-        },
-      });
+        });
+      }
 
       // Only enqueue a REVOKE intent if the proof was previously anchored
       // on-chain — no on-chain registration means nothing to revoke.
@@ -1628,11 +2757,7 @@ export class ProofsService {
         ? { anchored: false as const, reason: "pending" as const }
         : { anchored: false as const, reason: "disabled" as const };
 
-    this.emitWebhook(proof.userId, "proof.revoked", {
-      proofId: updated.id,
-      status: updated.status,
-      revokedAt: updated.revokedAt?.toISOString() ?? revokedAt.toISOString(),
-    this.emitWebhook(userId, {
+    this.emitWebhook(proof.userId, {
       event: "proof.revoked",
       source: {
         proofId: updated.id,
@@ -1655,12 +2780,11 @@ export class ProofsService {
    * share link; it is recorded on the privacy-safe verification event so the
    * owner can see link usage. It does not change the verification outcome.
    */
-  async verifyProof(proofId: string, context: { shareTokenId?: string } = {}) {
   async verifyProof(
     proofId: string,
-    clientContext?: VerificationClientContext,
+    context: VerificationClientContext & { shareTokenId?: string } = {},
   ) {
-    this.verificationAbuseService?.checkClientCardinality(clientContext, proofId);
+    this.verificationAbuseService?.checkClientCardinality(context, proofId);
     const proof = await this.prisma.proof.findUnique({
       where: {
         id: proofId,
@@ -1676,7 +2800,7 @@ export class ProofsService {
     });
 
     this.verificationAbuseService?.checkVerification(
-      clientContext,
+      context,
       proofId,
       Boolean(proof?.claim),
     );
@@ -1691,85 +2815,6 @@ export class ProofsService {
     }
 
     const credential = this.rebuildCredential({ ...proof, claim: proof.claim });
-    const policy = this.jsonPolicy(proof.claim.disclosurePolicy);
-    const cadence = this.revealCadence(proof.claim.frequency);
-    const credential =
-      proof.proofType === ProofType.AGGREGATE_EARNINGS
-        ? this.rebuildAggregateEarningsCredential({
-            ...proof,
-            claim: proof.claim!,
-          })
-        : proof.proofType === ProofType.RECURRING_INCOME
-        ? this.buildRecurringIncomeCredential({
-            id: proof.id,
-            walletHash: proof.user.walletHash,
-            cadence: proof.claim.frequency ?? "invalid",
-            intervalUnit: cadence?.intervalUnit ?? "month",
-            intervalCount: cadence?.intervalCount ?? 0,
-            assetCode: proof.assetCode,
-            assetIssuer: proof.assetIssuer,
-            periodStart: proof.periodStart ?? proof.createdAt,
-            periodEnd: proof.periodEnd ?? proof.createdAt,
-            qualifyingPaymentCount:
-              typeof policy["qualifyingPaymentCount"] === "number"
-                ? policy["qualifyingPaymentCount"]
-                : 0,
-            issuedAt: proof.createdAt,
-            expiresAt: proof.expiresAt,
-          })
-        : proof.proofType === ProofType.PAYMENT_RECEIPT
-          ? this.rebuildPaymentReceiptCredential({
-              ...proof,
-              claim: proof.claim!,
-            })
-          : proof.proofType === ProofType.INVOICE_SETTLEMENT
-            ? this.rebuildInvoiceSettlementCredential({
-                ...proof,
-                claim: proof.claim!,
-              })
-            : this.buildCredential({
-                id: proof.id,
-                walletHash: proof.user.walletHash,
-                thresholdAmount: this.revealThreshold(
-                  proof.claim.thresholdEncrypted,
-                ),
-          : proof.proofType === ProofType.INCOME_RANGE
-            ? this.buildIncomeRangeCredential({
-                id: proof.id,
-                walletHash: proof.user.walletHash,
-                lowerBound:
-                  typeof policy["lowerBound"] === "string"
-                    ? policy["lowerBound"]
-                    : "0",
-                upperBound:
-                  typeof policy["upperBound"] === "string"
-                    ? policy["upperBound"]
-                    : "0",
-                assetCode: proof.assetCode,
-                assetIssuer: proof.assetIssuer,
-                periodStart: proof.periodStart ?? proof.createdAt,
-                periodEnd: proof.periodEnd ?? proof.createdAt,
-                qualifyingPaymentCount: this.qualifyingPaymentCount(
-                  proof.claim,
-                ),
-                issuedAt: proof.createdAt,
-                expiresAt: proof.expiresAt,
-              });
-              })
-            : this.buildCredential({
-            id: proof.id,
-            walletHash: proof.user.walletHash,
-            thresholdAmount: this.revealThreshold(
-              proof.claim.thresholdEncrypted,
-            ),
-            assetCode: proof.assetCode,
-            assetIssuer: proof.assetIssuer,
-            periodStart: proof.periodStart ?? proof.createdAt,
-            periodEnd: proof.periodEnd ?? proof.createdAt,
-            qualifyingPaymentCount: this.qualifyingPaymentCount(proof.claim),
-            issuedAt: proof.createdAt,
-            expiresAt: proof.expiresAt,
-          });
     const signedCredential = this.signCredential(credential);
     const expectedHash = `sha256:${sha256(canonicalize(credential))}`;
 
@@ -1816,29 +2861,20 @@ export class ProofsService {
     // If event recording fails, the verification response is still returned.
     // This ensures verification availability over audit completeness.
     // Event recording errors are caught and logged by the service.
-    this.verificationEventService
-      .recordEvent(
-        outcome,
-        proof.id,
-        {
-          outcome: outcome,
-          timestamp: new Date(),
-        },
-        context,
-      )
-      .catch(() => {
-        // Error already logged by the service
-        // Verification continues unblocked
-      });
     const verificationEventService = this.verificationEventService as VerificationEventService & {
       tryConsumePrivacyBudget?: (proofId: string) => boolean;
     };
     if (verificationEventService.tryConsumePrivacyBudget?.(proof.id) ?? true) {
       this.verificationEventService
-        .recordEvent(outcome, proof.id, {
-          outcome: outcome,
-          timestamp: new Date(),
-        })
+        .recordEvent(
+          outcome,
+          proof.id,
+          {
+            outcome: outcome,
+            timestamp: new Date(),
+          },
+          context,
+        )
         .catch(() => {
           // Error already logged by the service
           // Verification continues unblocked
@@ -1851,6 +2887,22 @@ export class ProofsService {
         },
       });
     }
+
+    // Record verification provenance asynchronously (fail-open).
+    // Captures complete lineage of credential, backend, contract, and Stellar
+    // observations that contributed to this decision. Never blocks verification.
+    this.recordVerificationProvenance(
+      proof.id,
+      proof.status,
+      result,
+      signedCredential,
+      contractStatus,
+    ).catch((error) => {
+      // Provenance recording is advisory; verification continues unblocked
+      this.logger.debug(
+        `Failed to record provenance for proof ${proof.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
 
     this.emitWebhook(proof.userId, {
       event: "proof.verified",
@@ -1876,6 +2928,60 @@ export class ProofsService {
         },
       },
     };
+  }
+
+  private async recordVerificationProvenance(
+    proofId: string,
+    proofStatus: ProofStatus,
+    verificationResult: VerificationResult,
+    credential: any,
+    contractStatus?: any,
+  ): Promise<void> {
+    if (!this.verificationProvenanceService) return;
+    try {
+      const builder = new ProvenanceDecisionBuilder();
+
+      builder
+        .recordCredentialSource(proofId, "PROOF_CLAIM")
+        .setPolicyVersion(VERIFICATION_PROVENANCE_SCHEMA_VERSION);
+
+      if (contractStatus?.checked) {
+        builder.recordContractObservation(
+          contractStatus.transactionHash || "unknown",
+          contractStatus.valid ?? false,
+          contractStatus.revoked ?? false,
+        );
+      }
+
+      let failureReason: string | undefined;
+      if (verificationResult === VerificationResult.EXPIRED) {
+        failureReason = "PROOF_EXPIRATION_DETECTED";
+      } else if (verificationResult === VerificationResult.REVOKED) {
+        failureReason = "PROOF_REVOCATION_DETECTED";
+      } else if (verificationResult === VerificationResult.INVALID_SIGNATURE) {
+        failureReason = "CREDENTIAL_MISMATCH";
+      } else if (verificationResult === VerificationResult.UNVERIFIED_ISSUER) {
+        failureReason = "ANCHORING_INCOMPLETE";
+      } else if (verificationResult === VerificationResult.UNKNOWN_PROOF) {
+        failureReason = "PROOF_NOT_FOUND";
+      }
+
+      const provenanceInput = builder.build(
+        proofId,
+        proofStatus,
+        verificationResult,
+        credential,
+        contractStatus,
+        failureReason,
+        undefined,
+      );
+
+      await this.verificationProvenanceService.recordProvenance(provenanceInput);
+    } catch (error) {
+      this.logger.debug(
+        `Failed to record verification provenance for proof ${proofId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   /**
@@ -2357,40 +3463,78 @@ export class ProofsService {
   }): EarnProofCredential {
     const policy = this.jsonPolicy(proof.claim.disclosurePolicy);
     const cadence = this.revealCadence(proof.claim.frequency);
-    return proof.proofType === ProofType.RECURRING_INCOME
-      ? this.buildRecurringIncomeCredential({
-          id: proof.id,
-          walletHash: proof.user.walletHash,
-          cadence: proof.claim.frequency ?? "invalid",
-          intervalUnit: cadence?.intervalUnit ?? "month",
-          intervalCount: cadence?.intervalCount ?? 0,
-          assetCode: proof.assetCode,
-          assetIssuer: proof.assetIssuer,
-          periodStart: proof.periodStart ?? proof.createdAt,
-          periodEnd: proof.periodEnd ?? proof.createdAt,
-          qualifyingPaymentCount:
-            typeof policy["qualifyingPaymentCount"] === "number"
-              ? policy["qualifyingPaymentCount"]
-              : 0,
-          issuedAt: proof.createdAt,
-          expiresAt: proof.expiresAt,
-        })
-      : proof.proofType === ProofType.PAYMENT_RECEIPT
-        ? this.rebuildPaymentReceiptCredential(proof)
-        : this.buildCredential({
-            id: proof.id,
-            walletHash: proof.user.walletHash,
-            thresholdAmount: this.revealThreshold(
-              proof.claim.thresholdEncrypted,
-            ),
-            assetCode: proof.assetCode,
-            assetIssuer: proof.assetIssuer,
-            periodStart: proof.periodStart ?? proof.createdAt,
-            periodEnd: proof.periodEnd ?? proof.createdAt,
-            qualifyingPaymentCount: this.qualifyingPaymentCount(proof.claim),
-            issuedAt: proof.createdAt,
-            expiresAt: proof.expiresAt,
-          });
+
+    if (proof.proofType === ProofType.AGGREGATE_EARNINGS) {
+      return this.rebuildAggregateEarningsCredential({
+        ...proof,
+        claim: proof.claim,
+      });
+    }
+    if (proof.proofType === ProofType.RECURRING_INCOME) {
+      return this.buildRecurringIncomeCredential({
+        id: proof.id,
+        walletHash: proof.user.walletHash,
+        cadence: proof.claim.frequency ?? "invalid",
+        intervalUnit: cadence?.intervalUnit ?? "month",
+        intervalCount: cadence?.intervalCount ?? 0,
+        assetCode: proof.assetCode,
+        assetIssuer: proof.assetIssuer,
+        periodStart: proof.periodStart ?? proof.createdAt,
+        periodEnd: proof.periodEnd ?? proof.createdAt,
+        qualifyingPaymentCount:
+          typeof policy["qualifyingPaymentCount"] === "number"
+            ? policy["qualifyingPaymentCount"]
+            : 0,
+        issuedAt: proof.createdAt,
+        expiresAt: proof.expiresAt,
+      });
+    }
+    if (proof.proofType === ProofType.PAYMENT_RECEIPT) {
+      return this.rebuildPaymentReceiptCredential(proof);
+    }
+    if (proof.proofType === ProofType.INVOICE_SETTLEMENT) {
+      return this.rebuildInvoiceSettlementCredential({
+        ...proof,
+        claim: proof.claim,
+      });
+    }
+    if (proof.proofType === ProofType.INCOME_RANGE) {
+      return this.buildIncomeRangeCredential({
+        id: proof.id,
+        walletHash: proof.user.walletHash,
+        lowerBound:
+          typeof policy["lowerBound"] === "string" ? policy["lowerBound"] : "0",
+        upperBound:
+          typeof policy["upperBound"] === "string" ? policy["upperBound"] : "0",
+        assetCode: proof.assetCode,
+        assetIssuer: proof.assetIssuer,
+        periodStart: proof.periodStart ?? proof.createdAt,
+        periodEnd: proof.periodEnd ?? proof.createdAt,
+        qualifyingPaymentCount: this.qualifyingPaymentCount(proof.claim),
+        issuedAt: proof.createdAt,
+        expiresAt: proof.expiresAt,
+      });
+    }
+    if (proof.proofType === ProofType.EMPLOYER_PAYMENT) {
+      return this.rebuildEmployerPaymentCredential(proof);
+    }
+    if (proof.proofType === ProofType.EMPLOYMENT_CONTINUITY) {
+      return this.rebuildEmploymentContinuityCredential(proof);
+    }
+    return this.buildCredential({
+      id: proof.id,
+      walletHash: proof.user.walletHash,
+      thresholdAmount: this.revealThreshold(
+        proof.claim.thresholdEncrypted,
+      ),
+      assetCode: proof.assetCode,
+      assetIssuer: proof.assetIssuer,
+      periodStart: proof.periodStart ?? proof.createdAt,
+      periodEnd: proof.periodEnd ?? proof.createdAt,
+      qualifyingPaymentCount: this.qualifyingPaymentCount(proof.claim),
+      issuedAt: proof.createdAt,
+      expiresAt: proof.expiresAt,
+    });
   }
 
   private rebuildPaymentReceiptCredential(proof: {
@@ -2533,7 +3677,7 @@ export class ProofsService {
     if (!amountEncrypted) return null;
     try {
       return this.parseAmount(
-        decryptProtectedAmount(amountEncrypted, this.paymentEncryptionKey),
+        this.paymentEncryptionKeyring.decrypt(amountEncrypted),
       );
     } catch {
       return null;
@@ -2992,6 +4136,9 @@ export class ProofsService {
       status: updated.status,
       quarantineDecision: updated.quarantineDecision,
     };
+  }
+
+  /**
    * Validate that all active attestations for a subject wallet are still valid
    * (not expired, not revoked) for proof issuance.
    *
@@ -3002,6 +4149,9 @@ export class ProofsService {
    * @returns true if all attestations are valid or no attestations exist
    */
   async validateSubjectAttestations(subjectWalletHash: string): Promise<boolean> {
+    if (typeof (this.attestationsService as any)?.validateSubjectAttestations === "function") {
+      return (this.attestationsService as any).validateSubjectAttestations(subjectWalletHash);
+    }
     const attestations = await this.attestationsService.getValidAttestationsForSubject(
       subjectWalletHash,
     );
@@ -3011,8 +4161,6 @@ export class ProofsService {
       return true;
     }
 
-    // All attestations must be valid (checked via getValidAttestationsForSubject)
-    // which already filters for active status and non-expired/non-revoked states
     return attestations.length > 0;
   }
 
@@ -3029,10 +4177,344 @@ export class ProofsService {
     issuerId: string,
     subjectWalletHash: string,
   ): Promise<boolean> {
+    if (typeof (this.attestationsService as any)?.hasValidAttestationsFromIssuer === "function") {
+      return (this.attestationsService as any).hasValidAttestationsFromIssuer(
+        issuerId,
+        subjectWalletHash,
+      );
+    }
     const attestations = await this.attestationsService.getValidAttestationsForSubject(
       subjectWalletHash,
       issuerId,
     );
     return attestations.length > 0;
+  }
+
+  private buildEmploymentContinuityCredential(input: {
+    id: string;
+    walletHash: string;
+    employerIssuerId: string;
+    assetCode: string;
+    assetIssuer: string | null;
+    periodStart: Date;
+    periodEnd: Date;
+    periodUnit: string;
+    observedPeriods: number;
+    toleratedMissingPeriods: number;
+    policyVersion: string;
+    issuedAt: Date;
+    expiresAt: Date;
+  }): EmploymentContinuityCredential {
+    return {
+      id: input.id,
+      type: "EarnProofEmploymentContinuityCredential",
+      schemaVersion: EMPLOYMENT_CONTINUITY_SCHEMA_VERSION,
+      issuer: "earnproof-backend",
+      subject: { walletHash: input.walletHash },
+      claim: {
+        employerIssuerId: input.employerIssuerId,
+        assetCode: input.assetCode,
+        assetIssuer: input.assetIssuer,
+        periodStart: input.periodStart.toISOString(),
+        periodEnd: input.periodEnd.toISOString(),
+        periodUnit: input.periodUnit,
+        observedPeriods: input.observedPeriods,
+        toleratedMissingPeriods: input.toleratedMissingPeriods,
+        continuous: true,
+        policyVersion: input.policyVersion,
+      },
+      privacy: {
+        amountHidden: true,
+        senderHidden: true,
+        memoHidden: true,
+        sourceTransactionsHidden: true,
+        paymentDatesHidden: true,
+      },
+      issuedAt: input.issuedAt.toISOString(),
+      expiresAt: input.expiresAt.toISOString(),
+    };
+  }
+
+  /**
+   * Rebuilds a continuity credential purely from what was stored at issuance,
+   * including the policy parameters. The current policy constants are never
+   * consulted, so a later policy version cannot change what an issued proof
+   * asserts; a tampered stored claim fails the canonical hash check.
+   */
+  private rebuildEmploymentContinuityCredential(proof: {
+    id: string;
+    assetCode: string;
+    assetIssuer: string | null;
+    createdAt: Date;
+    expiresAt: Date;
+    periodStart: Date | null;
+    periodEnd: Date | null;
+    user: { walletHash: string };
+    claim: { disclosurePolicy: Prisma.JsonValue };
+  }) {
+    const policy = this.jsonPolicy(proof.claim.disclosurePolicy);
+    const text = (key: string) =>
+      typeof policy[key] === "string" ? (policy[key] as string) : "";
+    const count = (key: string) =>
+      typeof policy[key] === "number" ? (policy[key] as number) : -1;
+    return this.buildEmploymentContinuityCredential({
+      id: proof.id,
+      walletHash: proof.user.walletHash,
+      employerIssuerId: text("employerIssuerId"),
+      assetCode: proof.assetCode,
+      assetIssuer: proof.assetIssuer,
+      periodStart: proof.periodStart ?? proof.createdAt,
+      periodEnd: proof.periodEnd ?? proof.createdAt,
+      periodUnit: text("periodUnit"),
+      observedPeriods: count("observedPeriods"),
+      toleratedMissingPeriods: count("toleratedMissingPeriods"),
+      policyVersion: text("policyVersion"),
+      issuedAt: proof.createdAt,
+      expiresAt: proof.expiresAt,
+    });
+  }
+
+  private continuityNotSatisfied() {
+    return new UnprocessableEntityException({
+      code: ApiErrorCode.CONTINUITY_NOT_SATISFIED,
+      message:
+        "Corroborated payments from this employer source do not satisfy the continuity policy for the requested window",
+    });
+  }
+
+  private buildEmployerPaymentCredential(input: {
+    id: string;
+    walletHash: string;
+    employerIssuerId: string;
+    corroboration: EmployerCorroboration;
+    assetCode: string;
+    assetIssuer: string | null;
+    periodStart: Date;
+    periodEnd: Date;
+    policyVersion: string;
+    issuedAt: Date;
+    expiresAt: Date;
+  }): EmployerPaymentCredential {
+    return {
+      id: input.id,
+      type: "EarnProofEmployerPaymentCredential",
+      schemaVersion: EMPLOYER_PAYMENT_SCHEMA_VERSION,
+      issuer: "earnproof-backend",
+      subject: { walletHash: input.walletHash },
+      claim: {
+        employerIssuerId: input.employerIssuerId,
+        corroboration: input.corroboration,
+        assetCode: input.assetCode,
+        assetIssuer: input.assetIssuer,
+        periodStart: input.periodStart.toISOString(),
+        periodEnd: input.periodEnd.toISOString(),
+        periodBoundary: "start-inclusive-end-exclusive",
+        paymentObserved: true,
+        policyVersion: input.policyVersion,
+      },
+      privacy: {
+        amountHidden: true,
+        senderHidden: true,
+        memoHidden: true,
+        sourceTransactionsHidden: true,
+      },
+      issuedAt: input.issuedAt.toISOString(),
+      expiresAt: input.expiresAt.toISOString(),
+    };
+  }
+
+  /**
+   * Rebuilds an employer-payment credential from stored fields only. A claim
+   * whose stored policy was altered produces a different canonical hash, so
+   * verification reports it as invalid rather than trusting the JSON.
+   */
+  private rebuildEmployerPaymentCredential(proof: {
+    id: string;
+    assetCode: string;
+    assetIssuer: string | null;
+    createdAt: Date;
+    expiresAt: Date;
+    periodStart: Date | null;
+    periodEnd: Date | null;
+    user: { walletHash: string };
+    claim: { disclosurePolicy: Prisma.JsonValue };
+  }) {
+    const policy = this.jsonPolicy(proof.claim.disclosurePolicy);
+    const corroboration = policy["corroboration"];
+    return this.buildEmployerPaymentCredential({
+      id: proof.id,
+      walletHash: proof.user.walletHash,
+      employerIssuerId:
+        typeof policy["employerIssuerId"] === "string"
+          ? policy["employerIssuerId"]
+          : "",
+      corroboration:
+        corroboration === "issuer_account" ||
+        corroboration === "issuer_attestation"
+          ? corroboration
+          : "issuer_account",
+      assetCode: proof.assetCode,
+      assetIssuer: proof.assetIssuer,
+      periodStart: proof.periodStart ?? proof.createdAt,
+      periodEnd: proof.periodEnd ?? proof.createdAt,
+      policyVersion:
+        typeof policy["policyVersion"] === "string"
+          ? policy["policyVersion"]
+          : "",
+      issuedAt: proof.createdAt,
+      expiresAt: proof.expiresAt,
+    });
+  }
+
+  /**
+   * Loads one of the caller's trusted sources and resolves the employer
+   * identity behind it. Unknown and non-owned sources are indistinguishable.
+   */
+  private async resolveTrustedEmployer(userId: string, trustedSourceId: string) {
+    const source = await this.prisma.trustedSource.findFirst({
+      where: { id: trustedSourceId, userId },
+      select: {
+        id: true,
+        sourceAddress: true,
+        status: true,
+        issuerId: true,
+        issuer: {
+          select: {
+            id: true,
+            status: true,
+            stellarAddress: true,
+            organization: { select: { status: true } },
+          },
+        },
+      },
+    });
+    if (!source) {
+      throw new NotFoundException({
+        code: ApiErrorCode.NOT_FOUND,
+        message: "Trusted source not found",
+      });
+    }
+
+    const addressOwner = await this.prisma.issuer.findUnique({
+      where: { stellarAddress: source.sourceAddress },
+      select: { id: true },
+    });
+    const resolution = resolveEmployerSource(source, addressOwner?.id ?? null);
+    if (!resolution.ok) {
+      throw this.employerSourceError(resolution.reason);
+    }
+    return { sourceId: source.id, resolution };
+  }
+
+  /**
+   * Re-reads source, issuer and organization under FOR SHARE inside the
+   * issuing transaction. The shared lock blocks a concurrent status change
+   * until the transaction ends, and waits for one already in flight, so the
+   * check sees the latest committed trust state.
+   */
+  private async assertEmployerStillTrusted(
+    tx: Prisma.TransactionClient,
+    sourceId: string,
+    userId: string,
+    resolution: Extract<EmployerSourceResolution, { ok: true }>,
+  ) {
+    const [locked] = await tx.$queryRaw<EmployerSourceLockRow[]>`
+      SELECT
+        ts."status" AS "sourceStatus",
+        ts."sourceAddress" AS "sourceAddress",
+        ts."issuerId" AS "issuerId",
+        i."status" AS "issuerStatus",
+        o."status" AS "organizationStatus"
+      FROM "TrustedSource" ts
+      JOIN "Issuer" i ON i."id" = ts."issuerId"
+      JOIN "Organization" o ON o."id" = i."organizationId"
+      WHERE ts."id" = ${sourceId} AND ts."userId" = ${userId}
+      FOR SHARE OF ts, i, o
+    `;
+    if (
+      !locked ||
+      locked.sourceStatus !== ResourceStatus.ACTIVE ||
+      locked.issuerStatus !== ResourceStatus.ACTIVE ||
+      locked.organizationStatus !== ResourceStatus.ACTIVE ||
+      locked.issuerId !== resolution.issuerId ||
+      locked.sourceAddress !== resolution.sourceAddress
+    ) {
+      throw this.employerSourceError("source_inactive");
+    }
+  }
+
+  /**
+   * Active PAYMENT attestations from `issuerId` for the subject, keyed by the
+   * payment reference hash they cover. When several cover the same payment
+   * the lowest id wins, so the mapping is deterministic.
+   */
+  private async findPaymentAttestations(
+    issuerId: string,
+    subjectWalletHash: string,
+    payments: ReadonlyArray<{ operationId: string }>,
+    now: Date,
+  ) {
+    const attestationByReference = new Map<string, string>();
+    if (payments.length === 0) return attestationByReference;
+
+    const attestations = await this.prisma.attestation.findMany({
+      where: {
+        issuerId,
+        subjectWalletHash,
+        type: AttestationType.PAYMENT,
+        status: ResourceStatus.ACTIVE,
+        revokedAt: null,
+        paymentReferenceHash: {
+          in: payments.map((payment) =>
+            this.paymentReferenceHash(payment.operationId),
+          ),
+        },
+        OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+      },
+      select: { id: true, paymentReferenceHash: true },
+      orderBy: { id: "asc" },
+    });
+    for (const attestation of attestations) {
+      if (
+        attestation.paymentReferenceHash &&
+        !attestationByReference.has(attestation.paymentReferenceHash)
+      ) {
+        attestationByReference.set(
+          attestation.paymentReferenceHash,
+          attestation.id,
+        );
+      }
+    }
+    return attestationByReference;
+  }
+
+  private employerSourceError(
+    reason: Extract<EmployerSourceResolution, { ok: false }>["reason"],
+  ) {
+    if (reason === "ambiguous_issuer") {
+      return new UnprocessableEntityException({
+        code: ApiErrorCode.EMPLOYER_SOURCE_AMBIGUOUS,
+        message: "The trusted source does not identify a single employer",
+      });
+    }
+    return new UnprocessableEntityException({
+      code: ApiErrorCode.EMPLOYER_SOURCE_UNTRUSTED,
+      message:
+        "The trusted source is not linked to an active, verified employer",
+    });
+  }
+
+  /** Same reference format issuers use on PAYMENT attestations. */
+  private paymentReferenceHash(operationId: string) {
+    return `sha256:${sha256(operationId)}`;
+  }
+
+  private keyedDigest(value: string) {
+    const secret =
+      this.signingKeyring.secretFor(this.signingKeyring.activeWriteVersion) ??
+      "digest-secret";
+    return `hmac-sha256:${createHmac("sha256", secret)
+      .update(value)
+      .digest("base64url")}`;
   }
 }

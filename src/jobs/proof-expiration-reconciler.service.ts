@@ -164,11 +164,10 @@ export class ProofExpirationReconcilerService implements OnApplicationShutdown {
       return 0;
     }
 
-    // Transition all found proofs to EXPIRED in a single transaction.
-    // Use updateMany for efficiency — no need to update timestamps individually.
+    const expiredIds = expiredProofs.map((p) => p.id);
     const result = await this.prisma.proof.updateMany({
       where: {
-        id: { in: expiredProofs.map((p) => p.id) },
+        id: { in: expiredIds },
         status: ProofStatus.ACTIVE, // Belt-and-suspenders: ensure still ACTIVE
       },
       data: {
@@ -176,6 +175,21 @@ export class ProofExpirationReconcilerService implements OnApplicationShutdown {
         // updatedAt is handled by @updatedAt in schema
       },
     });
+
+    // Status transition: cancel pending reminders for expired proofs
+    if (this.prisma.proofExpirationReminderDelivery) {
+      await this.prisma.proofExpirationReminderDelivery.updateMany({
+        where: {
+          proofId: { in: expiredIds },
+          status: { in: ["SCHEDULED", "ENQUEUED"] },
+        },
+        data: {
+          status: "CANCELLED",
+          cancelledAt: now,
+          cancellationReason: "Proof expired during reconciliation",
+        },
+      });
+    }
 
     return result.count;
   }

@@ -261,5 +261,5 @@ export class DisputeStatsResponseDto {
       RESOLVED: { ACCURACY: 15, FRAUD: 8, TECHNICAL: 3 },
     },
   })
-  [status: string]: Record<string, number>;
+  counts!: Record<string, Record<string, number>>;
 }

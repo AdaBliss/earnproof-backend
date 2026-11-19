@@ -15,6 +15,8 @@ import { UpdateWebhookEventsDto } from "./dto/update-webhook-events.dto";
 import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { WebhookDeliveryService } from "./webhook-delivery.service";
 import { WebhookCircuitBreakerService } from "./webhook-circuit-breaker.service";
+import { SecretRetrievalReceiptService } from "../audit/secret-retrieval-receipt.service";
+import { SecretType, DeliveryChannel } from "../audit/types/secret-retrieval-receipt.types";
 
 /** Signing secret length in bytes (produces a 64-char hex string). */
 const SECRET_BYTES = 32;
@@ -29,6 +31,7 @@ export class WebhooksService {
     private readonly circuitBreaker: WebhookCircuitBreakerService,
     configService: ConfigService,
     private readonly quotas: OrganizationQuotaService,
+    private readonly secretRetrievalReceiptService: SecretRetrievalReceiptService,
   ) {
     this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
       configService,
@@ -48,47 +51,63 @@ export class WebhooksService {
     // De-duplicate events list
     const events = [...new Set(dto.events)];
 
-    // Quota check and creation commit together; see OrganizationQuotaService.
+    // Quota check, creation, receipt, and circuit breaker initialization together
     const webhook = await this.prisma.$transaction(async (tx) => {
       await this.quotas.assertCapacity(tx, organizationId, "webhooks");
-      return tx.webhook.create({
+
+      const created = await tx.webhook.create({
         data: {
           organizationId,
           url: dto.url,
           secretEncrypted,
           events,
-          payloadVersion: dto.payloadVersion ?? CURRENT_WEBHOOK_PAYLOAD_VERSION,
           status: ResourceStatus.ACTIVE,
+          revision: 0,
         },
         select: {
           id: true,
           url: true,
           events: true,
-          payloadVersion: true,
           status: true,
+          revision: true,
           createdAt: true,
         },
       });
-    const webhook = await this.prisma.webhook.create({
-      data: {
-        organizationId,
-        url: dto.url,
-        secretEncrypted,
-        events,
-        status: ResourceStatus.ACTIVE,
-        revision: 0,
-      },
-      select: {
-        id: true,
-        url: true,
-        events: true,
-        status: true,
-        revision: true,
-        createdAt: true,
-      },
+
+      // Create receipt: immutable evidence that signing secret was revealed
+      const receipt = await this.secretRetrievalReceiptService.create(
+        {
+          organizationId,
+          secretType: SecretType.WEBHOOK,
+          resourceId: created.id,
+          resourceReference: dto.url,
+          recipientId: undefined, // webhook creation typically not attributed to a user
+          deliveryChannel: DeliveryChannel.HTTP_RESPONSE,
+          revealedAt: new Date(),
+        },
+        tx,
+      );
+
+      // Audit log: webhook created
+      await tx.auditLog.create({
+        data: {
+          actorType: "user",
+          action: "webhook.created",
+          resourceType: "webhook",
+          resourceId: created.id,
+          organizationId,
+          metadata: {
+            url: dto.url,
+            events,
+            receiptId: receipt.id,
+          },
+        },
+      });
+
+      return created;
     });
 
-    // Initialize circuit breaker for new webhook
+    // Initialize circuit breaker for new webhook (outside transaction for idempotency)
     await this.circuitBreaker.initializeCircuit(webhook.id);
 
     return {
@@ -150,12 +169,44 @@ export class WebhooksService {
     const newRawSecret = randomBytes(SECRET_BYTES).toString("hex");
     const newSecretEncrypted = this.paymentEncryptionKeyring.encrypt(newRawSecret);
 
-    await this.prisma.webhook.update({
-      where: { id: webhookId },
-      data: {
-        secretEncrypted: newSecretEncrypted,
-        revision: webhook.revision + 1,
-      },
+    // Update webhook and create receipt atomically
+    await this.prisma.$transaction(async (tx) => {
+      await tx.webhook.update({
+        where: { id: webhookId },
+        data: {
+          secretEncrypted: newSecretEncrypted,
+          revision: webhook.revision + 1,
+        },
+      });
+
+      // Create receipt: immutable evidence that new signing secret was revealed
+      const receipt = await this.secretRetrievalReceiptService.create(
+        {
+          organizationId,
+          secretType: SecretType.WEBHOOK,
+          resourceId: webhookId,
+          resourceReference: webhook.url,
+          recipientId: undefined,
+          deliveryChannel: DeliveryChannel.HTTP_RESPONSE,
+          revealedAt: new Date(),
+        },
+        tx,
+      );
+
+      // Audit log: webhook secret rotated
+      await tx.auditLog.create({
+        data: {
+          actorType: "user",
+          action: "webhook.rotated",
+          resourceType: "webhook",
+          resourceId: webhookId,
+          organizationId,
+          metadata: {
+            url: webhook.url,
+            receiptId: receipt.id,
+          },
+        },
+      });
     });
 
     return {

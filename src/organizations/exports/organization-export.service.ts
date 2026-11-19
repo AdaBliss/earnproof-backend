@@ -21,6 +21,8 @@ import {
   EXPORT_ARTIFACT_STORE,
   ExportArtifactStore,
 } from "./export-artifact-store";
+import { SecretRetrievalReceiptService } from "../../audit/secret-retrieval-receipt.service";
+import { SecretType, DeliveryChannel } from "../../audit/types/secret-retrieval-receipt.types";
 
 /**
  * Orchestrates asynchronous organization data exports.
@@ -46,6 +48,7 @@ export class OrganizationExportService {
     private readonly config: ConfigService,
     @Inject(EXPORT_ARTIFACT_STORE)
     private readonly artifacts: ExportArtifactStore,
+    private readonly secretRetrievalReceiptService: SecretRetrievalReceiptService,
   ) {}
 
   /**
@@ -184,13 +187,43 @@ export class OrganizationExportService {
     const token = randomBytes(32).toString("base64url");
     const downloadExpiresAt = new Date(Date.now() + this.downloadTtlMs());
 
-    await this.prisma.organizationExportJob.update({
-      where: { id: exportId },
-      data: { downloadTokenHash: sha256(token), downloadExpiresAt },
-    });
+    // Update job and create receipt atomically
+    await this.prisma.$transaction(async (tx) => {
+      await tx.organizationExportJob.update({
+        where: { id: exportId },
+        data: { downloadTokenHash: sha256(token), downloadExpiresAt },
+      });
 
-    await this.audit(user, "EXPORT_DOWNLOAD_ISSUED", organizationId, exportId, {
-      digest: job.archiveDigest ?? null,
+      // Create receipt: immutable evidence that export download token was issued
+      const receipt = await this.secretRetrievalReceiptService.create(
+        {
+          organizationId,
+          secretType: SecretType.EXPORT,
+          resourceId: exportId,
+          resourceReference: `export-${job.categories.join(",")}`,
+          recipientId: user.id,
+          deliveryChannel: DeliveryChannel.DOWNLOAD_URL,
+          revealedAt: new Date(),
+          expiresAt: downloadExpiresAt, // receipt expires when token expires
+        },
+        tx,
+      );
+
+      // Audit log: export download token issued
+      await tx.auditLog.create({
+        data: {
+          actorType: "user",
+          actorId: user.id,
+          action: "export_download.issued",
+          resourceType: "export",
+          resourceId: exportId,
+          organizationId,
+          metadata: {
+            digest: job.archiveDigest ?? null,
+            receiptId: receipt.id,
+          },
+        },
+      });
     });
 
     return { token, expiresAt: downloadExpiresAt };
@@ -233,9 +266,36 @@ export class OrganizationExportService {
     }
 
     // Single use: spend the token so it cannot be replayed.
-    await this.prisma.organizationExportJob.update({
-      where: { id: job.id },
-      data: { downloadTokenHash: null, downloadExpiresAt: null },
+    // Also mark receipt as consumed/expired.
+    await this.prisma.$transaction(async (tx) => {
+      await tx.organizationExportJob.update({
+        where: { id: job.id },
+        data: { downloadTokenHash: null, downloadExpiresAt: null },
+      });
+
+      // Find and expire the receipt for this download token
+      const receipts = await tx.secretRetrievalReceipt.findMany({
+        where: {
+          organizationId: job.organizationId,
+          secretType: SecretType.EXPORT,
+          resourceId: job.id,
+        },
+        orderBy: { revealedAt: "desc" },
+        take: 1,
+      });
+
+      if (receipts.length > 0) {
+        await tx.secretRetrievalReceipt.update({
+          where: { id: receipts[0].id },
+          data: {
+            status: "EXPIRED",
+            metadata: {
+              ...receipts[0].metadata,
+              consumedAt: new Date().toISOString(),
+            },
+          },
+        });
+      }
     });
 
     return {

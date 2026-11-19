@@ -163,6 +163,9 @@ enum ApiKeyScope {
   PROOF_READ
   PROOF_VERIFY
 
+  // Offline bundles (bounded offline verification)
+  BUNDLES_CREATE
+
   // Payment management and reading
   PAYMENT_READ
   PAYMENT_WRITE
@@ -221,6 +224,40 @@ enum PolicyStatus {
 enum ConsentAction {
   ACCEPT
   WITHDRAW
+}
+
+/// Verification failure codes for contract state checkpoint digest comparisons.
+/// Fail-closed: unknown versions, network/contract mismatches, and staleness failures
+/// prevent comparison and are recorded as verification failures, never as mismatches.
+enum ContractStateVerificationFailureCode {
+  /// Digest version in response not recognized by backend.
+  UNKNOWN_VERSION
+  /// Digest network claim does not match expected network.
+  NETWORK_MISMATCH
+  /// Digest contract ID does not match expected contract ID.
+  CONTRACT_MISMATCH
+  /// RPC request exceeded timeout (5 seconds) or failed with transient error.
+  FETCH_TIMEOUT
+  /// Transient RPC error (classified via HorizonFault): rate_limited, server_error, network_error.
+  RPC_TRANSIENT_ERROR
+  /// Permanent RPC error: malformed request, connection refused, etc.
+  RPC_PERMANENT_ERROR
+  /// Response could not be JSON-decoded or is malformed.
+  PARSE_ERROR
+  /// Checkpoint digest is stale (older than configured threshold, e.g., > 1 hour).
+  STALE_CONTRACT_STATE
+}
+
+/// Comparison result status codes.
+enum ContractStateComparisonStatus {
+  /// All components match between backend projection and live contract.
+  MATCH
+  /// One or more component values differ.
+  MISMATCH
+  /// Backend projection is newer than contract checkpoint (stale contract).
+  STALE_PROJECTION
+}
+
 model ApiKey {
   id           String   @id @default(uuid())
   key          String   @unique
@@ -1647,6 +1684,7 @@ model Organization {
   members     OrganizationMember[]
   idempotencyRecords IdempotencyRecord[]
   disputes    ProofDispute[]
+  secretRetrievalReceipts SecretRetrievalReceipt[]
 
   @@index([status])
 }
@@ -1678,5 +1716,199 @@ model Proof {
   @@index([userId, status])
   @@index([userId, createdAt, id])
   @@index([proofType])
+  @@index([expiresAt])
+}
+
+/// One-time secret retrieval receipts.
+/// Persists immutable evidence that a one-time secret (API key, webhook signing secret,
+/// or export token) was revealed to a user or client, without storing the secret itself.
+///
+/// Design:
+/// - secretType: Type of secret revealed (api_key | webhook | export)
+/// - resourceId: ID of the resource (API key ID, webhook ID, export job ID)
+/// - resourceReference: Human-readable identifier (e.g., API key prefix, webhook URL) for user reference
+/// - recipientId: Who received the secret (user ID, API key prefix, or null for capability URLs)
+/// - deliveryChannel: How the secret was delivered (http_response | download_url | email)
+/// - revealedAt: Exact timestamp when the secret was revealed
+/// - acknowledgementHash: SHA-256(resourceId | secretType | revealedAt | orgSalt)
+///   This hash cannot be reversed to recover the secret; it's purely evidence of revelation
+/// - status: Lifecycle status (ACTIVE | EXPIRED | REVOKED)
+/// - expiresAt: When the receipt itself expires (independent of secret expiry)
+/// - metadata: JSON for optional context (IP, user agent, reason, etc.)
+/// - hash/hashVersion/prevHash: Audit chain fields (like AuditLog pattern)
+///
+/// Atomicity:
+/// - Receipt creation always occurs in the same transaction as secret creation
+/// - Successful secret reveal → successful receipt creation (or entire transaction fails)
+model SecretRetrievalReceipt {
+  id                  String        @id @default(cuid())
+  organizationId      String
+  organization        Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  secretType          String        // api_key | webhook | export
+  resourceId          String
+  resourceReference   String?       // prefix, URL, or category summary for user reference
+  recipientId         String?       // user ID, API key prefix, or null for capability URLs
+  deliveryChannel     String        @default("http_response")  // http_response | download_url | email
+  revealedAt          DateTime
+  acknowledgementHash String        // SHA-256(resourceId | secretType | revealedAt | orgSalt)
+  status              String        @default("ACTIVE")  // ACTIVE | EXPIRED | REVOKED
+  expiresAt           DateTime?     // when the receipt expires (independent of secret expiry)
+  metadata            Json          @default("{}")  // optional context: IP, user agent, reason, etc.
+  hashVersion         Int           @default(1)  // for audit chain compatibility
+  prevHash            String?       // previous hash in audit chain
+  hash                String        // SHA-256 of this receipt's state
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  // Unique constraint to prevent duplicate receipts for the same secret revelation
+  @@unique([organizationId, resourceId, secretType, revealedAt])
+  
+  // Indexes for common query patterns
+  @@index([organizationId, secretType, resourceId])
+  @@index([organizationId, status, expiresAt])
+  @@index([organizationId, createdAt])
+}
+
+enum RevocationCheckpointStatus {
+  ACCEPTED
+  QUARANTINED
+}
+
+enum RevocationCheckpointQuarantineReason {
+  LOWER_SEQUENCE
+  SEQUENCE_CONFLICT
+  STALE_OBSERVED_TIME
+  MALFORMED_INPUT
+  ALGORITHM_UNKNOWN
+  WRONG_CONTRACT_ID
+  WRONG_LEDGER
+  REPLAY_DUPLICATE
+}
+
+/// Indexed revocation checkpoints with monotonic enforcement.
+/// Checkpoints commit to a revocation root at a specific sequence per (ledger, contractIdentity, algorithm) stream.
+/// 
+/// Design:
+/// - ledger: Chain identifier (e.g., "stellar", "ethereum")
+/// - contractIdentity: Contract address or identifier
+/// - algorithm: Root computation algorithm (e.g., "sha256", "merkle-tree-v1")
+/// - sequence: Monotonically increasing position in the stream
+/// - root: Hex-encoded commitment root
+/// - observedAt: Timestamp when checkpoint was observed on-chain
+/// - status: ACCEPTED (head advancing) or QUARANTINED (regressed or conflict)
+/// - quarantineReason: Enum reason if quarantined
+/// - quarantineDetails: Bounded message (e.g., "lower by 5 sequences")
+/// - acceptedAt/quarantinedAt: Timestamps for lifecycle tracking
+///
+/// Monotonicity enforcement:
+/// - (ledger, contractIdentity, algorithm, sequence, root) unique constraint ensures idempotency
+/// - Concurrent writers safe via PostgreSQL unique constraint (mutual exclusion)
+/// - Sequence must strictly increase or replay must be identical (same sequence + root)
+///
+/// Quarantine semantics:
+/// - Regressed roots (lower sequence or same sequence, different root) are quarantined
+/// - Quarantined checkpoints never advance the accepted head
+/// - Quarantine persisted for audit and operator review
+model RevocationCheckpoint {
+  id                      String                                  @id @default(cuid())
+  ledger                  String                                  // "stellar", "ethereum", etc.
+  contractIdentity        String                                  // Contract address
+  algorithm               String                                  // "sha256", "merkle-tree-v1", etc.
+  sequence                BigInt                                  // Monotonically increasing per stream
+  root                    String                                  // Hex-encoded commitment root
+  observedAt              DateTime                                // Timestamp when observed on-chain
+  status                  RevocationCheckpointStatus              @default(ACCEPTED)
+  acceptedAt              DateTime                                @default(now())
+  quarantineReason        RevocationCheckpointQuarantineReason?
+  quarantineDetails       String?                                 // Bounded message for diagnostics
+  quarantinedAt           DateTime?
+  createdAt               DateTime                                @default(now())
+  updatedAt               DateTime                                @updatedAt
+
+  // Idempotency constraint: prevents duplicate acceptance of same checkpoint
+  @@unique([ledger, contractIdentity, algorithm, sequence, root], name: "checkpoint_idempotency")
+  // Query index for stream head lookups
+  @@index([ledger, contractIdentity, algorithm, status, sequence], name: "stream_head_query")
+  @@index([status, quarantineReason])
+  @@index([observedAt])
+}
+
+/// Denormalized stream head for O(1) freshness queries.
+/// Tracks the latest accepted checkpoint per (ledger, contractIdentity, algorithm) stream.
+/// Updated atomically when a new checkpoint advances the stream.
+///
+/// Design:
+/// - (ledger, contractIdentity, algorithm) uniquely identifies a stream
+/// - sequence, root, observedAt always point to the current accepted head
+/// - version supports optimistic locking if needed in future
+/// - acceptedAt tracks freshness (staleness = now - acceptedAt)
+model RevocationCheckpointStreamHead {
+  id                    String    @id @default(cuid())
+  ledger                String    // "stellar", "ethereum", etc.
+  contractIdentity      String    // Contract address
+  algorithm             String    // "sha256", "merkle-tree-v1", etc.
+  sequence              BigInt    // Current accepted head sequence
+  root                  String    // Current accepted head root
+  observedAt            DateTime  // Timestamp from head checkpoint
+  acceptedAt            DateTime  // When this head was accepted
+  version               Int       @default(0)  // Optimistic concurrency version
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  // Unique constraint on stream identity
+  @@unique([ledger, contractIdentity, algorithm], name: "stream_unique")
+  @@index([ledger, contractIdentity, algorithm, sequence])
+}
+
+/// Bounded offline verification bundles.
+/// A bundle is a time-limited, signed package containing authorized disclosures,
+/// verification keys, and revocation checkpoints enabling offline proof verification.
+///
+/// Design:
+/// - immutable after issuance (update not supported)
+/// - bundleId is user-facing, unique per organization
+/// - scope JSON encodes proofIds, operations, and permissions
+/// - contentsHash (SHA-256 of contents) bound to manifest via signature
+/// - signature covers the entire manifest (HMAC-SHA256, versioned for key rotation)
+/// - issuedAt/expiresAt define validity window; maxFreshnessSeconds bounds checkpoint age
+/// - @@unique([organizationId, bundleId]) enforces idempotency for deterministic generation
+/// - revokedAt/revocationReason for future revocation support (bundles inherit revocation from included proofs)
+model OfflineBundle {
+  id                    String   @id @default(cuid())
+  /// User-facing bundle identifier (e.g., "obb_abc123def456")
+  bundleId              String
+  organizationId        String
+  /// API key ID that requested this bundle (audit trail)
+  requestingApiKeyId    String?
+  /// Bundle format version (e.g., "earnproof.offline-bundle.v1")
+  version               String   @default("earnproof.offline-bundle.v1")
+  /// JSON: { proofIds, operations, organizationId }
+  scope                 Json
+  /// HMAC signature version identifier (e.g., "v1")
+  signatureVersion      String
+  /// Manifest signature (HMAC-SHA256, versioned, "hmac-sha256:v1=..." format)
+  signature             String
+  /// SHA-256 hash of contents object ("sha256:..." format, hex-encoded)
+  contentsHash          String
+  /// JSON contents: { credentials, verificationKeys, checkpoints }
+  contents              Json
+  /// ISO-8601 UTC timestamp when bundle was created
+  issuedAt              DateTime
+  /// ISO-8601 UTC timestamp when bundle expires (inclusive boundary: now >= expiresAt => expired)
+  expiresAt             DateTime
+  /// Maximum age in seconds for included checkpoints to be treated as current
+  maxFreshnessSeconds   Int
+  /// Optional revocation: if proof is revoked, inherited revocation timestamp
+  revokedAt             DateTime?
+  /// Optional revocation reason (if any included proof was revoked)
+  revocationReason      String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  // Idempotency: bundleId unique per organization enables same request to return same bundle
+  @@unique([organizationId, bundleId], name: "offline_bundle_idempotency")
+  // Query indexes for common operations
+  @@index([organizationId, expiresAt])
+  @@index([organizationId, createdAt])
   @@index([expiresAt])
 }

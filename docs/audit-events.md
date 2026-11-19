@@ -182,3 +182,36 @@ and only the first is expected.
    [`audit-event-matrix.spec.ts`](../src/common/audit/audit-event-matrix.spec.ts)
    that drives the real service. The coverage assertion fails until you do.
 4. Add the row to the table above. The documentation test fails until you do.
+| `secret_retrieval_receipt.created` | secret_retrieval | `audit_log` | user | success | `metadata.organizationId` | fail_closed |
+| `api_key.created` | api_key | `audit_log` | user | success | `metadata.organizationId` | fail_closed |
+| `api_key.rotated` | api_key | `audit_log` | user | success | `metadata.organizationId` | fail_closed |
+| `webhook.created` | webhook | `audit_log` | user | success | `metadata.organizationId` | fail_closed |
+| `webhook.rotated` | webhook | `audit_log` | user | success | `metadata.organizationId` | fail_closed |
+| `export_download.issued` | export | `audit_log` | user | success | `metadata.organizationId` | fail_closed |
+
+### Secret Retrieval Receipt Events
+
+**Record**: Immutable evidence that a one-time secret (API key, webhook signing secret, or export download token) was revealed to a user or client.
+
+**Event**: `secret_retrieval_receipt.created`
+
+**Metadata**:
+- `secretType`: Type of secret (`api_key` | `webhook` | `export`)
+- `resourceId`: ID of the resource (API key ID, webhook ID, export job ID)
+- `resourceReference`: Human-readable identifier (e.g., API key prefix, webhook URL, export category list)
+- `recipientId`: Who received the secret (user ID, API key prefix, or null for capability URLs)
+- `deliveryChannel`: How the secret was delivered (`http_response` | `download_url` | `email`)
+- `revealedAt`: ISO timestamp when the secret was revealed
+- `receiptId`: ID of the created receipt (cross-reference to `SecretRetrievalReceipt` table)
+- `acknowledgementHash`: SHA-256 hash of (resourceId | secretType | revealedAt | orgSalt)
+
+**Never logged**: The raw secret value, secret hash, or any reversible encoding of the secret.
+
+**Behavior**: Receipt creation is atomic with secret revelation. If secret creation fails, receipt is not created. If receipt creation fails, the entire secret creation is rolled back.
+
+**Retention**: Receipts follow the organization's retention policy (default 2 years). Receipts are immutable and cannot be updated or deleted by users, only by automated expiry.
+
+## Related Documentation
+
+- [Secret Retrieval Receipts Design](../docs/secret-retrieval-receipts.md) — Detailed explanation of receipt model, acknowledgement hash computation, and privacy guarantees.
+- [API Key Security](../docs/api-key-security.md) — API key creation and rotation with receipt tracking.

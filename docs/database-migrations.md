@@ -617,3 +617,52 @@ detailed incident response steps. Summary:
 - [Prisma migrate deploy](https://www.prisma.io/docs/cli/migrate/deploy) — apply pending migrations in production
 - [Prisma migrate resolve](https://docs.prisma.io/docs/cli/migrate/resolve) — fix migration history issues
 - [Prisma Migrate understanding](https://www.prisma.io/docs/orm/prisma-migrate/understanding-prisma-migrate) — concepts and patterns
+
+
+## Recent migrations: Issue #331
+
+### Migration: Create SecretRetrievalReceipt table
+
+**File**: `20261015000000_add_secret_retrieval_receipts`
+
+**Type**: Additive (zero-downtime expansion)
+
+**Summary**: Adds `SecretRetrievalReceipt` table to persist immutable evidence of one-time secret revelation (API keys, webhook signing secrets, export download tokens) without storing the secret values themselves.
+
+**Schema changes**:
+- New table `SecretRetrievalReceipt` with columns:
+  - `id` (primary key, cuid)
+  - `organizationId` (foreign key to `Organization`, with cascade delete)
+  - `secretType` (string: `api_key`, `webhook`, `export`)
+  - `resourceId` (ID of resource: API key ID, webhook ID, export job ID)
+  - `resourceReference` (nullable string for user-friendly reference: prefix, URL, category)
+  - `recipientId` (nullable string: who received the secret)
+  - `deliveryChannel` (string, default `http_response`: `http_response`, `download_url`, `email`)
+  - `revealedAt` (timestamp: when secret was revealed)
+  - `acknowledgementHash` (string: SHA-256 hash proving revelation)
+  - `status` (string, default `ACTIVE`: `ACTIVE`, `EXPIRED`, `REVOKED`)
+  - `expiresAt` (nullable timestamp: when receipt expires)
+  - `metadata` (JSONB, default `{}`: optional context)
+  - `hash`, `hashVersion`, `prevHash` (audit chain fields for cryptographic integrity)
+  - `createdAt`, `updatedAt` (timestamps)
+
+**Indexes**:
+  - Unique: `(organizationId, resourceId, secretType, revealedAt)` — prevents duplicate receipts
+  - Composite: `(organizationId, secretType, resourceId)` — org + secret type queries
+  - Composite: `(organizationId, status, expiresAt)` — expiry cleanup queries
+  - Composite: `(organizationId, createdAt)` — timeline queries
+
+**Backward compatibility**: None needed; this is a new table. Existing code paths are unaffected.
+
+**Rollback**: Drop the table and remove the Prisma model from schema (one-line rollback):
+```sql
+DROP TABLE IF EXISTS "SecretRetrievalReceipt" CASCADE;
+```
+
+**Data retention policy**: Receipts follow the organization's retention policy (default 2 years). No PII is stored in receipts; only non-sensitive resource identifiers and metadata.
+
+**Testing notes**:
+- Receipt creation is atomic with secret creation (same transaction).
+- Acknowledgement hash is deterministic and cannot be reversed to recover the secret.
+- Unique constraint prevents accidental duplicate receipts from concurrent requests.
+- Receipts are immutable after creation (no updates except status and metadata on consumption).

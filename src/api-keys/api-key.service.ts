@@ -10,6 +10,8 @@ import { sha256 } from "../common/crypto/hash";
 import { PrismaService } from "../database/prisma.service";
 import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { ApiKeyUsageService } from "./api-key-usage.service";
+import { SecretRetrievalReceiptService } from "../audit/secret-retrieval-receipt.service";
+import { SecretType, DeliveryChannel } from "../audit/types/secret-retrieval-receipt.types";
 
 /**
  * API Key Service - Secure credential management for machine-to-machine integrations.
@@ -63,6 +65,7 @@ export class ApiKeyService {
     private readonly prisma: PrismaService,
     private readonly quotas: OrganizationQuotaService,
     private readonly apiKeyUsageService: ApiKeyUsageService,
+    private readonly secretRetrievalReceiptService: SecretRetrievalReceiptService,
   ) {}
 
   generateSecret(): { secret: string; prefix: string } {
@@ -197,8 +200,7 @@ export class ApiKeyService {
     const { secret, prefix } = this.generateSecret();
     const keyHash = this.hashSecret(secret);
 
-    // Quota check, creation, and audit commit together: a rejected request
-    // leaves no key, no scope assignment, and no audit entry.
+    // Quota check, creation, receipt, and audit commit together atomically
     const apiKey = await this.prisma.$transaction(async (tx) => {
       await this.quotas.assertCapacity(tx, input.organizationId, "api_keys");
 
@@ -227,6 +229,21 @@ export class ApiKeyService {
         },
       });
 
+      // Create receipt: immutable evidence that secret was revealed
+      const receipt = await this.secretRetrievalReceiptService.create(
+        {
+          organizationId: input.organizationId,
+          secretType: SecretType.API_KEY,
+          resourceId: created.id,
+          resourceReference: created.prefix,
+          recipientId: input.createdBy,
+          deliveryChannel: DeliveryChannel.HTTP_RESPONSE,
+          revealedAt: new Date(),
+          expiresAt: created.expiresAt, // receipt expires when key expires
+        },
+        tx,
+      );
+
       // Audit log: API key created (never log secret or hash)
       await tx.auditLog.create({
         data: {
@@ -241,35 +258,8 @@ export class ApiKeyService {
             organizationId: created.organizationId,
             scopes: created.scopeAssignments.map((sa) => sa.scope),
             expiresAt: created.expiresAt?.toISOString(),
+            receiptId: receipt.id,
           },
-    const apiKey = await this.prisma.apiKey.create({
-      data: {
-        organizationId: input.organizationId,
-        createdById: input.createdBy,
-        name: input.name,
-        prefix,
-        keyHash,
-        expiresAt: input.expiresAt,
-        scopeAssignments: input.scopes
-          ? { createMany: { data: input.scopes.map((scope) => ({ scope })) } }
-          : undefined,
-      },
-      include: { scopeAssignments: { select: { scope: true } } },
-    });
-
-    await this.prisma.auditLog.create({
-      data: {
-        actorType: "user",
-        actorId: input.createdBy,
-        action: "api_key.created",
-        resourceType: "api_key",
-        resourceId: apiKey.id,
-        metadata: {
-          prefix: apiKey.prefix,
-          name: apiKey.name,
-          organizationId: apiKey.organizationId,
-          scopes: apiKey.scopeAssignments.map((sa) => sa.scope),
-          expiresAt: apiKey.expiresAt?.toISOString(),
         },
       });
 
@@ -294,30 +284,51 @@ export class ApiKeyService {
     const { secret, prefix } = this.generateSecret();
     const keyHash = this.hashSecret(secret);
 
-    const apiKey = await this.prisma.apiKey.update({
-      where: { id: keyId, organizationId },
-      data: { prefix, keyHash, rotatedAt: new Date() },
-      include: { scopeAssignments: { select: { scope: true } } },
-    });
+    // Transaction for atomic key rotation and receipt creation
+    const apiKey = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.apiKey.update({
+        where: { id: keyId, organizationId },
+        data: { prefix, keyHash, rotatedAt: new Date() },
+        include: { scopeAssignments: { select: { scope: true } } },
+      });
 
-    if (apiKey.organizationId !== organizationId) {
-      throw new ForbiddenException("Key does not belong to this organization");
-    }
+      if (updated.organizationId !== organizationId) {
+        throw new ForbiddenException("Key does not belong to this organization");
+      }
 
-    await this.prisma.auditLog.create({
-      data: {
-        actorType: "user",
-        actorId: actorId ?? null,
-        action: "api_key.rotated",
-        resourceType: "api_key",
-        resourceId: apiKey.id,
-        metadata: {
-          prefix: apiKey.prefix,
-          name: apiKey.name,
-          organizationId: apiKey.organizationId,
-          rotatedAt: apiKey.rotatedAt?.toISOString(),
+      // Create receipt: immutable evidence that new secret was revealed
+      const receipt = await this.secretRetrievalReceiptService.create(
+        {
+          organizationId: updated.organizationId,
+          secretType: SecretType.API_KEY,
+          resourceId: updated.id,
+          resourceReference: updated.prefix,
+          recipientId: actorId ?? undefined,
+          deliveryChannel: DeliveryChannel.HTTP_RESPONSE,
+          revealedAt: new Date(),
+          expiresAt: updated.expiresAt, // receipt expires when key expires
         },
-      },
+        tx,
+      );
+
+      // Audit log: API key rotated (never log secret or hash)
+      await tx.auditLog.create({
+        data: {
+          actorType: "user",
+          actorId: actorId ?? null,
+          action: "api_key.rotated",
+          resourceType: "api_key",
+          resourceId: updated.id,
+          metadata: {
+            prefix: updated.prefix,
+            organizationId: updated.organizationId,
+            rotatedAt: updated.rotatedAt?.toISOString(),
+            receiptId: receipt.id,
+          },
+        },
+      });
+
+      return updated;
     });
 
     return {

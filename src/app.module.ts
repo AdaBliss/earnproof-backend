@@ -27,6 +27,7 @@ import { IssuersModule } from "./issuers/issuers.module";
 import { OrganizationsModule } from "./organizations/organizations.module";
 import { PaymentsModule } from "./payments/payments.module";
 import { ProofsModule } from "./proofs/proofs.module";
+import { ReconciliationModule } from "./reconciliation/reconciliation.module";
 import { TrustedSourcesModule } from "./trusted-sources/trusted-sources.module";
 import { UsersModule } from "./users/users.module";
 import { WebhooksModule } from "./webhooks/webhooks.module";
@@ -60,6 +61,7 @@ import { SupportedAssetsModule } from "./supported-assets/supported-assets.modul
     PaymentsModule,
     ProofsModule,
     CredentialsModule,
+    ReconciliationModule,
     TrustedSourcesModule,
     UsersModule,
     JobsModule,

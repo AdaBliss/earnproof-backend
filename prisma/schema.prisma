@@ -1648,6 +1648,13 @@ model ApprovalRequest {
   /// Canonical hash of `payload`, used so callers can detect a changed
   /// request before approving it.
   payloadHash         String
+  /// Version of the canonicalization/hash scheme that produced
+  /// `payloadHash` (see `src/common/crypto/request-body-hash.ts`). Version
+  /// 1 hashes the canonical form of the payload with secret-bearing keys
+  /// stripped. Verification dispatches on this column and fails closed on
+  /// unknown versions, so the scheme can evolve without invalidating or
+  /// silently reinterpreting older rows.
+  payloadHashVersion  Int               @default(1)
   payload             Json
   requestedById       String
   status              ApprovalRequestStatus @default(PENDING)

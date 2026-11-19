@@ -95,6 +95,12 @@ class ProbeController {
     handled.count += 1;
     return { ok: true, name: body.name ?? null };
   }
+
+  @Post("credentials/verify")
+  verifyCredential(@Body() body: ProbeDto) {
+    handled.count += 1;
+    return { ok: true, name: body.name ?? null };
+  }
 }
 
 @Module({ controllers: [ProbeController], providers: [ProbeAuthGuard] })
@@ -465,6 +471,134 @@ describe("request resource limits", () => {
 
       expect(response.status).toBe(400);
       expect(response.json?.code).toBe(ApiErrorCode.INVALID_INPUT);
+    });
+  });
+
+  describe("request representation", () => {
+    it("accepts UTF-8 JSON with an explicit charset", async () => {
+      const response = await postBytes(
+        baseUrl,
+        "/api/v1/probe",
+        Buffer.from(JSON.stringify({ name: "utf8" })),
+        { "content-type": "application/json; charset=utf-8" },
+      );
+
+      expect(response.status).toBe(201);
+      expect(handled.count).toBe(1);
+    });
+
+    it("preserves URL-encoded bodies on routes that allow form input", async () => {
+      const response = await postBytes(
+        baseUrl,
+        "/api/v1/probe",
+        Buffer.from("name=form"),
+        { "content-type": "application/x-www-form-urlencoded" },
+      );
+
+      expect(response.status).toBe(201);
+      expect(handled.count).toBe(1);
+    });
+
+    it.each([
+      [
+        "unsupported media type",
+        "text/plain",
+        ApiErrorCode.INVALID_INPUT,
+        "unsupported_content_type",
+      ],
+      [
+        "conflicting media types",
+        "application/json, application/x-www-form-urlencoded",
+        ApiErrorCode.INVALID_INPUT,
+        "ambiguous_content_type",
+      ],
+      [
+        "unsupported charset",
+        "application/json; charset=utf-16",
+        ApiErrorCode.INVALID_INPUT,
+        "unsupported_charset",
+      ],
+      [
+        "duplicate charset parameters",
+        "application/json; charset=utf-8; charset=utf-16",
+        ApiErrorCode.INVALID_INPUT,
+        "ambiguous_content_type",
+      ],
+    ])(
+      "rejects %s before authorization or handler execution",
+      async (_label, contentType, code, rejection) => {
+        const response = await postBytes(
+          baseUrl,
+          "/api/v1/auth/protected/probe",
+          Buffer.from(JSON.stringify({ name: "must-not-be-read" })),
+          { "content-type": contentType },
+        );
+
+        expect(response.status).toBe(400);
+        expect(response.json?.code).toBe(code);
+        expect(response.text).not.toContain("must-not-be-read");
+        expect(guarded.count).toBe(0);
+        expect(handled.count).toBe(0);
+        expect(requestBodyRejections(metrics)).toEqual([
+          { labels: { rejection }, value: 1 },
+        ]);
+      },
+    );
+
+    it("rejects a body without Content-Type before parsing", async () => {
+      const response = await postBytes(
+        baseUrl,
+        "/api/v1/probe",
+        Buffer.from(JSON.stringify({ name: "must-not-be-read" })),
+        {},
+      );
+
+      expect(response.status).toBe(400);
+      expect(response.json?.code).toBe(ApiErrorCode.INVALID_INPUT);
+      expect(handled.count).toBe(0);
+      expect(requestBodyRejections(metrics)).toEqual([
+        { labels: { rejection: "missing_content_type" }, value: 1 },
+      ]);
+    });
+
+    it("rejects duplicate Content-Type headers before parsing", async () => {
+      const response = await postBytes(
+        baseUrl,
+        "/api/v1/probe",
+        Buffer.from(JSON.stringify({ name: "must-not-be-read" })),
+        {
+          "content-type": [
+            "application/json",
+            "application/x-www-form-urlencoded",
+          ],
+        },
+      );
+
+      expect(response.status).toBe(400);
+      expect(response.json?.code).toBe(ApiErrorCode.INVALID_INPUT);
+      expect(handled.count).toBe(0);
+      expect(requestBodyRejections(metrics)).toEqual([
+        { labels: { rejection: "ambiguous_content_type" }, value: 1 },
+      ]);
+    });
+
+    it.each([
+      "/api/v1/credentials/verify",
+      "/api/v1/security/csp-reports",
+    ])("applies the route-specific JSON-only allowlist at %s", async (path) => {
+      const response = await postBytes(
+        baseUrl,
+        path,
+        Buffer.from("name=must-not-be-read"),
+        { "content-type": "application/x-www-form-urlencoded" },
+      );
+
+      expect(response.status).toBe(400);
+      expect(response.json?.code).toBe(ApiErrorCode.INVALID_INPUT);
+      expect(handled.count).toBe(0);
+      expect(requestBodyRejections(metrics)).toEqual([
+        { labels: { rejection: "unsupported_content_type" }, value: 1 },
+      ]);
     });
   });
 

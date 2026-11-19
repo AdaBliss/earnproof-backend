@@ -102,11 +102,15 @@ export const ALLOWED_METRIC_LABELS = {
   /** Organization operational quota. Names the quota, never the tenant. */
   quota: ["api_keys", "webhooks", "proof_requests", "sync_frequency"],
 
-  /** Deterministic reason a request body crossed a transport expansion bound. */
+  /** Deterministic reason a request body was rejected at the HTTP boundary. */
   rejection: [
+    "ambiguous_content_type",
     "compressed_too_large",
     "expanded_too_large",
     "expansion_ratio_exceeded",
+    "missing_content_type",
+    "unsupported_charset",
+    "unsupported_content_type",
   ],
 } as const;
 

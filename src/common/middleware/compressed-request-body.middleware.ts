@@ -13,9 +13,18 @@ import {
 export type RequestBodyRejectionReason =
   | "compressed_too_large"
   | "expanded_too_large"
-  | "expansion_ratio_exceeded";
+  | "expansion_ratio_exceeded"
+  | "ambiguous_content_type"
+  | "missing_content_type"
+  | "unsupported_charset"
+  | "unsupported_content_type";
 
-const REJECTION_TYPES: Record<RequestBodyRejectionReason, string> = {
+type ExpansionRejectionReason = Extract<
+  RequestBodyRejectionReason,
+  "compressed_too_large" | "expanded_too_large" | "expansion_ratio_exceeded"
+>;
+
+const REJECTION_TYPES: Record<ExpansionRejectionReason, string> = {
   compressed_too_large: "request.compressed.too.large",
   expanded_too_large: "request.expanded.too.large",
   expansion_ratio_exceeded: "request.expansion.ratio.exceeded",
@@ -215,9 +224,9 @@ function isOutputLimitError(error: unknown): boolean {
 }
 
 function rejectionError(
-  reason: RequestBodyRejectionReason,
+  reason: ExpansionRejectionReason,
 ): RequestBodyLimitError {
-  const messages: Record<RequestBodyRejectionReason, string> = {
+  const messages: Record<ExpansionRejectionReason, string> = {
     compressed_too_large:
       "The compressed request exceeds the maximum permitted size.",
     expanded_too_large:

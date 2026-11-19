@@ -16,9 +16,19 @@ import {
 } from "./common/limits/request-limits";
 import { requestShapeMiddleware } from "./common/middleware/request-shape.middleware";
 import {
+  clientIpPolicyMiddleware,
+  createProxyTrustFunction,
+  type ClientIpPolicy,
+} from "./common/http/client-ip-policy";
+import { createCorsOptions } from "./common/http/cors-origin-policy";
+import {
   compressedRequestBodyMiddleware,
   requestBodyRejectionReason,
 } from "./common/middleware/compressed-request-body.middleware";
+import {
+  requestContentTypeMiddleware,
+  requestContentTypeRejectionReason,
+} from "./common/middleware/request-content-type.middleware";
 import { METRIC_NAMES } from "./common/observability/metrics.catalog";
 import { MetricsRegistry } from "./common/observability/metrics.registry";
 
@@ -35,8 +45,8 @@ import { MetricsRegistry } from "./common/observability/metrics.registry";
  * Order is load-bearing and is the reason this is one function rather than a
  * handful of calls at the call site:
  *
- * 1. **Body parsing, with limits.** Bounds compressed bytes before decoding,
- *    then bounds decoded bytes before the parsers consume them.
+ * 1. **Representation validation and body parsing, with limits.** Validates
+ *    media types and charsets first, then bounds encoded and decoded bytes.
  * 2. **Structural limits.** The first thing to look at a parsed body, before
  *    guards do database work and before class-transformer walks it.
  * 3. Security headers and CORS.
@@ -47,6 +57,8 @@ export interface AppConfiguration {
   readonly corsOrigin?: string;
   /** Production metrics registry; omitted by test applications without telemetry. */
   readonly metrics?: MetricsRegistry;
+  /** Explicitly trusted reverse-proxy hop count and peer CIDR ranges. */
+  readonly clientIpPolicy?: ClientIpPolicy;
 }
 
 export function configureApp(
@@ -54,8 +66,18 @@ export function configureApp(
   config: AppConfiguration = {},
 ): void {
   app.setGlobalPrefix("api/v1");
+  const clientIpPolicy = config.clientIpPolicy ?? {
+    proxyHops: 0,
+    trustedProxyCidrs: [],
+  };
+  app
+    .getHttpAdapter()
+    .getInstance()
+    .set("trust proxy", createProxyTrustFunction(clientIpPolicy));
+  app.use(clientIpPolicyMiddleware(clientIpPolicy));
 
   // ── Body limits ──────────────────────────────────────────────────────────
+  app.use(requestContentTypeMiddleware);
   app.use(compressedRequestBodyMiddleware);
 
   // Mounted per prefix, longest first, then a global parser. body-parser skips
@@ -81,7 +103,9 @@ export function configureApp(
       _res,
       next,
     ) => {
-      const reason = requestBodyRejectionReason(error);
+      const reason =
+        requestBodyRejectionReason(error) ??
+        requestContentTypeRejectionReason(error);
       if (reason) {
         metrics.increment(METRIC_NAMES.requestBodyRejectionsTotal, {
           rejection: reason,
@@ -104,11 +128,7 @@ export function configureApp(
   app.use(helmet());
 
   if (config.corsOrigin) {
-    app.enableCors({
-      origin: config.corsOrigin,
-      credentials: true,
-      exposedHeaders: ["x-request-id"],
-    });
+    app.enableCors(createCorsOptions(config.corsOrigin));
   }
 
   // ── Request-ID interceptor (must run before the exception filter so that

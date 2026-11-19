@@ -42,6 +42,10 @@ async function bootstrap() {
   configureApp(app, {
     corsOrigin: configService.getOrThrow<string>("appUrl"),
     metrics: app.get(MetricsRegistry),
+    clientIpPolicy: {
+      proxyHops: configService.getOrThrow<number>("trustProxyHops"),
+      trustedProxyCidrs: configService.getOrThrow<string[]>("trustedProxyCidrs"),
+    },
   });
 
   // ── Swagger / OpenAPI ────────────────────────────────────────────────────

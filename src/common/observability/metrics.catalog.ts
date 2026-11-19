@@ -78,8 +78,7 @@ export function registerCoreMetrics(registry: MetricsRegistry): void {
 
   registry.registerCounter({
     name: METRIC_NAMES.requestBodyRejectionsTotal,
-    help:
-      "Request bodies rejected by compressed, expanded, or expansion-ratio limits.",
+    help: "Request bodies rejected by representation or expansion limits.",
     labelNames: ["rejection"],
   });
 

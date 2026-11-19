@@ -88,12 +88,12 @@ Failures are included in the histogram. A latency metric that silently excludes
 errors measures the wrong population — during an incident, the failing requests
 are the interesting ones.
 
-### Request-body expansion rejections
+### Request representation and expansion rejections
 
 | | |
 |---|---|
 | **Metric** | `request_body_rejections_total{rejection}` |
-| **Purpose** | Count compressed-size, expanded-size, and expansion-ratio rejections |
+| **Purpose** | Count ambiguous/unsupported media types and charsets, plus compressed-size, expanded-size, and expansion-ratio rejections |
 | **Labels** | Closed reason vocabulary only; no route, request, or payload data |
 
 ### Horizon sync freshness

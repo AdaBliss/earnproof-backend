@@ -55,7 +55,7 @@ export function postBytes(
   baseUrl: string,
   path: string,
   body: Buffer,
-  headers: Record<string, string>,
+  headers: Record<string, string | string[]>,
 ): Promise<HttpResponse> {
   const url = new URL(path, baseUrl);
 

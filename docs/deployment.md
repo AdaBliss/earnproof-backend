@@ -102,8 +102,10 @@ Defaulted, but worth setting explicitly in production:
 |---|---|---|
 | `NODE_ENV` | `production` (set in the image) | `production` additionally requires HTTPS URLs and non-local database hosts. |
 | `PORT` | `4000` (set in the image) | The health check reads this, so changing it keeps the probe correct. |
-| `APP_URL` | `http://localhost:3000` | CORS origin. Must be `https://` in production. |
+| `APP_URL` | `http://localhost:3000` | Exact CORS origin (`scheme://host[:port]` only; no path, query, fragment, credentials, wildcard, or `null`). Must be `https://` in production. |
 | `API_URL` | `http://localhost:4000` | Advertised API URL. Must be `https://` in production. |
+| `TRUST_PROXY_HOPS` | `0` | Number (0–10) of reverse-proxy hops trusted for client IP resolution. Set to `0` unless requests arrive through a proxy. |
+| `TRUSTED_PROXY_CIDRS` | empty | Comma-separated CIDR ranges for the configured proxy peers (up to 20). Required when `TRUST_PROXY_HOPS` is greater than zero. |
 | `STELLAR_NETWORK` | `testnet` | Mainnet is not supported yet. |
 | `STELLAR_HORIZON_URL` | `https://horizon-testnet.stellar.org` | Must match the network passphrase. |
 | `STELLAR_NETWORK_PASSPHRASE` | `Test SDF Network ; September 2015` | Determines signature validation. |

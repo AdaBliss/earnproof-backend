@@ -22,6 +22,11 @@ import { UpdateWebhookUrlDto } from "./dto/update-webhook-url.dto";
 import { VerifyWebhookDto } from "./dto/verify-webhook.dto";
 import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { WebhookDeliveryService } from "./webhook-delivery.service";
+import {
+  buildDeliveryReceipt,
+  isValidReceiptId,
+  type WebhookDeliveryReceiptData,
+} from "./webhook-delivery-receipt";
 import { WebhookCircuitBreakerService } from "./webhook-circuit-breaker.service";
 import { WebhookVerificationService } from "./webhook-verification.service";
 import { PredicatePreviewService } from "./services/predicate-preview.service";
@@ -31,6 +36,28 @@ import { SecretType, DeliveryChannel } from "../audit/types/secret-retrieval-rec
 
 /** Signing secret length in bytes (produces a 64-char hex string). */
 const SECRET_BYTES = 32;
+
+/**
+ * A delivery idempotency receipt as returned by the API.
+ *
+ * The receipt identifies one delivery attempt; it carries no signing secret
+ * and no payload content (only its SHA-256), so it cannot authorize a
+ * replay or reveal another tenant's event. `source` says whether the
+ * receipt was read from its stored row (`stored`) or re-derived from the
+ * delivery row (`computed`, for deliveries created before receipts existed
+ * or whose stored write was missed — the id is identical either way).
+ * `status`/`deliveredAt` are the delivery's outcome at read time; the
+ * receipt itself is immutable.
+ */
+export interface WebhookDeliveryReceiptView
+  extends Omit<WebhookDeliveryReceiptData, "version"> {
+  /** Receipt scheme version as stored (plain string from the database). */
+  version: string;
+  source: "stored" | "computed";
+  status: string;
+  deliveredAt: Date | null;
+  createdAt: Date;
+}
 
 @Injectable()
 export class WebhooksService {
@@ -523,6 +550,10 @@ export class WebhooksService {
    * List delivery records for a webhook endpoint.
    * Response body and sensitive headers are never stored in delivery rows,
    * so this is safe to return directly.
+   *
+   * Each row also carries its versioned idempotency `receiptId`, computed
+   * from the stored row (the same id sent as `X-EarnProof-Receipt` on the
+   * attempt). `payloadBody` is read only to hash it and is never returned.
    */
   async listDeliveries(
     organizationId: string,
@@ -543,14 +574,16 @@ export class WebhooksService {
         eventType: true,
         eventId: true,
         schemaVersion: true,
+        payloadBody: true,
         attempt: true,
+        lineageId: true,
+        replayOf: true,
         status: true,
         statusCode: true,
         // responseBody stored truncated — safe to return
         responseBody: true,
         durationMs: true,
         failureReason: true,
-        replayOf: true,
         replayedBy: true,
         deliveredAt: true,
         nextRetryAt: true,
@@ -561,7 +594,171 @@ export class WebhooksService {
       },
     });
 
-    return buildPage(rows, limit, "createdAt");
+    const withReceipts = rows.map(
+      ({ payloadBody, lineageId, ...row }) => ({
+        ...row,
+        receiptId: buildDeliveryReceipt({
+          deliveryId: row.id,
+          webhookId,
+          eventId: row.eventId,
+          eventType: row.eventType,
+          payloadBody,
+          schemaVersion: row.schemaVersion,
+          attempt: row.attempt,
+          lineageId: lineageId ?? row.id,
+          replayOf: row.replayOf ?? null,
+        }).receiptId,
+      }),
+    );
+
+    return buildPage(withReceipts, limit, "createdAt");
+  }
+
+  /**
+   * The idempotency receipt for one delivery attempt.
+   *
+   * Scoped to the caller's organisation through the webhook: a delivery
+   * belonging to another organisation is reported as not found, never as
+   * forbidden, so its existence is not disclosed. Prefers the stored
+   * receipt row; falls back to re-deriving the receipt from the delivery
+   * row, which yields the identical id for deliveries created before
+   * receipts existed.
+   */
+  async getDeliveryReceipt(
+    organizationId: string,
+    webhookId: string,
+    deliveryId: string,
+  ): Promise<WebhookDeliveryReceiptView> {
+    await this.assertOwnedWebhook(organizationId, webhookId);
+
+    const delivery = await this.prisma.webhookDelivery.findUnique({
+      where: { id: deliveryId },
+      select: {
+        id: true,
+        webhookId: true,
+        eventId: true,
+        eventType: true,
+        payloadBody: true,
+        schemaVersion: true,
+        attempt: true,
+        lineageId: true,
+        replayOf: true,
+        status: true,
+        deliveredAt: true,
+        createdAt: true,
+      },
+    });
+
+    if (!delivery || delivery.webhookId !== webhookId) {
+      throw new NotFoundException("Delivery not found");
+    }
+
+    const stored = await this.prisma.webhookDeliveryReceipt.findUnique({
+      where: { deliveryId },
+      select: {
+        receiptId: true,
+        version: true,
+        webhookId: true,
+        deliveryId: true,
+        eventId: true,
+        eventType: true,
+        payloadHash: true,
+        attempt: true,
+        lineageId: true,
+        replayOf: true,
+        schemaVersion: true,
+        createdAt: true,
+      },
+    });
+
+    if (stored) {
+      return {
+        ...stored,
+        source: "stored",
+        status: delivery.status,
+        deliveredAt: delivery.deliveredAt,
+      };
+    }
+
+    return {
+      ...buildDeliveryReceipt({
+        deliveryId: delivery.id,
+        webhookId: delivery.webhookId,
+        eventId: delivery.eventId,
+        eventType: delivery.eventType,
+        payloadBody: delivery.payloadBody,
+        schemaVersion: delivery.schemaVersion,
+        attempt: delivery.attempt,
+        lineageId: delivery.lineageId ?? delivery.id,
+        replayOf: delivery.replayOf ?? null,
+      }),
+      source: "computed",
+      status: delivery.status,
+      deliveredAt: delivery.deliveredAt,
+      createdAt: delivery.createdAt,
+    };
+  }
+
+  /**
+   * Resolve a consumer-presented receipt id to its delivery attempt.
+   *
+   * Scoped to one webhook of the caller's organisation: a receipt naming
+   * another endpoint (or another tenant) is reported as not found, never
+   * as forbidden, so its existence is not disclosed. Only stored receipts
+   * resolve here — a receipt id is a one-way hash, so a delivery with no
+   * stored receipt cannot be found by id alone; use the per-delivery
+   * endpoint for those.
+   */
+  async getReceiptById(
+    organizationId: string,
+    webhookId: string,
+    receiptId: string,
+  ): Promise<WebhookDeliveryReceiptView> {
+    await this.assertOwnedWebhook(organizationId, webhookId);
+
+    if (!isValidReceiptId(receiptId)) {
+      throw new NotFoundException("Delivery receipt not found");
+    }
+
+    const stored = await this.prisma.webhookDeliveryReceipt.findUnique({
+      where: { receiptId },
+      select: {
+        receiptId: true,
+        version: true,
+        webhookId: true,
+        deliveryId: true,
+        eventId: true,
+        eventType: true,
+        payloadHash: true,
+        attempt: true,
+        lineageId: true,
+        replayOf: true,
+        schemaVersion: true,
+        createdAt: true,
+      },
+    });
+
+    if (!stored || stored.webhookId !== webhookId) {
+      throw new NotFoundException("Delivery receipt not found");
+    }
+
+    // The receipt model is relation-free, so the delivery outcome is read
+    // with a second query. A missing delivery row (never deleted in
+    // practice) is reported as not found, like a missing receipt.
+    const delivery = await this.prisma.webhookDelivery.findUnique({
+      where: { id: stored.deliveryId },
+      select: { status: true, deliveredAt: true },
+    });
+    if (!delivery) {
+      throw new NotFoundException("Delivery receipt not found");
+    }
+
+    return {
+      ...stored,
+      source: "stored",
+      status: delivery.status,
+      deliveredAt: delivery.deliveredAt,
+    };
   }
 
   // ---------------------------------------------------------------------------

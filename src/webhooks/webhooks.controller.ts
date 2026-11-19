@@ -638,6 +638,122 @@ export class WebhooksController {
     return this.webhooksService.listDeliveries(orgId, id, query);
   }
 
+  @Get(":id/deliveries/:deliveryId/receipt")
+  @ApiOperation({
+    summary: "Get the idempotency receipt for one delivery attempt",
+    description:
+      "The versioned receipt id bound to this attempt's event, endpoint, " +
+      "attempt lineage, and payload hash — the same id sent as " +
+      "`X-EarnProof-Receipt` on the attempt. Contains no signing secret " +
+      "and no payload content, so it cannot authorize a replay or reveal " +
+      "another tenant's event.",
+  })
+  @ApiParam({
+    name: "id",
+    description: "Webhook endpoint identifier.",
+    example: "ckv8v6h2b0002qzrm7t4k9xza",
+  })
+  @ApiParam({
+    name: "deliveryId",
+    description: "Delivery record identifier.",
+    example: "ckv8v6h2b0003qzrm4d8n2plq",
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Idempotency receipt for the delivery attempt.",
+    schema: {
+      example: {
+        receiptId:
+          "wr_v1_6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+        version: "1",
+        webhookId: "ckv8v6h2b0002qzrm7t4k9xza",
+        deliveryId: "ckv8v6h2b0003qzrm4d8n2plq",
+        eventId: "evt_01hxk8s3n7q9v2m4c6d8e0f2g4",
+        eventType: "proof.created",
+        payloadHash:
+          "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+        attempt: 1,
+        lineageId: "ckv8v6h2b0003qzrm4d8n2plq",
+        replayOf: null,
+        schemaVersion: "1",
+        source: "stored",
+        status: "SUCCESS",
+        deliveredAt: "2026-08-24T12:30:01.000Z",
+        createdAt: "2026-08-24T12:30:00.000Z",
+      },
+    },
+  })
+  @ApiNotFoundResponse({
+    description: "No such endpoint or delivery in the caller's organisation.",
+    type: ApiErrorDto,
+  })
+  async getDeliveryReceipt(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") id: string,
+    @Param("deliveryId") deliveryId: string,
+  ) {
+    const orgId = await this.requireOrgId(user);
+    return this.webhooksService.getDeliveryReceipt(orgId, id, deliveryId);
+  }
+
+  @Get(":id/receipts/:receiptId")
+  @ApiOperation({
+    summary: "Resolve a receipt id to its delivery attempt",
+    description:
+      "Look up a delivery attempt by the receipt id a consumer received " +
+      "in `X-EarnProof-Receipt`. A receipt naming another endpoint or " +
+      "organisation is reported as not found, so its existence is not " +
+      "disclosed.",
+  })
+  @ApiParam({
+    name: "id",
+    description: "Webhook endpoint identifier.",
+    example: "ckv8v6h2b0002qzrm7t4k9xza",
+  })
+  @ApiParam({
+    name: "receiptId",
+    description: "Versioned receipt identifier (`wr_v1_` + 64 hex chars).",
+    example:
+      "wr_v1_6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Idempotency receipt for the delivery attempt.",
+    schema: {
+      example: {
+        receiptId:
+          "wr_v1_6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+        version: "1",
+        webhookId: "ckv8v6h2b0002qzrm7t4k9xza",
+        deliveryId: "ckv8v6h2b0003qzrm4d8n2plq",
+        eventId: "evt_01hxk8s3n7q9v2m4c6d8e0f2g4",
+        eventType: "proof.created",
+        payloadHash:
+          "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+        attempt: 1,
+        lineageId: "ckv8v6h2b0003qzrm4d8n2plq",
+        replayOf: null,
+        schemaVersion: "1",
+        source: "stored",
+        status: "SUCCESS",
+        deliveredAt: "2026-08-24T12:30:01.000Z",
+        createdAt: "2026-08-24T12:30:00.000Z",
+      },
+    },
+  })
+  @ApiNotFoundResponse({
+    description: "No such receipt for this endpoint in the caller's organisation.",
+    type: ApiErrorDto,
+  })
+  async getReceiptById(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") id: string,
+    @Param("receiptId") receiptId: string,
+  ) {
+    const orgId = await this.requireOrgId(user);
+    return this.webhooksService.getReceiptById(orgId, id, receiptId);
+  }
+
   // ---------------------------------------------------------------------------
   // Circuit breaker management
   // ---------------------------------------------------------------------------

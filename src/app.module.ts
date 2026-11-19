@@ -6,6 +6,7 @@ import { AuditModule } from "./audit/audit.module";
 import { ApiKeysModule } from "./api-keys/api-keys.module";
 import { AuthModule } from "./auth/auth.module";
 import { RateLimitModule } from "./common/rate-limit/rate-limit.module";
+import { TenantBudgetModule } from "./common/limits/tenant-budget.module";
 import { configuration } from "./config/configuration";
 import { validateEnv } from "./config/env.validation";
 import { CredentialsModule } from "./credentials/credentials.module";
@@ -35,6 +36,7 @@ import { WebhooksModule } from "./webhooks/webhooks.module";
     ApiKeysModule,
     AuthModule,
     RateLimitModule,
+    TenantBudgetModule,
     HealthModule,
     OrganizationsModule,
     IssuersModule,

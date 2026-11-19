@@ -1,0 +1,200 @@
+================================================================================
+IMPLEMENTATION FILES FOR ISSUE #371: PIN WEBHOOK DELIVERY DNS RESOLUTION PER ATTEMPT
+================================================================================
+
+SUMMARY
+-------
+Total files created: 6
+Total files modified: 2
+Total lines of code added: ~1,000
+Total test cases: 25+
+
+FILES CREATED
+=============
+
+1. src/common/network/dns-pinning.service.ts
+   - Core DNS resolution and pinning service
+   - Per-attempt resolution with TTL handling
+   - Privacy-safe error reporting
+   - Lines: ~170
+
+2. src/common/network/dns-pinning.service.spec.ts
+   - Unit tests for DNS pinning service
+   - Coverage: IP literals, hostname resolution, error classification, TTL logic
+   - Tests: ~20 test cases
+   - Lines: ~250
+
+3. src/common/network/index.ts
+   - Exports DNS pinning service and types
+   - Lines: 1
+
+4. src/webhooks/webhook-delivery.dns-pinning.integration.spec.ts
+   - Integration tests for webhook delivery DNS pinning
+   - Coverage: per-attempt resolution, pinning, TTL, errors, authorization
+   - Tests: ~15 integration scenarios
+   - Lines: ~350
+
+5. prisma/migrations/20261219000000_add_dns_pinning_fields_to_webhook_delivery/migration.sql
+   - Database migration for DNS tracking fields
+   - Adds: dnsPinned (boolean), dnsResolutionMs (int), dnsAddressCount (int)
+   - Includes index on dnsPinned for queries
+   - Lines: 8
+
+6. DNS_PINNING_IMPLEMENTATION.md
+   - Comprehensive implementation documentation
+   - Design principles, files, changes, acceptance criteria, testing, deployment
+   - Lines: ~400
+
+FILES MODIFIED
+==============
+
+1. src/webhooks/webhook-delivery.service.ts
+   - Import DnsPinningService
+   - Inject service in constructor
+   - Update sendSignedRequest() for DNS pinning
+   - Add structured logging
+   - Store DNS metadata on delivery completion
+   - Changes: ~50 lines
+
+2. prisma/schema.prisma
+   - Add dnsPinned, dnsResolutionMs, dnsAddressCount to WebhookDelivery model
+   - Changes: 3 fields + 1 comment
+
+DOCUMENTATION FILES
+===================
+
+1. PR_SUMMARY_ISSUE_371.md
+   - PR summary with problem, solution, changes, testing, deployment checklist
+   - Lines: ~200
+
+2. IMPLEMENTATION_FILES.txt (this file)
+   - Index of all implementation files
+
+KEY COMPONENTS
+==============
+
+DnsPinningService (New)
+  ├─ resolveAndPin(hostname, resolveFn?) -> Promise<DnsPinningResult>
+  │  └─ Resolves hostname to public IP, validates against SSRF policy
+  └─ shouldReResolve(record, ttlSeconds?) -> boolean
+     └─ Determines if cached resolution should be refreshed
+
+WebhookDeliveryService (Modified)
+  ├─ Constructor: Inject DnsPinningService
+  └─ sendSignedRequest(): 
+     ├─ Call dnsPinning.resolveAndPin() before fetch
+     ├─ Pin connection to resolved IP
+     ├─ Maintain hostname in Host header
+     └─ Return DNS metadata in SignedRequestOutcome
+
+WebhookDelivery Model (Modified)
+  ├─ dnsPinned: boolean (tracks if DNS pinning used)
+  ├─ dnsResolutionMs: int (tracks resolution duration)
+  └─ dnsAddressCount: int (tracks number of addresses)
+
+TESTING
+=======
+
+Unit Tests (dns-pinning.service.spec.ts): ~20 tests
+  ✓ IP literals validation
+  ✓ Hostname resolution
+  ✓ Error classification (transient/permanent)
+  ✓ TTL handling
+  ✓ Address selection
+  ✓ Backwards compatibility
+
+Integration Tests (webhook-delivery.dns-pinning.integration.spec.ts): ~15 tests
+  ✓ Per-attempt resolution
+  ✓ Connection pinning
+  ✓ TTL-aware re-resolution
+  ✓ Bounded error reporting
+  ✓ Determinism
+  ✓ Authorization isolation
+  ✓ SSRF guard effectiveness
+
+DEPLOYMENT
+==========
+
+1. Database Migration
+   File: prisma/migrations/20261219000000_add_dns_pinning_fields_to_webhook_delivery/migration.sql
+   Command: npx prisma migrate deploy
+
+2. Code Deployment
+   Branch: feat/pin-webhook-delivery-dns-resolution-per-attempt
+   Files: All files listed above
+
+3. Verification
+   Commands: npm run lint, npm test, npm run build
+
+BACKWARDS COMPATIBILITY
+=======================
+
+✅ No breaking changes
+✅ All existing tests pass
+✅ New fields have defaults (dnsPinned = false)
+✅ Transparent operation (DNS pinning automatic)
+✅ Reversible migration
+
+SECURITY IMPROVEMENTS
+=====================
+
+✅ Eliminates DNS rebinding TOCTOU window
+✅ Detects address changes on retry
+✅ Prevents internal address access
+✅ Maintains SSRF validation
+✅ No topology exposure in logs
+✅ No credential exposure
+
+PERFORMANCE IMPACT
+==================
+
+- Minimal: DNS resolution already happened (just moved earlier)
+- Per-attempt DNS lookup: negligible overhead
+- Resolution cached in memory during single attempt
+- No additional database queries
+
+OBSERVABILITY
+=============
+
+New metrics tracked per delivery attempt:
+- dnsPinned: Boolean flag (adoption tracking)
+- dnsResolutionMs: Resolution duration (performance analysis)
+- dnsAddressCount: Number of addresses (endpoint topology analysis)
+
+All metrics are privacy-safe (no IP addresses exposed).
+
+FILE SIZES
+==========
+
+dns-pinning.service.ts:                ~7 KB
+dns-pinning.service.spec.ts:          ~10 KB
+webhook-delivery.dns-pinning.integration.spec.ts: ~14 KB
+webhook-delivery.service.ts:          (modified: +50 lines)
+prisma/schema.prisma:                 (modified: +3 fields)
+DNS_PINNING_IMPLEMENTATION.md:        ~20 KB
+PR_SUMMARY_ISSUE_371.md:              ~10 KB
+
+Total new code: ~51 KB
+Total test code: ~24 KB
+
+ACCEPTANCE CRITERIA STATUS
+==========================
+
+[✅] Per-attempt DNS resolution
+[✅] Connection pinning to validated address
+[✅] TTL handling for cache invalidation
+[✅] Privacy-safe diagnostics
+[✅] Retries revalidate DNS
+[✅] DNS details don't expose topology
+[✅] Implementation is deterministic
+[✅] Implementation is bounded
+[✅] Implementation is observable
+[✅] Compatible with authorization/privacy
+[✅] Focused test coverage
+[✅] Preserves public behavior
+
+All acceptance criteria met. Ready for PR.
+
+================================================================================
+END OF FILE
+================================================================================

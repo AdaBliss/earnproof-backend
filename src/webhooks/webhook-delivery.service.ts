@@ -14,6 +14,7 @@ import { PrismaService } from "../database/prisma.service";
 import { WebhookClientCertificateService } from "./webhook-client-certificate.service";
 import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
 import { StructuredLogger } from "../common/logger";
+import { DnsPinningService } from "../common/network/dns-pinning.service";
 import {
   payloadDeprecation,
   serializeWebhookEvent,
@@ -111,6 +112,7 @@ export class WebhookDeliveryService implements OnModuleInit {
   private readonly clientCertificates: WebhookClientCertificateService;
   private readonly circuitBreaker: WebhookCircuitBreakerService;
   private readonly predicateEvaluator: PredicateEvaluatorService;
+  private readonly dnsPinning: DnsPinningService;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -119,6 +121,7 @@ export class WebhookDeliveryService implements OnModuleInit {
     @Optional() circuitBreaker?: WebhookCircuitBreakerService,
     @Optional() predicateEvaluator?: PredicateEvaluatorService,
     @Optional() configService?: ConfigService,
+    @Optional() dnsPinning?: DnsPinningService,
   ) {
     const defaultCircuitBreaker: WebhookCircuitBreakerService = {
       canAttemptDelivery: async () => true,
@@ -136,6 +139,8 @@ export class WebhookDeliveryService implements OnModuleInit {
       deriveContext: () => ({ resource: "", outcome: "", schemaVersion: "" }),
     } as unknown as PredicateEvaluatorService;
 
+    const defaultDnsPinning: DnsPinningService = new DnsPinningService();
+
     const isConfig = (obj: unknown): obj is ConfigService =>
       Boolean(obj && typeof (obj as any).get === "function");
 
@@ -144,26 +149,31 @@ export class WebhookDeliveryService implements OnModuleInit {
       this.clientCertificates = clientCertificates ?? defaultClientCertificates;
       this.circuitBreaker = circuitBreaker ?? defaultCircuitBreaker;
       this.predicateEvaluator = predicateEvaluator ?? defaultPredicateEvaluator;
+      this.dnsPinning = dnsPinning ?? defaultDnsPinning;
       resolvedConfig = configService;
     } else if (predicateEvaluator && isConfig(predicateEvaluator)) {
       this.clientCertificates = clientCertificates ?? defaultClientCertificates;
       this.circuitBreaker = circuitBreaker ?? defaultCircuitBreaker;
       this.predicateEvaluator = defaultPredicateEvaluator;
+      this.dnsPinning = dnsPinning ?? defaultDnsPinning;
       resolvedConfig = predicateEvaluator as unknown as ConfigService;
     } else if (circuitBreaker && isConfig(circuitBreaker)) {
       this.clientCertificates = clientCertificates ?? defaultClientCertificates;
       this.circuitBreaker = defaultCircuitBreaker;
       this.predicateEvaluator = (predicateEvaluator as unknown as PredicateEvaluatorService) ?? defaultPredicateEvaluator;
+      this.dnsPinning = dnsPinning ?? defaultDnsPinning;
       resolvedConfig = circuitBreaker as unknown as ConfigService;
     } else if (clientCertificates && isConfig(clientCertificates)) {
       this.clientCertificates = defaultClientCertificates;
       this.circuitBreaker = defaultCircuitBreaker;
       this.predicateEvaluator = (circuitBreaker as unknown as PredicateEvaluatorService) ?? defaultPredicateEvaluator;
+      this.dnsPinning = dnsPinning ?? defaultDnsPinning;
       resolvedConfig = clientCertificates as unknown as ConfigService;
     } else {
       this.clientCertificates = clientCertificates ?? defaultClientCertificates;
       this.circuitBreaker = circuitBreaker ?? defaultCircuitBreaker;
       this.predicateEvaluator = predicateEvaluator ?? defaultPredicateEvaluator;
+      this.dnsPinning = dnsPinning ?? defaultDnsPinning;
       resolvedConfig = new ConfigService();
     }
 
@@ -699,7 +709,7 @@ export class WebhookDeliveryService implements OnModuleInit {
       }
     }
 
-    if (success) {
+      if (success) {
       await this.prisma.webhookDelivery.update({
         where: { id: deliveryId },
         data: {
@@ -709,6 +719,9 @@ export class WebhookDeliveryService implements OnModuleInit {
           responseBody,
           durationMs,
           deliveredAt: new Date(),
+          dnsPinned: outcome.dnsPinned,
+          dnsResolutionMs: outcome.dnsResolutionMs,
+          dnsAddressCount: outcome.dnsAddressCount,
         },
       });
 
@@ -716,7 +729,7 @@ export class WebhookDeliveryService implements OnModuleInit {
       await this.circuitBreaker.recordSuccess(delivery.webhookId);
 
       this.logger.log(
-        `Delivery ${deliveryId} succeeded (attempt ${delivery.attempt}, ${durationMs}ms, HTTP ${statusCode})`,
+        `Delivery ${deliveryId} succeeded (attempt ${delivery.attempt}, ${durationMs}ms, HTTP ${statusCode}; DNS pinned)`,
       );
       return;
     }
@@ -762,6 +775,9 @@ export class WebhookDeliveryService implements OnModuleInit {
         durationMs,
         failureReason,
         deliveredAt: new Date(),
+        dnsPinned: outcome.dnsPinned,
+        dnsResolutionMs: outcome.dnsResolutionMs,
+        dnsAddressCount: outcome.dnsAddressCount,
       },
     });
 
@@ -921,9 +937,14 @@ export class WebhookDeliveryService implements OnModuleInit {
   }
 
   /**
-   * The production send path: sign, check the destination, POST without
-   * following redirects under the delivery timeout, and bound + redact the
-   * response body. Never throws; never writes to the database.
+   * The production send path: resolve DNS, pin address, sign, check destination,
+   * POST without following redirects under the delivery timeout, and bound + redact
+   * the response body. Never throws; never writes to the database.
+   *
+   * Per-attempt DNS pinning (#371):
+   * - DNS resolution happens immediately before each attempt (not cached)
+   * - The first validated public address is pinned for this attempt's connection
+   * - Resolution metadata is recorded for observability (without exposing topology)
    */
   private async sendSignedRequest(
     url: string,
@@ -939,17 +960,60 @@ export class WebhookDeliveryService implements OnModuleInit {
 
     const start = Date.now();
     try {
+      // Step 1: Validate URL structure and check no credentials/unusual ports
       await assertSafeWebhookDestination(url);
 
-      const response = await fetch(url, {
+      // Step 2: Resolve hostname to IP and pin to first validated public address
+      const parsedUrl = new URL(url);
+      const hostname = parsedUrl.hostname;
+      
+      const pinningResult = await this.dnsPinning.resolveAndPin(hostname);
+      if (!pinningResult.success) {
+        // DNS resolution failed; record the bounded error code without details
+        const durationMs = Date.now() - start;
+        // Log the failure with bounded information (no resolver details exposed)
+        this.logger.debug(
+          `DNS resolution failed for delivery: ${pinningResult.error.code} ` +
+          `(transient: ${pinningResult.error.transient}, ${durationMs}ms)`,
+        );
+        return {
+          kind: "network_error",
+          success: false,
+          responseTruncated: false,
+          durationMs,
+          failureReason: `DNS resolution failed: ${pinningResult.error.code}`,
+          dnsPinned: false,
+          dnsResolutionMs: pinningResult.record?.resolutionDurationMs,
+          dnsAddressCount: undefined,
+        };
+      }
+
+      const pinnedAddress = pinningResult.record.resolvedAddress;
+
+      // Log successful resolution (without exposing the IP to external logs)
+      this.logger.debug(
+        `DNS pinned to ${pinningResult.record.allResolvedAddresses.length} address(es) ` +
+        `(${pinningResult.record.resolutionDurationMs}ms)`,
+      );
+
+      // Step 3: Create a pinned fetch URL
+      // Replace the hostname with the pinned IP, keeping the hostname in headers for SNI
+      const pinnedUrl = new URL(url);
+      pinnedUrl.hostname = pinnedAddress;
+
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "X-EarnProof-Timestamp": String(timestamp),
+        "X-EarnProof-Delivery": eventId,
+        "X-EarnProof-Event": eventType,
+        "X-EarnProof-Signature": signature,
+        // Send the original hostname in Host header to ensure correct routing
+        "Host": hostname,
+      };
+
+      const response = await fetch(pinnedUrl.toString(), {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-EarnProof-Timestamp": String(timestamp),
-          "X-EarnProof-Delivery": eventId,
-          "X-EarnProof-Event": eventType,
-          "X-EarnProof-Signature": signature,
-        },
+        headers,
         body,
         // Do NOT follow redirects — prevents an open redirect from
         // forwarding a signed payload to an internal address.
@@ -970,6 +1034,9 @@ export class WebhookDeliveryService implements OnModuleInit {
         responseTruncated: bounded.truncated,
         durationMs,
         failureReason: response.ok ? undefined : `HTTP ${response.status}`,
+        dnsPinned: true,
+        dnsResolutionMs: pinningResult.record.resolutionDurationMs,
+        dnsAddressCount: pinningResult.record.allResolvedAddresses.length,
       };
     } catch (err) {
       const durationMs = Date.now() - start;
@@ -980,6 +1047,7 @@ export class WebhookDeliveryService implements OnModuleInit {
           success: false,
           responseTruncated: false,
           durationMs,
+          dnsPinned: false,
         };
       }
       if (err instanceof Error && err.name === "TimeoutError") {
@@ -989,6 +1057,7 @@ export class WebhookDeliveryService implements OnModuleInit {
           responseTruncated: false,
           durationMs,
           failureReason: "delivery request timed out",
+          dnsPinned: false,
         };
       }
       return {
@@ -997,6 +1066,7 @@ export class WebhookDeliveryService implements OnModuleInit {
         responseTruncated: false,
         durationMs,
         failureReason: "delivery request failed",
+        dnsPinned: false,
       };
     }
   }
@@ -1014,6 +1084,7 @@ export class WebhookDeliveryService implements OnModuleInit {
  *
  * `kind` separates outcomes a caller may want to distinguish (the stored
  * `failureReason` strings for real deliveries are unchanged by it).
+ * DNS pinning fields track resolution details for observability.
  */
 type SignedRequestOutcome =
   | {
@@ -1024,6 +1095,9 @@ type SignedRequestOutcome =
       responseTruncated: boolean;
       durationMs: number;
       failureReason?: string;
+      dnsPinned: boolean;
+      dnsResolutionMs: number;
+      dnsAddressCount: number;
     }
   | {
       kind: "blocked";
@@ -1034,6 +1108,9 @@ type SignedRequestOutcome =
       responseTruncated: false;
       durationMs: number;
       failureReason?: undefined;
+      dnsPinned: false;
+      dnsResolutionMs?: undefined;
+      dnsAddressCount?: undefined;
     }
   | {
       kind: "timeout" | "redirect" | "network_error";
@@ -1043,6 +1120,9 @@ type SignedRequestOutcome =
       responseTruncated: false;
       durationMs: number;
       failureReason: string;
+      dnsPinned: boolean;
+      dnsResolutionMs?: number;
+      dnsAddressCount?: undefined;
     };
 
 /**

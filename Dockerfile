@@ -29,6 +29,12 @@
 ARG NODE_VERSION=20.11.1
 ARG ALPINE_VERSION=3.19
 
+# Release provenance. The release workflow passes the commit and the version
+# tag; a local build leaves both as "unknown" rather than inventing values,
+# so an image that claims a commit actually came from that commit.
+ARG GIT_SHA=unknown
+ARG VERSION=unknown
+
 # ── Stage 1: build ──────────────────────────────────────────────────────────
 FROM node:${NODE_VERSION}-alpine${ALPINE_VERSION} AS build
 
@@ -69,6 +75,20 @@ RUN npm ci --omit=dev && npx prisma generate && npm cache clean --force
 
 # ── Stage 3: runtime ────────────────────────────────────────────────────────
 FROM node:${NODE_VERSION}-alpine${ALPINE_VERSION} AS runtime
+
+# Re-declared so the global build args are visible in this stage: an ARG
+# declared before the first FROM is not in scope after it.
+ARG GIT_SHA=unknown
+ARG VERSION=unknown
+
+# OCI labels: where this image came from and what it claims to be. The
+# signature and provenance attestation published by the release workflow are
+# what make these claims checkable — see docs/deployment.md. Labels alone
+# prove nothing; they only name the thing the signature covers.
+LABEL org.opencontainers.image.title="earnproof-backend" \
+      org.opencontainers.image.source="https://github.com/veridatum-labs/earnproof-backend" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.version="${VERSION}"
 
 # The one native dependency the query engine needs. Nothing else is installed:
 # no shell tooling, no curl, no build chain — a smaller image is also a smaller

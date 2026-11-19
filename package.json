@@ -42,7 +42,8 @@
     "migration:safety": "ts-node scripts/migration-safety.ts",
     "webhook:receiver": "ts-node scripts/webhook-receiver/receiver.ts",
     "sbom:generate": "ts-node scripts/sbom/generate.ts",
-    "sbom:check": "ts-node scripts/sbom/check.ts"
+    "sbom:check": "ts-node scripts/sbom/check.ts",
+    "image:verify": "ts-node scripts/container-image/verify-image.ts"
   },
   "dependencies": {
     "@nestjs/cli": "^11.0.14",

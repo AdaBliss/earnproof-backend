@@ -37,9 +37,87 @@ Excluded by [`../.dockerignore`](../.dockerignore): `node_modules`, `dist`,
 file except the example. Anything copied into an image is *in* that image, and
 `.env` is the file most likely to be sitting in a working directory.
 
-## Run
+## Signed images and digest verification
+
+A version tag (`vX.Y.Z`) triggers the [release workflow](../.github/workflows/release-image.yml),
+which builds the image, pushes it to `ghcr.io/veridatum-labs/earnproof-backend`,
+and signs it before anything is published for deployment:
+
+- **Keyless signing.** Cosign signs the image digest with the workflow's
+  GitHub OIDC identity — there is no long-lived signing key to store, rotate
+  or leak. The signature is verified in the same run, and the release
+  publishes nothing if verification fails.
+- **Provenance.** The build is attested with SLSA provenance (max-mode build
+  provenance plus an SBOM), naming the source repository, the tag, the
+  workflow, and the image digest.
+- **Digest-pinned deploys.** The workflow publishes an `image-digest.txt`
+  artifact holding the single deployable reference,
+  `ghcr.io/veridatum-labs/earnproof-backend@sha256:<digest>`. Tags are never
+  trusted without the digest, and there is no `latest` tag at all.
+
+Signing credentials are unavailable to pull requests: the release workflow
+has no PR trigger, and signing runs behind the protected `release`
+environment (required reviewers) with an OIDC token minted for that job
+only. A PR can change the workflow file, but it cannot execute a signing run
+from it.
+
+### Verifying a published image
+
+Verify the signature and attestation independently of the release run before
+deploying (replace the digest with the one from the release's
+`image-digest.txt` artifact):
 
 ```bash
+IMAGE=ghcr.io/veridatum-labs/earnproof-backend
+DIGEST=sha256:<digest from the release>
+TAG=v1.2.3
+
+cosign verify \
+  --certificate-identity "https://github.com/veridatum-labs/earnproof-backend/.github/workflows/release-image.yml@refs/tags/${TAG}" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "${IMAGE}@${DIGEST}"
+
+cosign verify-attestation \
+  --type slsaprovenance \
+  --certificate-identity "https://github.com/veridatum-labs/earnproof-backend/.github/workflows/release-image.yml@refs/tags/${TAG}" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "${IMAGE}@${DIGEST}"
+```
+
+Then run the offline deploy gate, which checks the reference is
+digest-pinned to the release image in the allowed registry and repository,
+and — with a saved attestation bundle — that the provenance agrees with the
+digest. It exits non-zero on any failure, so it belongs in the deploy script
+before `docker run`:
+
+```bash
+npm run image:verify -- \
+  --reference "${IMAGE}:${TAG}@${DIGEST}" \
+  --expected-digest "${DIGEST}" \
+  --expected-tag "${TAG}"
+```
+
+The gate is policy, not cryptography: it cannot detect a forged digest, only
+a wrong one. The cosign commands above are the signature check; run both.
+A deploy that fails either check does not proceed — see
+[container image rollback](runbooks/container-image-rollback.md) for
+recovering to the last known-good signed digest.
+
+## Run
+
+Production deploys use the digest-pinned reference from the release, never a
+tag. Gate it first, then run it:
+
+```bash
+IMAGE=ghcr.io/veridatum-labs/earnproof-backend
+DIGEST=sha256:<digest from the release>
+TAG=v1.2.3
+
+npm run image:verify -- \
+  --reference "${IMAGE}:${TAG}@${DIGEST}" \
+  --expected-digest "${DIGEST}" \
+  --expected-tag "${TAG}"
+
 docker run --rm -p 4000:4000 \
   -e NODE_ENV=production \
   -e DATABASE_URL='postgresql://user:password@db.internal:5432/earnproof' \
@@ -49,7 +127,7 @@ docker run --rm -p 4000:4000 \
   -e SESSION_SECRET="$SESSION_SECRET" \
   -e CREDENTIAL_SIGNING_SECRET="$CREDENTIAL_SIGNING_SECRET" \
   -e PAYMENT_ENCRYPTION_KEY="$PAYMENT_ENCRYPTION_KEY" \
-  earnproof-api:local
+  "${IMAGE}@${DIGEST}"
 ```
 
 Then:
@@ -129,14 +207,15 @@ boots. This prevents a newly deployed Prisma client from querying a schema that
 has not been upgraded yet.
 
 Container deployments bypass npm with `CMD ["node", "dist/main.js"]`. Run
-migrations as a separate pre-deploy job from the same image so replicas do not
+migrations as a separate pre-deploy job from the same image — the same
+digest-pinned reference the deploy gate verified — so replicas do not
 race each other and a failed migration stops the rollout instead of creating a
 crash loop:
 
 ```bash
 docker run --rm \
   -e DATABASE_URL="$DATABASE_URL" \
-  earnproof-api:local \
+  "${IMAGE}@${DIGEST}" \
   npm run prisma:migrate:deploy
 ```
 
@@ -176,6 +255,9 @@ documented in [`shutdown.md`](shutdown.md).
   are excluded from the build context.
 - **Pinned base.** `node:20.11.1-alpine3.19`, matching `.nvmrc`. Rebuild and
   redeploy to pick up base-image security updates rather than floating a tag.
+- **Signed releases.** Production images are keyless-signed and
+  provenance-attested by the release workflow and deployed by digest only;
+  see [Signed images and digest verification](#signed-images-and-digest-verification).
 - **Read-only filesystem is supported.** The application writes nothing to disk:
 
   ```bash
@@ -189,3 +271,4 @@ documented in [`shutdown.md`](shutdown.md).
 - [`shutdown.md`](shutdown.md) — graceful shutdown runbook
 - [`disaster-recovery.md`](disaster-recovery.md) — backup and restore
 - [`observability.md`](observability.md) — logs and metrics
+- [`runbooks/container-image-rollback.md`](runbooks/container-image-rollback.md) — rolling back to a previous signed image digest

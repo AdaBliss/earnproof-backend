@@ -131,10 +131,21 @@ something is.
 
 | | |
 |---|---|
-| **Metrics** | `database_probes_total{dependency,health}`, `database_probe_duration_ms{dependency}` |
-| **SLI** | Probe success rate and probe latency |
-| **Objective** | 99.9% probe success; p95 probe < 50 ms |
+| **Metrics** | `database_probes_total{dependency,health}`, `database_probe_duration_ms{dependency}`, `database_transaction_retries_total{db_error_category,retry_outcome}` |
+| **SLI** | Probe success rate and probe latency; transaction retry rate |
+| **Objective** | 99.9% probe success; p95 probe < 50 ms; retried transactions < 1% of transactions |
 | **Runbook** | [database-health.md](runbooks/database-health.md) |
+
+Transactions that fail with a transient database error — a deadlock, a
+serialisation failure, a lock timeout, or a lost connection — are retried
+inside `TransactionRetryService` with bounded jittered backoff (default 3
+attempts). Each retry is counted on `database_transaction_retries_total` by
+closed failure category and outcome (`retried` / `exhausted`); a retry that
+exhausts its budget surfaces to the client as the stable 503
+`DEPENDENCY_UNAVAILABLE`, never as the underlying Postgres error. Which
+operation retried, and the redacted per-attempt detail, is a log question,
+answered by correlation ID — the metric deliberately carries no operation
+name.
 
 ### Verification outcomes
 

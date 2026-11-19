@@ -35,6 +35,7 @@ export const METRIC_NAMES = {
   // ─── Database health ────────────────────────────────────────────────────
   databaseProbesTotal: "database_probes_total",
   databaseProbeDurationMs: "database_probe_duration_ms",
+  databaseTransactionRetriesTotal: "database_transaction_retries_total",
 
   // ─── Verification outcomes ──────────────────────────────────────────────
   verificationsTotal: "verifications_total",
@@ -145,6 +146,15 @@ export function registerCoreMetrics(registry: MetricsRegistry): void {
     name: METRIC_NAMES.databaseProbeDurationMs,
     help: "Database connectivity probe duration in milliseconds.",
     labelNames: ["dependency"],
+  });
+
+  // ─── Database transaction retries ───────────────────────────────────────
+  // Labelled only by the closed failure category and the retry outcome:
+  // which operation retried is a log question, answered by correlation ID.
+  registry.registerCounter({
+    name: METRIC_NAMES.databaseTransactionRetriesTotal,
+    help: "Database transactions retried or exhausted after a transient failure, by failure category and outcome.",
+    labelNames: ["db_error_category", "retry_outcome"],
   });
 
   // ─── Verification outcomes ──────────────────────────────────────────────

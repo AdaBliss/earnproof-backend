@@ -101,6 +101,22 @@ export const ALLOWED_METRIC_LABELS = {
 
   /** Organization operational quota. Names the quota, never the tenant. */
   quota: ["api_keys", "webhooks", "proof_requests", "sync_frequency"],
+
+  /**
+   * Database failure kind behind a retried or exhausted transaction, as
+   * classified in `database-error-classification.ts`. Closed and diagnostic
+   * only — never a client-facing value.
+   */
+  db_error_category: [
+    "deadlock",
+    "serialization_failure",
+    "lock_timeout",
+    "connection",
+    "pool_timeout",
+  ],
+
+  /** Terminal outcome of one transaction retry decision. */
+  retry_outcome: ["retried", "exhausted"],
 } as const;
 
 export type MetricLabelName = keyof typeof ALLOWED_METRIC_LABELS;

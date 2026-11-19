@@ -11,6 +11,7 @@ import {
 import { Prisma } from "@prisma/client";
 import { GlobalExceptionFilter } from "./global-exception.filter";
 import { ApiErrorCode } from "../dto/api-error.dto";
+import { TransactionRetryExhaustedError } from "../../database/transaction-retry.service";
 
 // ─── Minimal mock helpers ─────────────────────────────────────────────────────
 
@@ -322,6 +323,46 @@ describe("GlobalExceptionFilter", () => {
       expect(json.mock.calls[0][0]).toMatchObject({
         code: ApiErrorCode.INTERNAL_ERROR,
       });
+    });
+  });
+
+  // ── Exhausted transaction retries ─────────────────────────────────────────
+
+  describe("transaction retry exhaustion", () => {
+    it("maps an exhausted retry → 503 DEPENDENCY_UNAVAILABLE with a stable code", () => {
+      const { host, json, status } = makeHost();
+      filter.catch(
+        new TransactionRetryExhaustedError(
+          "test-operation",
+          3,
+          "deadlock",
+          "P2034",
+          new Error("deadlock detected"),
+        ),
+        host,
+      );
+      expect(status).toHaveBeenCalledWith(HttpStatus.SERVICE_UNAVAILABLE);
+      expect(json.mock.calls[0][0]).toMatchObject({
+        code: ApiErrorCode.DEPENDENCY_UNAVAILABLE,
+      });
+    });
+
+    it("does not leak the operation name, category, or Prisma code in the response", () => {
+      const { host, json } = makeHost();
+      filter.catch(
+        new TransactionRetryExhaustedError(
+          "test-operation",
+          3,
+          "deadlock",
+          "P2034",
+          new Error("deadlock detected"),
+        ),
+        host,
+      );
+      const body = JSON.stringify(json.mock.calls[0][0]);
+      expect(body).not.toContain("test-operation");
+      expect(body).not.toContain("deadlock");
+      expect(body).not.toContain("P2034");
     });
   });
 

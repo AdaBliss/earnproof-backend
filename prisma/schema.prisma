@@ -507,6 +507,7 @@ model Organization {
   apiKeyRotations                  ApiKeyRotation[]
   apiKeyCutoverReceipts            ApiKeyCutoverReceipt[]
   invitations                      OrganizationInvitation[]
+  rlsBypassAudits                  RlsBypassAudit[]
 
   @@index([status])
   @@index([archivedAt])
@@ -1525,6 +1526,38 @@ model AuditChainCursor {
   lastSequence BigInt   @default(0)
   lastHash     String?
   updatedAt    DateTime @updatedAt
+}
+
+/// Append-only audit record for privileged row-level-security bypass use.
+///
+/// Every call to `TenantContextService.withBypassContext` writes one row
+/// here, inside the same transaction as the bypassed work, so the record
+/// commits or rolls back with the work it authorizes. There is deliberately
+/// no update or delete path: a bypass that cannot be reconstructed from this
+/// table after the fact is a bypass that should not have happened.
+///
+/// This table itself carries no row-level-security policy: it is the record
+/// of bypasses, so gating it behind the mechanism it audits would hide the
+/// audit trail from exactly the maintenance paths that need to read it. It
+/// is append-only by convention and by the absence of any service that
+/// mutates it; see docs/row-level-security.md.
+model RlsBypassAudit {
+  id             String        @id @default(cuid())
+  /// Bounded caller-supplied justification (1-256 chars, enforced by
+  /// TenantContextService). Never a secret: it is written to the audit log.
+  reason         String
+  /// Who invoked the bypass: a user id, service name, or job name
+  /// (1-128 chars, enforced by TenantContextService).
+  actor          String
+  /// Tenant the maintenance concerned, when the work was scoped to one.
+  /// Null for cross-tenant maintenance (for example a backfill).
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  createdAt      DateTime      @default(now())
+
+  @@index([createdAt])
+  @@index([actor, createdAt])
+  @@index([organizationId, createdAt])
 }
 
 model AnchoringIntent {

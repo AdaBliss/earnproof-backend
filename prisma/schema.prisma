@@ -644,6 +644,7 @@ model Issuer {
   policyCommitments       IssuerPolicyCommitment[]
   invoiceSettlements      ProofInvoiceSettlement[]
   signingKeys             IssuerSigningKey[]
+  keyCompromiseIncidents IssuerKeyCompromiseIncident[]
   credentialVerificationKeyTrustPins CredentialVerificationKeyTrustPin[]
 
   @@index([organizationId])
@@ -2627,10 +2628,76 @@ model IssuerSigningKey {
   contractSyncedAt DateTime?
   createdAt        DateTime                @default(now())
   updatedAt        DateTime                @updatedAt
+  compromiseIncidents IssuerKeyCompromiseIncident[]
 
   @@unique([issuerId, keyId])
   @@index([issuerId, state])
   @@index([commitmentHash])
+}
+
+// ---------------------------------------------------------------------------
+// Issuer Signing Key Compromise Incidents (#388)
+// ---------------------------------------------------------------------------
+
+/// Authorized incident state for a compromised issuer signing key.
+/// One incident per (issuer, key): a compromised key is terminal and can
+/// never be silently restored, so a second incident for the same key is
+/// impossible by construction. The incident is the durable, observable
+/// record of the response: which trust pins were revoked, which records
+/// were found affected, and the deterministic evidence hash produced when
+/// the incident is contained.
+enum IssuerKeyCompromiseIncidentState {
+  OPEN
+  CONTAINED
+  RESOLVED
+}
+
+model IssuerKeyCompromiseIncident {
+  id               String                             @id @default(cuid())
+  issuerId         String
+  issuer           Issuer                             @relation(fields: [issuerId], references: [id])
+  signingKeyId     String
+  signingKey       IssuerSigningKey                   @relation(fields: [signingKeyId], references: [id])
+  /// Denormalized keyId (stable public identifier of the signing key).
+  keyId            String
+  state            IssuerKeyCompromiseIncidentState   @default(OPEN)
+  /// Operator-supplied reason. Never contains key material.
+  reason           String                             @db.VarChar(1024)
+  reportedByUserId String
+  compromisedAt    DateTime
+  /// Commitment hash of the key at compromise time; the containment job
+  /// verifies it is unchanged before marking the incident contained.
+  commitmentHash   String
+  /// ACTIVE trust pins revoked as part of the response. Revoking them is
+  /// what makes the compromised key fail verification policy.
+  trustPinsRevoked Int                                @default(0)
+  /// QUARANTINED credentials already isolated under this keyId.
+  affectedQuarantines Int                             @default(0)
+  /// Proofs whose issuer policy snapshot names this keyId.
+  affectedProofs   Int                                @default(0)
+  /// True when any discovery source hit its bounded cap; counts are then
+  /// lower bounds, not exact totals.
+  discoveryTruncated Boolean                         @default(false)
+  /// Deterministic evidence fingerprint, set at containment:
+  /// "sha256:<hex>" of the canonical incident evidence document.
+  evidenceHash     String?
+  containedAt      DateTime?
+  resolvedAt       DateTime?
+  resolvedByUserId String?
+  resolutionNote   String?                            @db.VarChar(1024)
+  /// SecurityNotification row created for the issuer organization, if any.
+  notificationId   String?
+  /// Set when the key's commitment was last confirmed against the contract
+  /// (via the key reconciliation path). Null when no on-chain sync is on
+  /// record; the incident never claims a contract check it did not perform.
+  contractReconciledAt       DateTime?
+  contractReconciliationNote String?                 @db.VarChar(512)
+  createdAt        DateTime                           @default(now())
+  updatedAt        DateTime                           @updatedAt
+
+  @@unique([issuerId, keyId])
+  @@index([state, createdAt])
+  @@index([issuerId, state])
 }
 
 // ---------------------------------------------------------------------------
@@ -3067,6 +3134,7 @@ enum SecurityNotificationType {
   CIRCUIT_BREAKER_TRIPPED
   DISPUTE_FILED
   SYSTEM_SECURITY_ALERT
+  ISSUER_SIGNING_KEY_COMPROMISED
 }
 
 enum SecurityNotificationSeverity {

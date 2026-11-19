@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 import { AuthModule } from "../auth/auth.module";
 import { Clock, SystemClock } from "../common/time/clock";
 import { DatabaseModule } from "../database/database.module";
+import { NotificationsModule } from "../notifications/notifications.module";
 import { IssuerAddressRotationController } from "./issuer-address-rotation.controller";
 import { IssuerAddressRotationService } from "./issuer-address-rotation.service";
 import { AttestationsService } from "./attestations.service";
@@ -13,9 +14,10 @@ import { IssuerPolicyCommitmentsService } from "./issuer-policy-commitments.serv
 
 import { IssuerSigningKeysController } from "./issuer-signing-keys.controller";
 import { IssuerSigningKeysService } from "./issuer-signing-keys.service";
+import { IssuerKeyCompromiseResponseService } from "./issuer-key-compromise-response.service";
 
 @Module({
-  imports: [DatabaseModule, AuthModule],
+  imports: [DatabaseModule, AuthModule, NotificationsModule],
   controllers: [
     IssuersController,
     IssuerAddressRotationController,
@@ -27,6 +29,7 @@ import { IssuerSigningKeysService } from "./issuer-signing-keys.service";
     IssuerReconciliationService,
     IssuerAddressRotationService,
     IssuerSigningKeysService,
+    IssuerKeyCompromiseResponseService,
     IssuerPolicyCommitmentsService,
     AttestationsService,
     { provide: Clock, useClass: SystemClock },
@@ -36,6 +39,7 @@ import { IssuerSigningKeysService } from "./issuer-signing-keys.service";
     IssuerReconciliationService,
     IssuerAddressRotationService,
     IssuerSigningKeysService,
+    IssuerKeyCompromiseResponseService,
     IssuerPolicyCommitmentsService,
     AttestationsService,
   ],

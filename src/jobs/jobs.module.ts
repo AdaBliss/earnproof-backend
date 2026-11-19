@@ -19,6 +19,7 @@ import { JobExecutionMaintenanceJob } from "./execution/job-execution-maintenanc
 import { JobExecutionController } from "./execution/job-execution.controller";
 import { JobExecutionService } from "./execution/job-execution.service";
 import { IssuerAddressRotationJob } from "./issuer-address-rotation.job";
+import { IssuerKeyCompromiseResponseJob } from "./issuer-key-compromise-response.job";
 import { PaymentBackfillWorkerService } from "./payment-backfill-worker.service";
 import { ProofExpirationReconcilerService } from "./proof-expiration-reconciler.service";
 import { ProofSharingCleanupJob } from "./proof-sharing-cleanup.job";
@@ -60,6 +61,7 @@ import { ApiKeyExpirationJob } from "./api-key-expiration.job";
     DomainEventOutboxWorkerService,
     AnchoringReconcilerService,
     IssuerAddressRotationJob,
+    IssuerKeyCompromiseResponseJob,
     ProofExpirationReconcilerService,
     ProofSharingCleanupJob,
     DisclosureCleanupJob,

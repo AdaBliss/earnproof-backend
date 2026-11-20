@@ -507,6 +507,7 @@ model Organization {
   apiKeyRotations                  ApiKeyRotation[]
   apiKeyCutoverReceipts            ApiKeyCutoverReceipt[]
   invitations                      OrganizationInvitation[]
+  schemaReplacementAcknowledgements SchemaReplacementAcknowledgement[]
 
   @@index([status])
   @@index([archivedAt])
@@ -2771,9 +2772,102 @@ model ProtocolSchema {
   contractId         String?
   createdAt          DateTime              @default(now())
   updatedAt          DateTime              @updatedAt
+  
+  // Schema replacement notices
+  replacementNoticesAsPredecessor SchemaReplacementNotice[] @relation("SchemaReplacementPredecessor")
+  replacementNoticesAsSuccessor   SchemaReplacementNotice[] @relation("SchemaReplacementSuccessor")
 
   @@index([proofType, status])
   @@index([network, status])
+}
+
+// ---------------------------------------------------------------------------
+// Project Schema Activation Notices and Replacements (#395)
+// ---------------------------------------------------------------------------
+
+enum SchemaReplacementStatus {
+  PENDING
+  ACKNOWLEDGED
+  ACTIONED
+  SUPERSEDED
+}
+
+enum SchemaReplacementAcknowledgementStatus {
+  PENDING_ACTION
+  ACTED
+  DEFERRED
+}
+
+/// Notice of schema replacement for projects. Tracks predecessor → successor 
+/// transitions with bounded acknowledgements and audit trail.
+/// Enables operators to announce deprecations and track project adoption of replacements.
+model SchemaReplacementNotice {
+  id                       String   @id @default(cuid())
+  predecessorSchemaId      String
+  predecessorSchema        ProtocolSchema @relation("SchemaReplacementPredecessor", fields: [predecessorSchemaId], references: [id], onDelete: Restrict)
+  successorSchemaId        String
+  successorSchema          ProtocolSchema @relation("SchemaReplacementSuccessor", fields: [successorSchemaId], references: [id], onDelete: Restrict)
+  
+  /// Lifecycle: PENDING → ACKNOWLEDGED/ACTIONED → SUPERSEDED
+  status                   SchemaReplacementStatus @default(PENDING)
+  
+  /// Governance and timeline
+  initiatedBy              String
+  initiatedAt              DateTime @default(now())
+  deprecationDeadline      DateTime
+  sunsetDeadline           DateTime?
+  
+  /// Project acknowledgements of the replacement
+  acknowledgements         SchemaReplacementAcknowledgement[]
+  
+  /// Audit and metadata
+  reason                   String? /// Free-form reason for replacement
+  metadata                 Json?
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+
+  /// Unique: only one active replacement per predecessor-successor pair
+  @@unique([predecessorSchemaId, successorSchemaId, status])
+  /// Indexes for common queries
+  @@index([status, deprecationDeadline])
+  @@index([predecessorSchemaId, status])
+  @@index([successorSchemaId, status])
+  @@index([initiatedAt])
+}
+
+/// Project acknowledgement of a schema replacement notice.
+/// Bounded acknowledgements track which projects have accepted the replacement
+/// and what action they have taken.
+model SchemaReplacementAcknowledgement {
+  id             String   @id @default(cuid())
+  noticeId       String
+  notice         SchemaReplacementNotice @relation(fields: [noticeId], references: [id], onDelete: Cascade)
+  
+  /// Project/Organization acknowledging the replacement
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  /// Acknowledgement details
+  acknowledgedBy String /// Actor ID acknowledging the replacement
+  acknowledgedAt DateTime @default(now())
+  status         SchemaReplacementAcknowledgementStatus @default(PENDING_ACTION)
+  
+  /// Action tracking: what did the project do?
+  actionTaken    String? /// e.g., "MIGRATED_PROOFS", "DEPRECATED_LOCALLY", null if pending
+  actionAt       DateTime?
+  
+  /// Notes for audit trail
+  note           String?
+  
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  /// Only one acknowledgement per notice per organization
+  @@unique([noticeId, organizationId])
+  /// Indexes for queries
+  @@index([noticeId, status])
+  @@index([organizationId, status])
+  @@index([acknowledgedAt])
 }
 
 // ---------------------------------------------------------------------------

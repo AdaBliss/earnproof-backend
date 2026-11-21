@@ -17,7 +17,10 @@ import {
   AnchorProofInput,
   ContractAnchoringService,
 } from "../proofs/contract-anchoring.service";
-import { isPermanentContractError } from "../proofs/contract-error";
+import {
+  isPermanentContractError,
+  isSequenceConflict,
+} from "../proofs/contract-error";
 import {
   SEQUENCE_RECOVERY_BASE_DELAY_MS,
   SEQUENCE_RECOVERY_MAX_ATTEMPTS,
@@ -48,6 +51,9 @@ const MAX_ATTEMPTS = 10;
  * Each retry doubles the delay up to BACKOFF_CAP_MS.
  */
 const BACKOFF_BASE_MS = 30_000;
+
+/** Short retry delay after a sequence conflict that was not recovered inline. */
+const SEQUENCE_CONFLICT_RETRY_MS = 5_000;
 
 /** Maximum backoff ceiling (1 hour). */
 const BACKOFF_CAP_MS = 60 * 60_000;
@@ -120,7 +126,10 @@ function isPoisonInput(message: string): boolean {
   return POISON_INPUT_PATTERNS.some((pattern) => pattern.test(message));
 }
 
-function computeNextRetryAt(attemptCount: number): Date {
+function computeNextRetryAt(attemptCount: number, message = ""): Date {
+  if (isSequenceConflict(message)) {
+    return new Date(Date.now() + SEQUENCE_CONFLICT_RETRY_MS);
+  }
   const delayMs = Math.min(
     BACKOFF_BASE_MS * Math.pow(2, attemptCount - 1),
     BACKOFF_CAP_MS,
@@ -561,7 +570,7 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
           `Intent ${id} QUARANTINED (${quarantineReasonCode}): ${operation} for proof ${proofId} — ${safeError}`,
         );
       } else {
-        const nextRetryAt = computeNextRetryAt(newAttemptCount);
+        const nextRetryAt = computeNextRetryAt(newAttemptCount, message);
         await this.prisma.anchoringIntent.update({
           where: { id },
           data: {
@@ -590,14 +599,20 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
     const { id, proofId, operation, proof } = intent;
 
     const hold = async (reason: string): Promise<SubmitOutcome | null> => {
-      if (reason === "circuit_open") {
-        await this.releaseUnclaimed(id, operation, proofId);
+      if (reason === "circuit_open" || reason === "sequence_busy") {
+        await this.releaseUnclaimed(id, operation, proofId, reason);
         return { kind: "released" };
       }
       if (reason === "fee_refused") {
         // The contract was not touched and the intent did not fail: hold it,
         // without spending an attempt, until the fee estimate eases.
-        await this.releaseUnclaimed(id, operation, proofId, FEE_REFUSED_HOLD_MS);
+        await this.releaseUnclaimed(
+          id,
+          operation,
+          proofId,
+          "fee_refused",
+          FEE_REFUSED_HOLD_MS,
+        );
         return { kind: "released" };
       }
       return null;
@@ -618,7 +633,10 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
         // transient unless the reason is "disabled" (config issue, permanent).
         throw Object.assign(
           new Error(result.error ?? `Anchoring ${result.reason}`),
-          { permanent: result.reason === "disabled" },
+          {
+            permanent:
+              result.reason === "disabled" || result.failureKind === "permanent",
+          },
         );
       }
       return { kind: "submitted", transactionHash: result.transactionHash };
@@ -631,7 +649,10 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
       if (released) return released;
       throw Object.assign(
         new Error(result.error ?? `Revocation ${result.reason}`),
-        { permanent: result.reason === "disabled" },
+        {
+          permanent:
+            result.reason === "disabled" || result.failureKind === "permanent",
+        },
       );
     }
     return { kind: "submitted", transactionHash: result.transactionHash };
@@ -718,6 +739,7 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
     id: string,
     operation: AnchoringOperation,
     proofId: string,
+    cause: "circuit_open" | "sequence_busy" | "fee_refused" = "circuit_open",
     holdMs = 0,
   ): Promise<void> {
     await this.prisma.anchoringIntent.update({
@@ -728,7 +750,7 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
       },
     });
     this.logger.warn(
-      `Intent ${id} released unclaimed (held): ${operation} for proof ${proofId}`,
+      `Intent ${id} released unclaimed (${cause}): ${operation} for proof ${proofId}`,
     );
   }
 }

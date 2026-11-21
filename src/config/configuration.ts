@@ -1,3 +1,11 @@
+/** Parses a comma-separated list of hex hashes, dropping blanks. */
+function parseHashList(value: string | undefined): string[] {
+  return (value ?? "")
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+}
+
 /**
  * Collects PAYMENT_ENCRYPTION_KEY_V0, _V1, ... into an indexed object
  * (`{ 0: "...", 1: "..." }`) for the payment-encryption keyring service.
@@ -152,6 +160,52 @@ export const configuration = () => ({
     proofRegistryContractId: process.env.PROOF_REGISTRY_CONTRACT_ID,
     issuerAddress: process.env.EARNPROOF_ISSUER_ADDRESS,
     schemaVersion: Number(process.env.EARNPROOF_SCHEMA_VERSION ?? 1),
+    // Soroban RPC used for pre-submission simulation and the startup identity
+    // check. Unset keeps both off, so existing deployments are unchanged.
+    sorobanRpcUrl: process.env.SOROBAN_RPC_URL,
+    rpcTimeoutMs: Number(process.env.SOROBAN_RPC_TIMEOUT_MS ?? 5_000),
+    // Simulation preflight policy. Defaults sit at Soroban's per-transaction
+    // limits (100M CPU instructions, 40 MiB) and 1 XLM of resource fee.
+    simulation: {
+      enabled: process.env.CONTRACT_SIMULATION_ENABLED !== "false",
+      maxMinResourceFee: Number(
+        process.env.CONTRACT_SIMULATION_MAX_RESOURCE_FEE ?? 10_000_000,
+      ),
+      maxCpuInstructions: Number(
+        process.env.CONTRACT_SIMULATION_MAX_CPU_INSTRUCTIONS ?? 100_000_000,
+      ),
+      maxMemoryBytes: Number(
+        process.env.CONTRACT_SIMULATION_MAX_MEMORY_BYTES ?? 41_943_040,
+      ),
+    },
+    // Window, in ledgers from the current ledger, an authorization entry's
+    // expiration must fall in (both ends inclusive). 17,280 ledgers is ~1 day.
+    authExpiration: {
+      minLedgers: Number(process.env.CONTRACT_AUTH_EXPIRATION_MIN_LEDGERS ?? 2),
+      maxLedgers: Number(process.env.CONTRACT_AUTH_EXPIRATION_MAX_LEDGERS ?? 17_280),
+    },
+    // Lease on the Stellar source account; must exceed one submission attempt.
+    sequenceLease: {
+      ttlMs: Number(process.env.CONTRACT_SEQUENCE_LEASE_TTL_MS ?? 150_000),
+    },
+    // Startup/periodic network + contract identity gate (readiness).
+    identity: {
+      enabled: process.env.CONTRACT_IDENTITY_CHECK_ENABLED !== "false",
+      timeoutMs: Number(process.env.CONTRACT_IDENTITY_TIMEOUT_MS ?? 8_000),
+      recheckIntervalMs: Number(
+        process.env.CONTRACT_IDENTITY_RECHECK_INTERVAL_MS ?? 300_000,
+      ),
+      retryIntervalMs: Number(
+        process.env.CONTRACT_IDENTITY_RETRY_INTERVAL_MS ?? 10_000,
+      ),
+      // Comma-separated hex WASM hashes the deployed contracts may have.
+      proofRegistryWasmHashes: parseHashList(
+        process.env.PROOF_REGISTRY_EXPECTED_WASM_HASHES,
+      ),
+      issuerRegistryWasmHashes: parseHashList(
+        process.env.ISSUER_REGISTRY_EXPECTED_WASM_HASHES,
+      ),
+    },
     // Fee ceilings and surge policy for contract submissions (stroops).
     // Validated at startup by env.validation; see src/config/fee-policy.ts.
     fee: {

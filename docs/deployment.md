@@ -111,6 +111,7 @@ Defaulted, but worth setting explicitly in production:
 | `STELLAR_FINALITY_RECONCILIATION_MAX_PAGES` | `10` | Horizon pages one reconciliation read may walk. |
 | `CONTRACT_ANCHORING_ENABLED` | `false` | Requires the Stellar CLI, a registry contract ID and an issuer address when enabled. |
 | `CONTRACT_ANCHORING_REQUIRED` | `false` | When true, proof creation fails if on-chain registration fails. |
+| `SOROBAN_RPC_URL` | unset | Enables pre-submission simulation and the startup network/contract identity gate. See [contract anchoring preflight](contract-anchoring-preflight.md). |
 
 [`../.env.example`](../.env.example) is the complete list, including the
 rate-limiting, retention and health-probe variables that are defaulted and rarely

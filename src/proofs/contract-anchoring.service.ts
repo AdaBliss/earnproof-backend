@@ -1,6 +1,7 @@
-import { Injectable, Logger, Optional } from "@nestjs/common";
+import { Inject, Injectable, Logger, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { execFile } from "child_process";
+import { randomUUID } from "crypto";
 import { promisify } from "util";
 import { sha256 } from "../common/crypto/hash";
 import { redact } from "../common/observability/redaction";
@@ -11,7 +12,23 @@ import {
   CircuitOpenError,
   CircuitState,
 } from "../common/resilience/circuit-breaker";
-import { classifyContractError } from "./contract-error";
+import {
+  AnchorFailureKind,
+  classifyContractError,
+  classifyFailureKind,
+  ContractSubmissionError,
+} from "./contract-error";
+import { SorobanRpcClient } from "./soroban/soroban-rpc.client";
+import {
+  SequenceCoordinatorPort,
+  SequenceLease,
+  SimulationAuditPort,
+} from "./soroban/ports";
+import {
+  evaluateSimulation,
+  isPermanentRejection,
+  SimulationPolicy,
+} from "./soroban/simulation-policy";
 import {
   DEFAULT_FEE_POLICY,
   FeePolicy,
@@ -47,9 +64,22 @@ export type AnchorProofResult =
        * ran: the contract was never touched, the intent was not consumed, and
        * the worker should hold it for a later probe rather than count an
        * attempt against it.
+       *
+       * `sequence_busy` means another worker holds this source account, so
+       * nothing was built or submitted; it is released the same way.
        */
-      reason: "disabled" | "failed" | "circuit_open" | "fee_refused";
+      reason:
+        | "disabled"
+        | "failed"
+        | "circuit_open"
+        | "sequence_busy"
+        | "fee_refused";
       error?: string;
+      /**
+       * Set when `reason` is `failed` and the failure is not a plain transient
+       * one: how it should be retried. Absent means `transient`.
+       */
+      failureKind?: AnchorFailureKind;
     };
 
 export type ContractProofStatus =
@@ -76,6 +106,9 @@ export class ContractAnchoringService {
   private readonly issuerAddress: string | undefined;
   private readonly schemaVersion: number;
   private readonly registry?: CircuitBreakerRegistry;
+  private readonly rpc?: SorobanRpcClient;
+  private readonly simulationPolicy: SimulationPolicy;
+  private readonly simulationEnabled: boolean;
   private readonly feePolicy: FeePolicy;
   private readonly feeEstimator: FeeEstimator;
   private readonly breakerOptions: {
@@ -93,7 +126,16 @@ export class ContractAnchoringService {
      * under a per-network, per-operation circuit breaker (issue #203).
      */
     @Optional() registry?: CircuitBreakerRegistry,
-    /** Injected by tests; production reads Horizon `/fee_stats`. */
+    /**
+     * The three collaborators below are optional for the same reason: without
+     * them the service behaves exactly as before (no preflight, no source
+     * serialisation, no audit trail).
+     */
+    @Inject(SorobanRpcClient)
+    @Optional()
+    rpcOrFeeEstimator?: SorobanRpcClient | FeeEstimator,
+    @Optional() private readonly sequences?: SequenceCoordinatorPort,
+    @Optional() private readonly audit?: SimulationAuditPort,
     @Optional() feeEstimator?: FeeEstimator,
   ) {
     this.enabled = configService.get<boolean>("contractAnchoring.enabled") ?? false;
@@ -111,13 +153,46 @@ export class ContractAnchoringService {
     this.schemaVersion =
       configService.get<number>("contractAnchoring.schemaVersion") ?? 1;
     this.registry = registry;
+    const thirdArgumentIsFeeEstimator = Boolean(
+      rpcOrFeeEstimator &&
+        "getEstimate" in rpcOrFeeEstimator &&
+        !("simulateTransaction" in rpcOrFeeEstimator),
+    );
+    this.rpc = thirdArgumentIsFeeEstimator
+      ? undefined
+      : (rpcOrFeeEstimator as SorobanRpcClient | undefined);
+    this.simulationPolicy = {
+      maxMinResourceFee: BigInt(
+        configService.get<number>("contractAnchoring.simulation.maxMinResourceFee") ??
+          10_000_000,
+      ),
+      maxCpuInstructions: BigInt(
+        configService.get<number>("contractAnchoring.simulation.maxCpuInstructions") ??
+          100_000_000,
+      ),
+      maxMemoryBytes: BigInt(
+        configService.get<number>("contractAnchoring.simulation.maxMemoryBytes") ??
+          41_943_040,
+      ),
+      authExpiration: {
+        minLedgers:
+          configService.get<number>("contractAnchoring.authExpiration.minLedgers") ?? 2,
+        maxLedgers:
+          configService.get<number>("contractAnchoring.authExpiration.maxLedgers") ??
+          17_280,
+      },
+    };
+    this.simulationEnabled =
+      (configService.get<boolean>("contractAnchoring.simulation.enabled") ?? true) &&
+      Boolean(this.rpc?.configured);
     this.feePolicy = this.loadFeePolicy(configService);
-    // Live estimation is opt-in by configuration (on in the production
-    // config); without it the policy runs on its base fee, never a hidden call.
+    const injectedFeeEstimator = thirdArgumentIsFeeEstimator
+      ? (rpcOrFeeEstimator as FeeEstimator)
+      : feeEstimator;
     const estimateEnabled =
       configService.get<boolean>("contractAnchoring.fee.estimateEnabled") ?? false;
     this.feeEstimator =
-      feeEstimator ??
+      injectedFeeEstimator ??
       (estimateEnabled
         ? new HorizonFeeEstimator(
             configService.get<string>("stellar.horizonUrl") ??
@@ -140,11 +215,6 @@ export class ContractAnchoringService {
     };
   }
 
-  /**
-   * Reads the fee policy, falling back to defaults per field, and fails fast on
-   * an invalid combination so a bad configuration stops startup rather than the
-   * first submission.
-   */
   private loadFeePolicy(configService: ConfigService): FeePolicy {
     const read = (key: keyof FeePolicy) =>
       configService.get<number>(`contractAnchoring.fee.${key}`) ??
@@ -161,10 +231,6 @@ export class ContractAnchoringService {
     return policy;
   }
 
-  /**
-   * Applies the fee policy to one mutation. The decision is logged with a safe
-   * reason code only, so each fee is auditable without exposing keys or amounts.
-   */
   private async decideSubmissionFee(operation: string) {
     const estimate = await this.feeEstimator.getEstimate();
     const decision = decideFee(this.feePolicy, estimate);
@@ -222,62 +288,24 @@ export class ContractAnchoringService {
       };
     }
 
-    const fee = await this.decideSubmissionFee("register");
-    if (fee.action === "refuse") return this.feeRefusedResult(fee.reason);
-
-    const args = [
-      "contract",
-      "invoke",
-      "--source",
-      this.source!,
-      "--network",
-      this.network,
-      "--fee",
-      String(fee.feeStroops),
-      "--id",
-      this.proofRegistryContractId!,
-      "--",
-      "register_proof",
-      "--proof_id_hash",
-      sha256(input.proofId),
-      "--commitment_hash",
-      this.hexFromSha256(input.commitment),
-      "--issuer_address",
-      this.issuerAddress!,
-      "--schema_version",
-      String(this.schemaVersion),
-      "--expires_at",
-      String(Math.floor(input.expiresAt.getTime() / 1000)),
-    ];
-
-    try {
-      const { stdout } = await this.guarded("register", () =>
-        execFileAsync(this.stellarCliPath, args, {
-          windowsHide: true,
-          timeout: 120_000,
-        }),
-      );
-      return {
-        anchored: true,
-        transactionHash: this.lastOutputLine(stdout),
-      };
-    } catch (error) {
-      if (error instanceof CircuitOpenError) {
-        return this.circuitOpenResult("Contract anchoring");
-      }
-
-      const message = safeCliError(error);
-      if (this.required) {
-        throw new Error(message);
-      }
-
-      this.logger.warn(`Contract anchoring failed: ${message}`);
-      return {
-        anchored: false,
-        reason: "failed",
-        error: message,
-      };
-    }
+    return this.submit({
+      operation: "register",
+      functionName: "register_proof",
+      functionArgs: [
+        "--proof_id_hash",
+        sha256(input.proofId),
+        "--commitment_hash",
+        this.hexFromSha256(input.commitment),
+        "--issuer_address",
+        this.issuerAddress!,
+        "--schema_version",
+        String(this.schemaVersion),
+        "--expires_at",
+        String(Math.floor(input.expiresAt.getTime() / 1000)),
+      ],
+      proofId: input.proofId,
+      label: "Contract anchoring",
+    });
   }
 
   /**
@@ -298,6 +326,15 @@ export class ContractAnchoringService {
     return { anchored: false, reason: "circuit_open" };
   }
 
+  private feeRefusedResult(
+    reasonCode: string,
+  ): { anchored: false; reason: "fee_refused"; error: string } {
+    const message = `Contract submission refused by fee policy: ${reasonCode}`;
+    if (this.required) throw new Error(message);
+    this.logger.warn(message);
+    return { anchored: false, reason: "fee_refused", error: message };
+  }
+
   async revokeProof(proofId: string): Promise<AnchorProofResult> {
     if (!this.enabled || !this.hasRequiredConfig()) {
       return {
@@ -306,13 +343,13 @@ export class ContractAnchoringService {
       };
     }
 
-    const fee = await this.decideSubmissionFee("revoke");
-    if (fee.action === "refuse") return this.feeRefusedResult(fee.reason);
-
-    return this.invokeMutation(fee.feeStroops, "revoke_proof", [
-      "--proof_id_hash",
-      sha256(proofId),
-    ]);
+    return this.submit({
+      operation: "revoke",
+      functionName: "revoke_proof",
+      functionArgs: ["--proof_id_hash", sha256(proofId)],
+      proofId,
+      label: "Contract mutation",
+    });
   }
 
   async getProofStatus(proofId: string): Promise<ContractProofStatus> {
@@ -358,55 +395,182 @@ export class ContractAnchoringService {
   }
 
   /**
-   * A refused fee never touches the contract and is not a failure of the
-   * intent: the worker holds it and tries again once the network calms.
+   * Submits a state-changing contract call: serialise on the source account,
+   * simulate, validate, and only then sign and submit.
    */
-  private feeRefusedResult(
-    reasonCode: string,
-  ): { anchored: false; reason: "fee_refused"; error: string } {
-    const message = `Contract submission refused by fee policy: ${reasonCode}`;
-    if (this.required) throw new Error(message);
-    this.logger.warn(message);
-    return { anchored: false, reason: "fee_refused", error: message };
-  }
+  private async submit(call: {
+    operation: Exclude<ContractOperationClass, "read">;
+    functionName: string;
+    functionArgs: string[];
+    proofId: string;
+    label: string;
+  }): Promise<AnchorProofResult> {
+    const fee = await this.decideSubmissionFee(call.operation);
+    if (fee.action === "refuse") return this.feeRefusedResult(fee.reason);
 
-  private async invokeMutation(
-    feeStroops: number,
-    functionName: string,
-    functionArgs: string[],
-  ) {
+    let lease: SequenceLease | null = null;
     try {
-      const { stdout } = await this.guarded("revoke", () =>
-        execFileAsync(
-          this.stellarCliPath,
-          this.contractInvokeArgs(functionName, functionArgs, true, feeStroops),
-          {
-            windowsHide: true,
-            timeout: 120_000,
-          },
-        ),
+      if (this.sequences) {
+        lease = await this.sequences.acquire(this.source!);
+        if (!lease) {
+          this.logger.warn(`${call.label} deferred: source account is busy`);
+          if (this.required) {
+            throw new ContractSubmissionError(
+              "transient",
+              "sequence_busy",
+              `${call.label} unavailable: source account is in use by another worker`,
+              false,
+            );
+          }
+          return { anchored: false, reason: "sequence_busy" };
+        }
+      }
+
+      const transactionHash = await this.guarded(call.operation, () =>
+        this.simulateThenSubmit(call, lease, fee.feeStroops),
       );
-      return {
-        anchored: true as const,
-        transactionHash: this.lastOutputLine(stdout),
-      };
+      return { anchored: true, transactionHash };
     } catch (error) {
       if (error instanceof CircuitOpenError) {
-        return this.circuitOpenResult("Contract mutation");
+        return this.circuitOpenResult(call.label);
       }
 
       const message = safeCliError(error);
       if (this.required) {
-        throw new Error(message);
+        throw error instanceof ContractSubmissionError
+          ? error
+          : new Error(message);
       }
 
-      this.logger.warn(`Contract mutation failed: ${message}`);
+      this.logger.warn(`${call.label} failed: ${message}`);
+      const failureKind = classifyFailureKind(error);
       return {
-        anchored: false as const,
-        reason: "failed" as const,
+        anchored: false,
+        reason: "failed",
         error: message,
+        // Absent means `transient`, which keeps the result shape of ordinary
+        // failures unchanged for existing callers.
+        ...(failureKind === "transient" ? {} : { failureKind }),
       };
+    } finally {
+      if (lease) await this.sequences!.release(lease);
     }
+  }
+
+  /** The part of a submission that runs under the circuit breaker. */
+  private async simulateThenSubmit(
+    call: { functionName: string; functionArgs: string[]; proofId: string },
+    lease: SequenceLease | null,
+    feeStroops: number,
+  ): Promise<string> {
+    const correlationId = randomUUID();
+
+    // Everything up to and including the verdict happens before the signing
+    // call below, so a rejected simulation never reaches a secret.
+    await this.preflight(call, correlationId, feeStroops);
+
+    if (lease && !(await this.sequences!.renew(lease))) {
+      throw new ContractSubmissionError(
+        "transient",
+        "sequence_lease_lost",
+        "Source-account lease expired before submission; not submitting",
+        false,
+      );
+    }
+
+    this.logger.log(
+      `Submitting ${call.functionName} correlation=${correlationId}`,
+    );
+    const { stdout } = await execFileAsync(
+      this.stellarCliPath,
+      this.contractInvokeArgs(
+        call.functionName,
+        call.functionArgs,
+        true,
+        [],
+        feeStroops,
+      ),
+      { windowsHide: true, timeout: 120_000 },
+    );
+    const transactionHash = this.lastOutputLine(stdout);
+    if (this.simulationEnabled) {
+      await this.audit?.recordSubmission(correlationId, transactionHash);
+    }
+    return transactionHash;
+  }
+
+  /**
+   * Builds the transaction without signing it, simulates it on the RPC, and
+   * checks the result against policy. Throws a {@link ContractSubmissionError}
+   * for any outcome other than "approved" - including an unreachable or
+   * malformed RPC, because submitting without a verdict would defeat the
+   * preflight.
+   */
+  private async preflight(
+    call: { functionName: string; functionArgs: string[]; proofId: string },
+    correlationId: string,
+    feeStroops: number,
+  ): Promise<void> {
+    if (!this.simulationEnabled) return;
+
+    const { stdout } = await execFileAsync(
+      this.stellarCliPath,
+      this.contractInvokeArgs(call.functionName, call.functionArgs, true, [
+        "--build-only",
+      ], feeStroops),
+      { windowsHide: true, timeout: 60_000 },
+    );
+    const builtXdr = this.lastOutputLine(stdout);
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(builtXdr)) {
+      throw new ContractSubmissionError(
+        "transient",
+        "malformed_simulation",
+        "Contract preflight could not build a transaction",
+      );
+    }
+
+    let raw: unknown;
+    try {
+      raw = await this.rpc!.simulateTransaction(builtXdr);
+    } catch (error) {
+      throw new ContractSubmissionError(
+        "transient",
+        "simulation_unavailable",
+        `Contract preflight unavailable: ${
+          error instanceof Error ? error.message : "RPC failure"
+        }`,
+      );
+    }
+
+    const verdict = evaluateSimulation(raw, this.simulationPolicy);
+    const proofIdHash = sha256(call.proofId);
+    if (verdict.status === "approved") {
+      await this.audit?.recordSimulation({
+        correlationId,
+        operation: call.functionName,
+        proofIdHash,
+        outcome: "approved",
+        metrics: verdict.metrics,
+      });
+      return;
+    }
+
+    await this.audit?.recordSimulation({
+      correlationId,
+      operation: call.functionName,
+      proofIdHash,
+      outcome: "rejected",
+      reasonCode: verdict.code,
+      metrics: verdict.metrics,
+    });
+    const permanent = isPermanentRejection(verdict.code);
+    throw new ContractSubmissionError(
+      permanent ? "permanent" : "transient",
+      verdict.code,
+      `Contract simulation rejected: ${verdict.code}`,
+      // A malformed body is an RPC fault; every other rejection is an answer.
+      verdict.code === "malformed_simulation",
+    );
   }
 
   private async invokeRead(functionName: string, functionArgs: string[]) {
@@ -427,6 +591,7 @@ export class ContractAnchoringService {
     functionName: string,
     functionArgs: string[],
     includeSource: boolean,
+    extraFlags: string[] = [],
     feeStroops?: number,
   ) {
     const args = ["contract", "invoke"];
@@ -442,6 +607,7 @@ export class ContractAnchoringService {
       this.network,
       "--id",
       this.proofRegistryContractId!,
+      ...extraFlags,
       "--",
       functionName,
       ...functionArgs,
@@ -473,11 +639,6 @@ export class ContractAnchoringService {
     return lines.at(-1) ?? "";
   }
 
-  /**
-   * Strict boolean read. Anything other than a literal `true`/`false` is a
-   * malformed response and fails closed: silently reading garbage as `false`
-   * would report a revoked proof as not revoked.
-   */
   private parseBoolean(value: string) {
     const normalized = value.trim().toLowerCase();
     if (normalized === "true") return true;

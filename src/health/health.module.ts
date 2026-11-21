@@ -4,6 +4,7 @@ import { DatabaseModule } from "../database/database.module";
 import { ContractsModule } from "../contracts/contracts.module";
 import { Clock, SystemClock } from "../common/time/clock";
 import { ClockSkewMonitorService } from "./clock-skew-monitor.service";
+import { ConfigFingerprintService } from "./config-fingerprint.service";
 import { DeploymentMetadataService } from "./deployment-metadata.service";
 import { HealthController } from "./health.controller";
 import { IncidentsController } from "./incidents.controller";
@@ -20,6 +21,7 @@ import { CapabilitiesController } from "./capabilities.controller";
     DeploymentMetadataService,
     ProtocolPauseService,
     ClockSkewMonitorService,
+    ConfigFingerprintService,
     { provide: Clock, useClass: SystemClock },
   ],
   exports: [HealthService, ProtocolPauseService, ClockSkewMonitorService],

@@ -32,6 +32,8 @@ import {
   ReadinessResponseDto,
 } from "./dto/health-probe.dto";
 import { HealthService } from "./health.service";
+import { ConfigFingerprintService } from "./config-fingerprint.service";
+import { ConfigFingerprintDto } from "./dto/config-fingerprint.dto";
 import { DependencyStatus } from "./health.types";
 
 /**
@@ -61,7 +63,10 @@ function ifNoneMatchSatisfied(
 @SkipThrottle({ default: true, strict: true, verification: true })
 @Controller("health")
 export class HealthController {
-  constructor(private readonly health: HealthService) {}
+  constructor(
+    private readonly health: HealthService,
+    private readonly fingerprint: ConfigFingerprintService,
+  ) {}
 
   /**
    * Existing aggregate endpoint, preserved for backwards compatibility.
@@ -276,5 +281,64 @@ export class HealthController {
   @RequireScopes(ApiKeyScope.ORG_ADMIN)
   async getDiagnostics(): Promise<ReadinessResponseDto> {
     return this.health.checkDiagnostics();
+  }
+
+  /**
+   * Startup configuration fingerprint.
+   *
+   * Authorized callers only. Publishes a signed snapshot of non-secret
+   * configuration captured at application startup, enabling operators to detect
+   * configuration drift without exposing secrets.
+   *
+   * The fingerprint remains valid for the lifetime of the process. A fingerprint
+   * is only available when a signing key is configured (either via
+   * CONFIG_SNAPSHOT_SIGNING_SECRET or derived from CREDENTIAL_SIGNING_SECRET).
+   */
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: "Startup configuration fingerprint (authorized)",
+    description:
+      "Returns a signed snapshot of non-secret configuration captured at " +
+      "startup. Use to detect configuration drift across deployments. " +
+      "Requires an API key with the ORG_ADMIN scope. Returns 503 if no signing " +
+      "key is configured.",
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Startup configuration fingerprint.",
+    type: ConfigFingerprintDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Missing or invalid API key.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.FORBIDDEN,
+    description: "API key lacks the ORG_ADMIN scope.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.SERVICE_UNAVAILABLE,
+    description:
+      "No signing key is configured. Set CONFIG_SNAPSHOT_SIGNING_SECRET or " +
+      "CREDENTIAL_SIGNING_SECRET to enable fingerprinting.",
+    type: ApiErrorDto,
+  })
+  @Get("config/fingerprint")
+  @AuthenticatedRoute({ roles: ["ORG_ADMIN"] })
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(ApiKeyGuard, ScopesGuard)
+  @RequireScopes(ApiKeyScope.ORG_ADMIN)
+  getConfigFingerprint(): ConfigFingerprintDto {
+    const fingerprint = this.fingerprint.getFingerprint();
+
+    if (!fingerprint) {
+      throw new ServiceUnavailableException(
+        "Configuration fingerprint is unavailable. No signing key is configured.",
+      );
+    }
+
+    return fingerprint;
   }
 }

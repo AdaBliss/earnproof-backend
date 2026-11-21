@@ -1,6 +1,7 @@
-import { Injectable, Logger, Optional } from "@nestjs/common";
+import { Inject, Injectable, Logger, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { execFile } from "child_process";
+import { randomUUID } from "crypto";
 import { promisify } from "util";
 import { sha256 } from "../common/crypto/hash";
 import { redact } from "../common/observability/redaction";
@@ -11,11 +12,35 @@ import {
   CircuitOpenError,
   CircuitState,
 } from "../common/resilience/circuit-breaker";
-import { classifyContractError } from "./contract-error";
+import {
+  AnchorFailureKind,
+  classifyContractError,
+  classifyFailureKind,
+  ContractSubmissionError,
+} from "./contract-error";
+import { SorobanRpcClient } from "./soroban/soroban-rpc.client";
+import {
+  SequenceCoordinatorPort,
+  SequenceLease,
+  SimulationAuditPort,
+} from "./soroban/ports";
+import {
+  evaluateSimulation,
+  isPermanentRejection,
+  SimulationPolicy,
+} from "./soroban/simulation-policy";
+import {
+  DEFAULT_FEE_POLICY,
+  FeePolicy,
+  assertValidFeePolicy,
+  decideFee,
+} from "../config/fee-policy";
+import { FeeEstimator, HorizonFeeEstimator } from "../stellar/fee-estimator";
 import { SorobanRpcResponseError } from "../common/validation/soroban-rpc.schemas";
 import { currentRequestSignal } from "../common/request-context/request-abort";
 import { withSpan } from "../common/observability/trace-context";
 import {
+  Deadline,
   OperationAbortedError,
   boundedDeadlineMs,
   createDeadline,
@@ -63,12 +88,7 @@ export type AnchorProofInput = {
  * `cancelled`: the caller went away (shutdown, client disconnect). In both cases
  * any late result is suppressed, so the call is never reported as anchored.
  */
-export type AnchorFailureReason =
-  | "disabled"
-  | "failed"
-  | "circuit_open"
-  | "timeout"
-  | "cancelled";
+export type AnchorAbortReason = "timeout" | "cancelled";
 
 export type AnchorProofResult =
   | {
@@ -82,9 +102,23 @@ export type AnchorProofResult =
        * ran: the contract was never touched, the intent was not consumed, and
        * the worker should hold it for a later probe rather than count an
        * attempt against it.
+       *
+       * `sequence_busy` means another worker holds this source account, so
+       * nothing was built or submitted; it is released the same way.
        */
-      reason: AnchorFailureReason;
+      reason:
+        | "disabled"
+        | "failed"
+        | "circuit_open"
+        | "sequence_busy"
+        | "fee_refused"
+        | AnchorAbortReason;
       error?: string;
+      /**
+       * Set when `reason` is `failed` and the failure is not a plain transient
+       * one: how it should be retried. Absent means `transient`.
+       */
+      failureKind?: AnchorFailureKind;
     };
 
 export type ContractProofStatus =
@@ -95,7 +129,7 @@ export type ContractProofStatus =
     }
   | {
       checked: false;
-      reason: AnchorFailureReason;
+      reason: "disabled" | "failed" | "circuit_open" | AnchorAbortReason;
       error?: string;
     };
 
@@ -112,6 +146,11 @@ export class ContractAnchoringService {
   private readonly schemaVersion: number;
   private readonly registry?: CircuitBreakerRegistry;
   private readonly deadlinesMs: Record<ContractOperationClass, number>;
+  private readonly rpc?: SorobanRpcClient;
+  private readonly simulationPolicy: SimulationPolicy;
+  private readonly simulationEnabled: boolean;
+  private readonly feePolicy: FeePolicy;
+  private readonly feeEstimator: FeeEstimator;
   private readonly breakerOptions: {
     failureThreshold?: number;
     openDurationMs?: number;
@@ -127,6 +166,17 @@ export class ContractAnchoringService {
      * under a per-network, per-operation circuit breaker (issue #203).
      */
     @Optional() registry?: CircuitBreakerRegistry,
+    /**
+     * The three collaborators below are optional for the same reason: without
+     * them the service behaves exactly as before (no preflight, no source
+     * serialisation, no audit trail).
+     */
+    @Inject(SorobanRpcClient)
+    @Optional()
+    rpcOrFeeEstimator?: SorobanRpcClient | FeeEstimator,
+    @Optional() private readonly sequences?: SequenceCoordinatorPort,
+    @Optional() private readonly audit?: SimulationAuditPort,
+    @Optional() feeEstimator?: FeeEstimator,
   ) {
     this.enabled = configService.get<boolean>("contractAnchoring.enabled") ?? false;
     this.required = configService.get<boolean>("contractAnchoring.required") ?? false;
@@ -160,6 +210,52 @@ export class ContractAnchoringService {
         CONTRACT_DEADLINE_BOUNDS,
       ),
     };
+    const thirdArgumentIsFeeEstimator = Boolean(
+      rpcOrFeeEstimator &&
+        "getEstimate" in rpcOrFeeEstimator &&
+        !("simulateTransaction" in rpcOrFeeEstimator),
+    );
+    this.rpc = thirdArgumentIsFeeEstimator
+      ? undefined
+      : (rpcOrFeeEstimator as SorobanRpcClient | undefined);
+    this.simulationPolicy = {
+      maxMinResourceFee: BigInt(
+        configService.get<number>("contractAnchoring.simulation.maxMinResourceFee") ??
+          10_000_000,
+      ),
+      maxCpuInstructions: BigInt(
+        configService.get<number>("contractAnchoring.simulation.maxCpuInstructions") ??
+          100_000_000,
+      ),
+      maxMemoryBytes: BigInt(
+        configService.get<number>("contractAnchoring.simulation.maxMemoryBytes") ??
+          41_943_040,
+      ),
+      authExpiration: {
+        minLedgers:
+          configService.get<number>("contractAnchoring.authExpiration.minLedgers") ?? 2,
+        maxLedgers:
+          configService.get<number>("contractAnchoring.authExpiration.maxLedgers") ??
+          17_280,
+      },
+    };
+    this.simulationEnabled =
+      (configService.get<boolean>("contractAnchoring.simulation.enabled") ?? true) &&
+      Boolean(this.rpc?.configured);
+    this.feePolicy = this.loadFeePolicy(configService);
+    const injectedFeeEstimator = thirdArgumentIsFeeEstimator
+      ? (rpcOrFeeEstimator as FeeEstimator)
+      : feeEstimator;
+    const estimateEnabled =
+      configService.get<boolean>("contractAnchoring.fee.estimateEnabled") ?? false;
+    this.feeEstimator =
+      injectedFeeEstimator ??
+      (estimateEnabled
+        ? new HorizonFeeEstimator(
+            configService.get<string>("stellar.horizonUrl") ??
+              "https://horizon-testnet.stellar.org",
+          )
+        : { getEstimate: async () => null });
     this.breakerOptions = {
       failureThreshold: configService.get<number>(
         "contractAnchoring.circuitBreaker.failureThreshold",
@@ -174,6 +270,34 @@ export class ContractAnchoringService {
         "contractAnchoring.circuitBreaker.successThreshold",
       ),
     };
+  }
+
+  private loadFeePolicy(configService: ConfigService): FeePolicy {
+    const read = (key: keyof FeePolicy) =>
+      configService.get<number>(`contractAnchoring.fee.${key}`) ??
+      DEFAULT_FEE_POLICY[key];
+    const policy: FeePolicy = {
+      baseFeeStroops: read("baseFeeStroops"),
+      maxFeeStroops: read("maxFeeStroops"),
+      surgeThresholdStroops: read("surgeThresholdStroops"),
+      surgeMultiplier: read("surgeMultiplier"),
+      refusalThresholdStroops: read("refusalThresholdStroops"),
+      estimateMaxAgeMs: read("estimateMaxAgeMs"),
+    };
+    assertValidFeePolicy(policy);
+    return policy;
+  }
+
+  private async decideSubmissionFee(operation: string) {
+    const estimate = await this.feeEstimator.getEstimate();
+    const decision = decideFee(this.feePolicy, estimate);
+    this.logger.log("Contract fee decision", {
+      operation,
+      action: decision.action,
+      reasonCode: decision.reason,
+      ...(decision.action === "submit" ? { feeStroops: decision.feeStroops } : {}),
+    });
+    return decision;
   }
 
   /**
@@ -213,63 +337,6 @@ export class ContractAnchoringService {
     return breaker.execute(run, classifyContractError);
   }
 
-  /**
-   * Runs the CLI under the operation's circuit breaker AND an abort-aware
-   * deadline.
-   *
-   * The deadline signal is passed to the child process, so a timed-out or
-   * cancelled call kills the CLI and frees its resources instead of leaving it
-   * running. Cancellation can come from the per-operation deadline, an explicit
-   * `options.signal`, or the enclosing HTTP request. Even if the child exits
-   * successfully in the instant before the abort is observed, the result is
-   * discarded: an operation whose caller has gone is never reported as done.
-   */
-  private async runCli(
-    operation: ContractOperationClass,
-    label: string,
-    args: string[],
-    options: ContractCallOptions | undefined,
-  ): Promise<string> {
-    const deadline = createDeadline(this.deadlinesMs[operation], [
-      options?.signal,
-      currentRequestSignal(),
-    ]);
-    try {
-      // Refuse to start work for a caller that has already gone.
-      const early = deadline.abortedError(label);
-      if (early) throw early;
-
-      // The span carries only the operation class: never argv, the signing
-      // source, the contract id or the proof id.
-      const { stdout } = await withSpan(
-        "contract.invoke",
-        { "contract.operation": operation },
-        () =>
-          this.guarded(operation, async () => {
-            try {
-              return await execFileAsync(this.stellarCliPath, args, {
-                windowsHide: true,
-                signal: deadline.signal,
-              });
-            } catch (error) {
-              // Replace the raw error (whose message embeds argv) with a safe,
-              // typed one so the breaker and callers can tell abort from failure.
-              const aborted = deadline.abortedError(label);
-              if (aborted) throw aborted;
-              throw error;
-            }
-          }),
-      );
-
-      // Late-result suppression.
-      const late = deadline.abortedError(label);
-      if (late) throw late;
-      return stdout;
-    } finally {
-      deadline.dispose();
-    }
-  }
-
   async anchorProof(
     input: AnchorProofInput,
     options?: ContractCallOptions,
@@ -281,57 +348,24 @@ export class ContractAnchoringService {
       };
     }
 
-    const args = [
-      "contract",
-      "invoke",
-      "--source",
-      this.source!,
-      "--network",
-      this.network,
-      "--id",
-      this.proofRegistryContractId!,
-      "--",
-      "register_proof",
-      "--proof_id_hash",
-      sha256(input.proofId),
-      "--commitment_hash",
-      this.hexFromSha256(input.commitment),
-      "--issuer_address",
-      this.issuerAddress!,
-      "--schema_version",
-      String(this.schemaVersion),
-      "--expires_at",
-      String(Math.floor(input.expiresAt.getTime() / 1000)),
-    ];
-
-    try {
-      const stdout = await this.runCli(
-        "register",
-        "Contract anchoring",
-        args,
-        options,
-      );
-      return {
-        anchored: true,
-        transactionHash: this.lastOutputLine(stdout),
-      };
-    } catch (error) {
-      if (error instanceof CircuitOpenError) {
-        return this.circuitOpenResult("Contract anchoring");
-      }
-
-      const message = safeCliError(error);
-      if (this.required) {
-        throw new Error(message);
-      }
-
-      this.logger.warn(`Contract anchoring failed: ${message}`);
-      return {
-        anchored: false,
-        reason: failureReason(error),
-        error: message,
-      };
-    }
+    return this.submit({
+      operation: "register",
+      functionName: "register_proof",
+      functionArgs: [
+        "--proof_id_hash",
+        sha256(input.proofId),
+        "--commitment_hash",
+        this.hexFromSha256(input.commitment),
+        "--issuer_address",
+        this.issuerAddress!,
+        "--schema_version",
+        String(this.schemaVersion),
+        "--expires_at",
+        String(Math.floor(input.expiresAt.getTime() / 1000)),
+      ],
+      proofId: input.proofId,
+      label: "Contract anchoring",
+    }, options);
   }
 
   /**
@@ -352,6 +386,15 @@ export class ContractAnchoringService {
     return { anchored: false, reason: "circuit_open" };
   }
 
+  private feeRefusedResult(
+    reasonCode: string,
+  ): { anchored: false; reason: "fee_refused"; error: string } {
+    const message = `Contract submission refused by fee policy: ${reasonCode}`;
+    if (this.required) throw new Error(message);
+    this.logger.warn(message);
+    return { anchored: false, reason: "fee_refused", error: message };
+  }
+
   async revokeProof(
     proofId: string,
     options?: ContractCallOptions,
@@ -363,11 +406,13 @@ export class ContractAnchoringService {
       };
     }
 
-    return this.invokeMutation(
-      "revoke_proof",
-      ["--proof_id_hash", sha256(proofId)],
-      options,
-    );
+    return this.submit({
+      operation: "revoke",
+      functionName: "revoke_proof",
+      functionArgs: ["--proof_id_hash", sha256(proofId)],
+      proofId,
+      label: "Contract mutation",
+    }, options);
   }
 
   async getProofStatus(
@@ -413,45 +458,232 @@ export class ContractAnchoringService {
       this.logger.warn(`Contract status check failed: ${message}`);
       return {
         checked: false,
-        reason: failureReason(error),
+        reason: abortReason(error) ?? "failed",
         error: message,
       };
     }
   }
 
-  private async invokeMutation(
-    functionName: string,
-    functionArgs: string[],
+  /**
+   * Submits a state-changing contract call: serialise on the source account,
+   * simulate, validate, and only then sign and submit.
+   */
+  private async submit(
+    call: {
+      operation: Exclude<ContractOperationClass, "read">;
+      functionName: string;
+      functionArgs: string[];
+      proofId: string;
+      label: string;
+    },
     options?: ContractCallOptions,
-  ) {
+  ): Promise<AnchorProofResult> {
+    // One deadline bounds the whole submission (preflight, RPC simulation and
+    // the signed submit), combined with the caller and request signals.
+    const deadline = createDeadline(this.deadlinesMs[call.operation], [
+      options?.signal,
+      currentRequestSignal(),
+    ]);
+    const fee = await this.decideSubmissionFee(call.operation);
+    if (fee.action === "refuse") {
+      deadline.dispose();
+      return this.feeRefusedResult(fee.reason);
+    }
+
+    let lease: SequenceLease | null = null;
     try {
-      const stdout = await this.runCli(
-        "revoke",
-        "Contract mutation",
-        this.contractInvokeArgs(functionName, functionArgs, true),
-        options,
+      // Refuse to start work for a caller that has already gone.
+      const early = deadline.abortedError(call.label);
+      if (early) throw early;
+
+      if (this.sequences) {
+        lease = await this.sequences.acquire(this.source!);
+        if (!lease) {
+          this.logger.warn(`${call.label} deferred: source account is busy`);
+          if (this.required) {
+            throw new ContractSubmissionError(
+              "transient",
+              "sequence_busy",
+              `${call.label} unavailable: source account is in use by another worker`,
+              false,
+            );
+          }
+          return { anchored: false, reason: "sequence_busy" };
+        }
+      }
+
+      // The span carries only the operation class: never argv, the signing
+      // source, the contract id or the proof id.
+      const transactionHash = await withSpan(
+        "contract.invoke",
+        { "contract.operation": call.operation },
+        () =>
+          this.guarded(call.operation, () =>
+            this.simulateThenSubmit(call, lease, fee.feeStroops, deadline),
+          ),
       );
-      return {
-        anchored: true as const,
-        transactionHash: this.lastOutputLine(stdout),
-      };
+
+      // Late-result suppression: a result that arrives after the caller went
+      // away or the deadline elapsed is never reported as success.
+      const late = deadline.abortedError(call.label);
+      if (late) throw late;
+      return { anchored: true, transactionHash };
     } catch (error) {
       if (error instanceof CircuitOpenError) {
-        return this.circuitOpenResult("Contract mutation");
+        return this.circuitOpenResult(call.label);
       }
 
       const message = safeCliError(error);
       if (this.required) {
-        throw new Error(message);
+        throw error instanceof ContractSubmissionError
+          ? error
+          : new Error(message);
       }
 
-      this.logger.warn(`Contract mutation failed: ${message}`);
+      this.logger.warn(`${call.label} failed: ${message}`);
+      const aborted = abortReason(error);
+      if (aborted) {
+        return { anchored: false, reason: aborted, error: message };
+      }
+      const failureKind = classifyFailureKind(error);
       return {
-        anchored: false as const,
-        reason: failureReason(error),
+        anchored: false,
+        reason: "failed",
         error: message,
+        // Absent means `transient`, which keeps the result shape of ordinary
+        // failures unchanged for existing callers.
+        ...(failureKind === "transient" ? {} : { failureKind }),
       };
+    } finally {
+      deadline.dispose();
+      if (lease) await this.sequences!.release(lease);
     }
+  }
+
+  /** The part of a submission that runs under the circuit breaker. */
+  private async simulateThenSubmit(
+    call: { functionName: string; functionArgs: string[]; proofId: string },
+    lease: SequenceLease | null,
+    feeStroops: number,
+    deadline: Deadline,
+  ): Promise<string> {
+    const correlationId = randomUUID();
+
+    // Everything up to and including the verdict happens before the signing
+    // call below, so a rejected simulation never reaches a secret.
+    await this.preflight(call, correlationId, feeStroops, deadline);
+    // Do not sign and submit for a caller that is already gone.
+    this.throwIfAborted(deadline, "Contract submission");
+
+    if (lease && !(await this.sequences!.renew(lease))) {
+      throw new ContractSubmissionError(
+        "transient",
+        "sequence_lease_lost",
+        "Source-account lease expired before submission; not submitting",
+        false,
+      );
+    }
+
+    this.logger.log(
+      `Submitting ${call.functionName} correlation=${correlationId}`,
+    );
+    const { stdout } = await this.execAbortable(
+      deadline,
+      "Contract submission",
+      this.contractInvokeArgs(
+        call.functionName,
+        call.functionArgs,
+        true,
+        [],
+        feeStroops,
+      ),
+    );
+    const transactionHash = this.lastOutputLine(stdout);
+    if (this.simulationEnabled) {
+      await this.audit?.recordSubmission(correlationId, transactionHash);
+    }
+    return transactionHash;
+  }
+
+  /**
+   * Builds the transaction without signing it, simulates it on the RPC, and
+   * checks the result against policy. Throws a {@link ContractSubmissionError}
+   * for any outcome other than "approved" - including an unreachable or
+   * malformed RPC, because submitting without a verdict would defeat the
+   * preflight.
+   */
+  private async preflight(
+    call: { functionName: string; functionArgs: string[]; proofId: string },
+    correlationId: string,
+    feeStroops: number,
+    deadline: Deadline,
+  ): Promise<void> {
+    if (!this.simulationEnabled) return;
+
+    const { stdout } = await this.execAbortable(
+      deadline,
+      "Contract preflight",
+      this.contractInvokeArgs(call.functionName, call.functionArgs, true, [
+        "--build-only",
+      ], feeStroops),
+    );
+    const builtXdr = this.lastOutputLine(stdout);
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(builtXdr)) {
+      throw new ContractSubmissionError(
+        "transient",
+        "malformed_simulation",
+        "Contract preflight could not build a transaction",
+      );
+    }
+
+    // The RPC client has its own bounded timeout; do not start the request for a
+    // caller that has already gone.
+    this.throwIfAborted(deadline, "Contract preflight");
+    let raw: unknown;
+    try {
+      raw = await this.rpc!.simulateTransaction(builtXdr);
+    } catch (error) {
+      throw new ContractSubmissionError(
+        "transient",
+        "simulation_unavailable",
+        `Contract preflight unavailable: ${
+          error instanceof Error ? error.message : "RPC failure"
+        }`,
+      );
+    }
+
+    // Late-result suppression: a verdict that arrived after cancellation must
+    // not lead to a signed submission.
+    this.throwIfAborted(deadline, "Contract preflight");
+    const verdict = evaluateSimulation(raw, this.simulationPolicy);
+    const proofIdHash = sha256(call.proofId);
+    if (verdict.status === "approved") {
+      await this.audit?.recordSimulation({
+        correlationId,
+        operation: call.functionName,
+        proofIdHash,
+        outcome: "approved",
+        metrics: verdict.metrics,
+      });
+      return;
+    }
+
+    await this.audit?.recordSimulation({
+      correlationId,
+      operation: call.functionName,
+      proofIdHash,
+      outcome: "rejected",
+      reasonCode: verdict.code,
+      metrics: verdict.metrics,
+    });
+    const permanent = isPermanentRejection(verdict.code);
+    throw new ContractSubmissionError(
+      permanent ? "permanent" : "transient",
+      verdict.code,
+      `Contract simulation rejected: ${verdict.code}`,
+      // A malformed body is an RPC fault; every other rejection is an answer.
+      verdict.code === "malformed_simulation",
+    );
   }
 
   private async invokeRead(
@@ -459,23 +691,72 @@ export class ContractAnchoringService {
     functionArgs: string[],
     options?: ContractCallOptions,
   ) {
-    const stdout = await this.runCli(
-      "read",
-      "Contract read",
-      this.contractInvokeArgs(functionName, functionArgs, false),
-      options,
-    );
-    return this.lastOutputLine(stdout);
+    const deadline = createDeadline(this.deadlinesMs.read, [
+      options?.signal,
+      currentRequestSignal(),
+    ]);
+    try {
+      this.throwIfAborted(deadline, "Contract read");
+      const { stdout } = await withSpan(
+        "contract.invoke",
+        { "contract.operation": "read" },
+        () =>
+          this.guarded("read", () =>
+            this.execAbortable(
+              deadline,
+              "Contract read",
+              this.contractInvokeArgs(functionName, functionArgs, false),
+            ),
+          ),
+      );
+      // Late-result suppression.
+      this.throwIfAborted(deadline, "Contract read");
+      return this.lastOutputLine(stdout);
+    } finally {
+      deadline.dispose();
+    }
+  }
+
+  private throwIfAborted(deadline: Deadline, label: string): void {
+    const aborted = deadline.abortedError(label);
+    if (aborted) throw aborted;
+  }
+
+  /**
+   * Runs the CLI with the deadline signal, so abort kills the child process.
+   * A raw abort error (whose message embeds argv, including the signing source)
+   * is replaced by a typed, safe one.
+   */
+  private async execAbortable(
+    deadline: Deadline,
+    label: string,
+    args: string[],
+  ): Promise<{ stdout: string }> {
+    try {
+      return await execFileAsync(this.stellarCliPath, args, {
+        windowsHide: true,
+        signal: deadline.signal,
+      });
+    } catch (error) {
+      const aborted = deadline.abortedError(label);
+      if (aborted) throw aborted;
+      throw error;
+    }
   }
 
   private contractInvokeArgs(
     functionName: string,
     functionArgs: string[],
     includeSource: boolean,
+    extraFlags: string[] = [],
+    feeStroops?: number,
   ) {
     const args = ["contract", "invoke"];
     if (includeSource) {
       args.push("--source", this.source!);
+    }
+    if (feeStroops !== undefined) {
+      args.push("--fee", String(feeStroops));
     }
 
     args.push(
@@ -483,6 +764,7 @@ export class ContractAnchoringService {
       this.network,
       "--id",
       this.proofRegistryContractId!,
+      ...extraFlags,
       "--",
       functionName,
       ...functionArgs,
@@ -514,11 +796,6 @@ export class ContractAnchoringService {
     return lines.at(-1) ?? "";
   }
 
-  /**
-   * Strict boolean read. Anything other than a literal `true`/`false` is a
-   * malformed response and fails closed: silently reading garbage as `false`
-   * would report a revoked proof as not revoked.
-   */
   private parseBoolean(value: string) {
     const normalized = value.trim().toLowerCase();
     if (normalized === "true") return true;
@@ -529,12 +806,10 @@ export class ContractAnchoringService {
   }
 }
 
-/** Maps a thrown error to the result reason the caller acts on. */
-function failureReason(error: unknown): "failed" | "timeout" | "cancelled" {
-  if (error instanceof OperationAbortedError) {
-    return error.kind === "deadline" ? "timeout" : "cancelled";
-  }
-  return "failed";
+/** The abort reason a caller acts on, or undefined when the error is not an abort. */
+function abortReason(error: unknown): "timeout" | "cancelled" | undefined {
+  if (!(error instanceof OperationAbortedError)) return undefined;
+  return error.kind === "deadline" ? "timeout" : "cancelled";
 }
 
 /** Node includes execFile argv in failures, including the signing source. */

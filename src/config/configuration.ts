@@ -1,3 +1,11 @@
+/** Parses a comma-separated list of hex hashes, dropping blanks. */
+function parseHashList(value: string | undefined): string[] {
+  return (value ?? "")
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+}
+
 /**
  * Collects PAYMENT_ENCRYPTION_KEY_V0, _V1, ... into an indexed object
  * (`{ 0: "...", 1: "..." }`) for the payment-encryption keyring service.
@@ -161,6 +169,69 @@ export const configuration = () => ({
       readMs: Number(process.env.CONTRACT_READ_DEADLINE_MS ?? 60_000),
       // Whole reconciler run (clamped to 5s..30min by the job).
       reconcileRunMs: Number(process.env.CONTRACT_RECONCILE_RUN_DEADLINE_MS ?? 240_000),
+    },
+    // Soroban RPC used for pre-submission simulation and the startup identity
+    // check. Unset keeps both off, so existing deployments are unchanged.
+    sorobanRpcUrl: process.env.SOROBAN_RPC_URL,
+    rpcTimeoutMs: Number(process.env.SOROBAN_RPC_TIMEOUT_MS ?? 5_000),
+    // Simulation preflight policy. Defaults sit at Soroban's per-transaction
+    // limits (100M CPU instructions, 40 MiB) and 1 XLM of resource fee.
+    simulation: {
+      enabled: process.env.CONTRACT_SIMULATION_ENABLED !== "false",
+      maxMinResourceFee: Number(
+        process.env.CONTRACT_SIMULATION_MAX_RESOURCE_FEE ?? 10_000_000,
+      ),
+      maxCpuInstructions: Number(
+        process.env.CONTRACT_SIMULATION_MAX_CPU_INSTRUCTIONS ?? 100_000_000,
+      ),
+      maxMemoryBytes: Number(
+        process.env.CONTRACT_SIMULATION_MAX_MEMORY_BYTES ?? 41_943_040,
+      ),
+    },
+    // Window, in ledgers from the current ledger, an authorization entry's
+    // expiration must fall in (both ends inclusive). 17,280 ledgers is ~1 day.
+    authExpiration: {
+      minLedgers: Number(process.env.CONTRACT_AUTH_EXPIRATION_MIN_LEDGERS ?? 2),
+      maxLedgers: Number(process.env.CONTRACT_AUTH_EXPIRATION_MAX_LEDGERS ?? 17_280),
+    },
+    // Lease on the Stellar source account; must exceed one submission attempt.
+    sequenceLease: {
+      ttlMs: Number(process.env.CONTRACT_SEQUENCE_LEASE_TTL_MS ?? 150_000),
+    },
+    // Startup/periodic network + contract identity gate (readiness).
+    identity: {
+      enabled: process.env.CONTRACT_IDENTITY_CHECK_ENABLED !== "false",
+      timeoutMs: Number(process.env.CONTRACT_IDENTITY_TIMEOUT_MS ?? 8_000),
+      recheckIntervalMs: Number(
+        process.env.CONTRACT_IDENTITY_RECHECK_INTERVAL_MS ?? 300_000,
+      ),
+      retryIntervalMs: Number(
+        process.env.CONTRACT_IDENTITY_RETRY_INTERVAL_MS ?? 10_000,
+      ),
+      // Comma-separated hex WASM hashes the deployed contracts may have.
+      proofRegistryWasmHashes: parseHashList(
+        process.env.PROOF_REGISTRY_EXPECTED_WASM_HASHES,
+      ),
+      issuerRegistryWasmHashes: parseHashList(
+        process.env.ISSUER_REGISTRY_EXPECTED_WASM_HASHES,
+      ),
+    },
+    // Fee ceilings and surge policy for contract submissions (stroops).
+    // Validated at startup by env.validation; see src/config/fee-policy.ts.
+    fee: {
+      estimateEnabled: process.env.CONTRACT_FEE_ESTIMATE_ENABLED !== "false",
+      baseFeeStroops: Number(process.env.CONTRACT_FEE_BASE_STROOPS ?? 100),
+      maxFeeStroops: Number(process.env.CONTRACT_FEE_MAX_STROOPS ?? 100_000),
+      surgeThresholdStroops: Number(
+        process.env.CONTRACT_FEE_SURGE_THRESHOLD_STROOPS ?? 1_000,
+      ),
+      surgeMultiplier: Number(process.env.CONTRACT_FEE_SURGE_MULTIPLIER ?? 2),
+      refusalThresholdStroops: Number(
+        process.env.CONTRACT_FEE_REFUSAL_THRESHOLD_STROOPS ?? 1_000_000,
+      ),
+      estimateMaxAgeMs: Number(
+        process.env.CONTRACT_FEE_ESTIMATE_MAX_AGE_MS ?? 60_000,
+      ),
     },
     // Per-network, per-operation circuit breaker around contract invocation.
     // Slightly more tolerant than Horizon's: a contract call is heavier and its

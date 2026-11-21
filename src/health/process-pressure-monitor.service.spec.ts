@@ -148,6 +148,7 @@ describe("HealthService process pressure integration", () => {
       undefined,
       undefined,
       undefined,
+      undefined,
       monitor,
     );
   }

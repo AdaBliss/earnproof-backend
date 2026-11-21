@@ -20,7 +20,6 @@ installed.
 | Inbound HTTP | [`TraceContextMiddleware`](../src/common/observability/trace-context.middleware.ts) parses `traceparent`; the server span becomes a child of the caller. No or invalid header starts a new trace. |
 | Anchoring queue | The enqueuing request's context is stored on `AnchoringIntent.traceparent` / `tracestate`. The worker opens `anchoring.execute` as a child of it. |
 | Contract call | `contract.invoke` is a child of the worker (or request) span. |
-| Outbox | `DomainEventOutbox.traceparent` is captured on publish; the consumer runs as a child (`outbox.consume`). |
 | Outbound webhook | `WebhookDelivery.traceparent` is stored; the attempt is a child span and sends `traceparent` (and `tracestate`) to the integrator. A retry row inherits the original context, so every attempt of one event shares a trace. |
 
 The columns are nullable and additive (see the `add_trace_context_columns`
@@ -79,5 +78,8 @@ describes.
 - A webhook delivery created by an operator replay or dead-letter redrive takes
   the trace active at that moment (the operator request), not the original
   event's trace.
+- The domain-event outbox does not carry trace context. Its table has no
+  migration in this repository, so there is nothing to add the columns to;
+  consumers start their own trace.
 - Propagation is for the paths listed above. Other background jobs start their
   own traces unless they restore a carrier themselves.

@@ -120,7 +120,7 @@ describe("ContractAnchoringService deadlines and cancellation", () => {
 
     const result = await pending;
     expect(JSON.stringify(result)).not.toContain("SECRET_SOURCE_ALIAS");
-    expect(result).toMatchObject({ error: "Contract anchoring exceeded its 1000ms deadline" });
+    expect(result).toMatchObject({ error: "Contract submission exceeded its 1000ms deadline" });
   });
 
   it("clamps an out-of-range deadline into the 1s..300s bounds", async () => {

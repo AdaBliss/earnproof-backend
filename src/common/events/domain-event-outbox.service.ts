@@ -8,11 +8,6 @@ import {
   DomainEventHandler,
   ProcessOutcome,
 } from "./domain-event.types";
-import {
-  currentTraceCarrier,
-  parentFromCarrier,
-  withSpan,
-} from "../observability/trace-context";
 
 export const DEFAULT_OUTBOX_LEASE_MS = 30_000;
 export const DEFAULT_MAX_OUTBOX_ATTEMPTS = 5;
@@ -101,7 +96,6 @@ export class DomainEventOutboxService {
         aggregateId: input.aggregateId,
         correlationId: input.correlationId ?? null,
         causationId: input.causationId ?? null,
-        ...currentTraceCarrier(),
         payload: safePayload as any,
         status: DomainEventStatus.PENDING,
         maxAttempts: input.maxAttempts ?? DEFAULT_MAX_OUTBOX_ATTEMPTS,
@@ -308,19 +302,8 @@ export class DomainEventOutboxService {
         continue;
       }
 
-      // Continue the trace that published the event: the consumer (and any
-      // webhook delivery it creates) becomes a child of the originating span.
-      const carrier = event as unknown as {
-        traceparent?: string | null;
-        tracestate?: string | null;
-      };
       for (const handler of handlers) {
-        const result = await withSpan(
-          "outbox.consume",
-          { "job.name": "domain-event-outbox" },
-          () => this.processEventWithConsumer(event, handler),
-          { parent: parentFromCarrier(carrier) ?? null },
-        );
+        const result = await this.processEventWithConsumer(event, handler);
         outcomes.push(result);
       }
     }

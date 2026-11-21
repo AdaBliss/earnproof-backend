@@ -190,6 +190,8 @@ describe("ContractAnchoringService", () => {
           "SOURCE_ACCOUNT",
           "--network",
           "testnet",
+          "--fee",
+          "100",
           "--id",
           "CONTRACT_ID",
           "--",

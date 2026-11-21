@@ -7,6 +7,13 @@ import { IssuerReconciliationService } from "../issuers/issuer-reconciliation.se
 import { IssuersModule } from "../issuers/issuers.module";
 import { PaymentsModule } from "../payments/payments.module";
 import { ContractAnchoringService } from "../proofs/contract-anchoring.service";
+import {
+  SequenceCoordinatorPort,
+  SimulationAuditPort,
+} from "../proofs/soroban/ports";
+import { SorobanRpcClient } from "../proofs/soroban/soroban-rpc.client";
+import { SimulationAuditService } from "../proofs/soroban/simulation-audit.service";
+import { SourceSequenceCoordinator } from "../proofs/soroban/source-sequence-coordinator.service";
 import { ProofReconciliationService } from "../proofs/proof-reconciliation.service";
 import { ProofsModule } from "../proofs/proofs.module";
 import { WebhooksModule } from "../webhooks/webhooks.module";
@@ -56,6 +63,11 @@ import { ContractEventGapService } from "./contract-event-gap.service";
   providers: [
     ApiKeyExpirationJob,
     ContractAnchoringService,
+    SorobanRpcClient,
+    SimulationAuditService,
+    SourceSequenceCoordinator,
+    { provide: SimulationAuditPort, useExisting: SimulationAuditService },
+    { provide: SequenceCoordinatorPort, useExisting: SourceSequenceCoordinator },
     AnchoringWorkerService,
     PaymentBackfillWorkerService,
     DomainEventOutboxWorkerService,

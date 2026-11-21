@@ -123,7 +123,10 @@ export class CheckpointSummaryDto {
   proofId!: string;
 
   @ApiProperty({
-    description: "Checkpoint version number.",
+    description:
+      "Checkpoint version number. Always within the JavaScript safe-integer range; a " +
+      "checkpoint sequence above 2^53-1 is refused rather than rounded (large sequences are " +
+      "string-encoded on the checkpoint API).",
     example: 1,
   })
   version!: number;

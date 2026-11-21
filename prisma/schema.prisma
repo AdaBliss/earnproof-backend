@@ -149,6 +149,9 @@ enum QuarantineReasonCode {
   /// Flagged by the reconciler for a state disagreement it cannot repair
   /// automatically.
   MANUAL_REVIEW
+  /// The source account sequence stayed out of sync after bounded
+  /// reconciliation; no safe automatic retry exists.
+  SEQUENCE_DIVERGENCE
 }
 
 /// An operator's disposition of a quarantined intent. PENDING means no
@@ -2936,9 +2939,6 @@ model DomainEventOutbox {
   maxAttempts    Int               @default(5)
   lastError      String?
   processedAt    DateTime?
-  /// W3C trace context captured when the event was published.
-  traceparent    String?           @db.VarChar(55)
-  tracestate     String?           @db.VarChar(512)
   createdAt      DateTime          @default(now())
   updatedAt      DateTime          @updatedAt
 
@@ -4419,6 +4419,51 @@ model OfflineBundle {
   @@index([organizationId, expiresAt])
   @@index([organizationId, createdAt])
   @@index([expiresAt])
+}
+
+/// Exclusive, expiring lease on one Stellar source account. Holding it is what
+/// stops two workers from building transactions against the same account (and
+/// therefore the same sequence number) at once. `accountKey` is a SHA-256 of
+/// the source identifier; the identifier itself is never stored.
+model SourceAccountSequenceLease {
+  id             String   @id @default(cuid())
+  accountKey     String   @unique
+  holderToken    String
+  holderId       String
+  /// Incremented on every takeover of an expired lease, so a stale holder can
+  /// be recognised by the token it no longer owns.
+  fencingCounter Int      @default(1)
+  expiresAt      DateTime
+  acquiredAt     DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([expiresAt])
+}
+
+/// Privacy-safe audit of one pre-submission Soroban simulation. It holds
+/// numbers and stable reason codes only: no XDR, no contract arguments, no
+/// error text, and the proof id appears only as a hash. `correlationId` is also
+/// emitted in the submission log line so a simulation can be tied to the
+/// transaction that followed it.
+model ContractSimulationRecord {
+  id                       String    @id @default(cuid())
+  correlationId            String    @unique
+  operation                String
+  proofIdHash              String
+  outcome                  String
+  reasonCode               String?
+  latestLedger             Int?
+  minResourceFee           String?
+  cpuInstructions          String?
+  memoryBytes              String?
+  authEntryCount           Int?
+  restoreRequired          Boolean   @default(false)
+  submittedTransactionHash String?
+  submittedAt              DateTime?
+  createdAt                DateTime  @default(now())
+
+  @@index([proofIdHash])
+  @@index([createdAt])
 }
 
 enum ContractEventGapStatus {

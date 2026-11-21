@@ -13,6 +13,7 @@ import {
 import { HealthHysteresisService } from "./health-hysteresis.service";
 import { ClockSkewMonitorService } from "./clock-skew-monitor.service";
 import { ProcessPressureMonitorService } from "./process-pressure-monitor.service";
+import { ContractIdentityService } from "./contract-identity.service";
 import {
   DependencyKind,
   DependencyResult,
@@ -84,6 +85,7 @@ export class HealthService {
     @Optional() p4?: any,
     @Optional() p5?: any,
     @Optional() private readonly clockSkew?: ClockSkewMonitorService,
+    @Optional() private readonly contractIdentity?: ContractIdentityService,
     @Optional() private readonly processPressure?: ProcessPressureMonitorService,
   ) {
     const rest = [p3, p4, p5].filter(Boolean);
@@ -163,6 +165,11 @@ export class HealthService {
     if (this.clockSkew?.enabled && this.clockSkew.readinessImpact !== "none") {
       requiredProbes.push(Promise.resolve(this.probeClockSkewReadiness()));
     }
+    // Not cached for the same reason: it reads in-memory state, and a cached
+    // "ok" must not outlive a newly detected network/contract mismatch.
+    if (this.contractIdentity?.active) {
+      requiredProbes.push(Promise.resolve(this.probeContractIdentity()));
+    }
     // Same reasoning: in-memory state, and a cached verdict could outlive the
     // pressure it reflects. Only a stable reason code is reported publicly.
     if (this.processPressure?.enabled) {
@@ -224,6 +231,9 @@ export class HealthService {
           this.probeMigrationCompatibility(),
         ),
       );
+    }
+    if (this.contractIdentity?.active) {
+      diagProbes.push(Promise.resolve(this.probeContractIdentity()));
     }
     diagProbes.push(
       this.probeCached("horizon", DependencyKind.OPTIONAL, () =>
@@ -578,6 +588,28 @@ export class HealthService {
    * assessment — see `ClockSkewMonitorService.blocksReadiness`. Carries a
    * reason code only; the measured skew is diagnostics-only detail.
    */
+  /**
+   * Network and contract identity gate. Anything but a verified `ok` keeps the
+   * service not ready: `pending` (first check still running), `unavailable`
+   * (RPC unreachable, so identity is unproven) and `mismatch`. The reason is
+   * one stable code, never a contract id, hash or URL.
+   */
+  private probeContractIdentity(): DependencyResult {
+    const state = this.contractIdentity!.current();
+    const ok = state.status === "ok";
+    return {
+      name: "contract_identity",
+      kind: DependencyKind.REQUIRED,
+      status: ok ? DependencyStatus.OK : DependencyStatus.ERROR,
+      reason: ok
+        ? undefined
+        : state.status === "pending"
+          ? "contract_identity_pending"
+          : (state.reasons[0] ?? "contract_identity_unverified"),
+      durationMs: 0,
+    };
+  }
+
   private probeClockSkewReadiness(): DependencyResult {
     const blocked = this.clockSkew?.blocksReadiness() ?? false;
     return {

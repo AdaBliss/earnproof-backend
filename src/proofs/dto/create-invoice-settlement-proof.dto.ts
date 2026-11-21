@@ -1,3 +1,4 @@
+import { IsStellarAmount, STELLAR_AMOUNT_PATTERN } from "../../common/validation/stellar-amount";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import {
   IsBoolean,
@@ -6,7 +7,6 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
-  Matches,
   Max,
   MaxLength,
   Min,
@@ -57,11 +57,11 @@ export class CreateInvoiceSettlementProofDto {
       "Expected invoice amount as a decimal string with up to 7 decimal places. " +
       "The settling payment's decrypted amount must equal this value exactly — " +
       "partial payments and overpayments are both rejected as mismatches.",
-    pattern: "^\\d+(\\.\\d{1,7})?$",
+    pattern: STELLAR_AMOUNT_PATTERN,
     example: "1250.0000000",
   })
   @IsString()
-  @Matches(/^\d+(\.\d{1,7})?$/)
+  @IsStellarAmount()
   expectedAmount!: string;
 
   @ApiPropertyOptional({

@@ -12,14 +12,21 @@ import { IncidentsController } from "./incidents.controller";
 import { HealthService } from "./health.service";
 import { ProtocolPauseController } from "./protocol-pause.controller";
 import { ProtocolPauseService } from "./protocol-pause.service";
+import { PauseAcknowledgementController } from "./pause-acknowledgement.controller";
+import { PauseAcknowledgementService } from "./pause-acknowledgement.service";
 
 @Module({
   imports: [ApiKeysModule, DatabaseModule, ContractsModule],
-  controllers: [HealthController, ProtocolPauseController],
+  controllers: [
+    HealthController,
+    ProtocolPauseController,
+    PauseAcknowledgementController,
+  ],
   providers: [
     HealthService,
     DeploymentMetadataService,
     ProtocolPauseService,
+    PauseAcknowledgementService,
     ClockSkewMonitorService,
     SorobanRpcClient,
     ContractIdentityService,
@@ -28,6 +35,7 @@ import { ProtocolPauseService } from "./protocol-pause.service";
   exports: [
     HealthService,
     ProtocolPauseService,
+    PauseAcknowledgementService,
     ClockSkewMonitorService,
     ContractIdentityService,
   ],

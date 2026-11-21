@@ -30,6 +30,10 @@ import { BoundedRefreshService } from "./bounded-refresh.service";
 import { PurposeDeclarationsService } from "./purpose-declarations.service";
 import { PurposeEnforcementService } from "./purpose-enforcement.service";
 import { PurposeDeclarationsController } from "./purpose-declarations.controller";
+import { ConsentWithdrawalController } from "./consent-withdrawal.controller";
+import { ConsentWithdrawalService } from "./consent-withdrawal.service";
+import { ProofActivationAckController } from "./proof-activation-ack.controller";
+import { ProofActivationAckService } from "./proof-activation-ack.service";
 
 @Module({
   imports: [
@@ -42,7 +46,7 @@ import { PurposeDeclarationsController } from "./purpose-declarations.controller
     QuotasModule,
     HealthModule,
   ],
-  controllers: [ProofsController, ProofExpirationReminderController, RevocationCheckpointController, PurposeDeclarationsController],
+  controllers: [ProofsController, ProofExpirationReminderController, RevocationCheckpointController, PurposeDeclarationsController, ConsentWithdrawalController, ProofActivationAckController],
   providers: [
     ContractAnchoringService,
     SorobanRpcClient,
@@ -62,6 +66,8 @@ import { PurposeDeclarationsController } from "./purpose-declarations.controller
     BoundedRefreshService,
     PurposeDeclarationsService,
     PurposeEnforcementService,
+    ConsentWithdrawalService,
+    ProofActivationAckService,
   ],
   exports: [
     ContractAnchoringService,
@@ -73,6 +79,8 @@ import { PurposeDeclarationsController } from "./purpose-declarations.controller
     ProofExpirationReminderService,
     ProofCapacityPreflightService,
     BoundedRefreshService,
+    ConsentWithdrawalService,
+    ProofActivationAckService,
   ],
 })
 export class ProofsModule {}

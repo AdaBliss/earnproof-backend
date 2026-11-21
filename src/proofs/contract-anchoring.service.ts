@@ -352,6 +352,35 @@ export class ContractAnchoringService {
     });
   }
 
+  /**
+   * Records a subject's disclosure-consent withdrawal on the contract.
+   *
+   * Only hashes are sent: the receipt id and a commitment derived from it.
+   * The call records a withdrawal; it deletes nothing, and every previously
+   * anchored record stays immutable.
+   */
+  async withdrawDisclosureConsent(input: {
+    disclosureReceiptId: string;
+    withdrawalCommitment: string;
+  }): Promise<AnchorProofResult> {
+    if (!this.enabled || !this.hasRequiredConfig()) {
+      return { anchored: false, reason: "disabled" };
+    }
+
+    return this.submit({
+      operation: "revoke",
+      functionName: "withdraw_disclosure_consent",
+      functionArgs: [
+        "--receipt_id_hash",
+        sha256(input.disclosureReceiptId),
+        "--withdrawal_commitment",
+        this.hexFromSha256(input.withdrawalCommitment),
+      ],
+      proofId: input.disclosureReceiptId,
+      label: "Consent withdrawal",
+    });
+  }
+
   async getProofStatus(proofId: string): Promise<ContractProofStatus> {
     if (!this.enabled || !this.hasRequiredConfig()) {
       return {

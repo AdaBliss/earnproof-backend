@@ -320,6 +320,7 @@ enum CredentialQuarantineState {
 }
 
 model User {
+  consentWithdrawals ConsentWithdrawal[]
   id                      String                 @id @default(cuid())
   walletAddress           String                 @unique
   walletHash              String                 @unique
@@ -910,6 +911,8 @@ model TrustedSource {
 }
 
 model Proof {
+  activationAcknowledgements ProofActivationAcknowledgement[]
+  activationProjection ProofActivationProjection?
   id                      String                  @id @default(cuid())
   userId                  String
   user                    User                    @relation(fields: [userId], references: [id])
@@ -2214,6 +2217,7 @@ model ConsentRecord {
 /// Signed proof disclosure consent receipts.
 /// Stores receipt metadata and cryptographic commitments without duplicating proof data.
 model DisclosureReceipt {
+  consentWithdrawal ConsentWithdrawal?
   id             String       @id @default(cuid())
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
@@ -4508,4 +4512,147 @@ model ContractEventApplied {
 
   @@id([streamKey, eventId])
   @@index([streamKey, ledger])
+}
+
+// ---------------------------------------------------------------------------
+// Proof consent withdrawal lifecycle (#398)
+// ---------------------------------------------------------------------------
+
+enum ConsentWithdrawalStatus {
+  /// Accepted locally; contract submission not yet confirmed.
+  PENDING
+  /// The withdrawal commitment is confirmed on the contract.
+  CONFIRMED
+  /// Retries were exhausted or the failure is permanent.
+  FAILED
+}
+
+/// A subject's request to withdraw consent for one disclosure receipt.
+/// Withdrawal records a commitment on the contract; it never deletes the
+/// receipt, the proof, or any immutable ledger record.
+model ConsentWithdrawal {
+  id                   String                  @id @default(cuid())
+  subjectUserId        String
+  subject              User                    @relation(fields: [subjectUserId], references: [id])
+  disclosureReceiptId  String                  @unique
+  disclosureReceipt    DisclosureReceipt       @relation(fields: [disclosureReceiptId], references: [id])
+  organizationId       String
+  /// Client-supplied idempotency key, scoped to the subject.
+  idempotencyKey       String
+  /// SHA-256 of the canonical request, so a reused key with a different request is rejected.
+  requestFingerprint   String
+  /// SHA-256 commitment submitted to the contract; reveals no proof data.
+  withdrawalCommitment String
+  status               ConsentWithdrawalStatus @default(PENDING)
+  attemptCount         Int                     @default(0)
+  transactionHash      String?
+  /// Stable failure code only; never raw provider output.
+  failureCode          String?
+  requestedAt          DateTime                @default(now())
+  lastAttemptAt        DateTime?
+  confirmedAt          DateTime?
+  createdAt            DateTime                @default(now())
+  updatedAt            DateTime                @updatedAt
+
+  @@unique([subjectUserId, idempotencyKey])
+  @@index([status, lastAttemptAt])
+}
+
+// ---------------------------------------------------------------------------
+// Emergency pause acknowledgement projection (#400)
+// ---------------------------------------------------------------------------
+
+enum PauseAcknowledgementActorRole {
+  GUARDIAN
+  OPERATOR
+  ADMIN
+}
+
+/// One indexed emergency-pause acknowledgement event. Holds only a hash
+/// commitment to the incident, never incident content. Acknowledgement carries
+/// no unpause authority.
+model PauseAcknowledgement {
+  id                 String                        @id @default(cuid())
+  network            String
+  contractId         String
+  /// Acknowledgement sequence reported by the contract.
+  sequence           BigInt
+  eventId            String
+  ledger             Int
+  actorRole          PauseAcknowledgementActorRole
+  scopes             String[]                      @default([])
+  /// 64-hex commitment to the private incident record.
+  incidentCommitment String
+  observedAt         DateTime                      @default(now())
+
+  @@unique([network, contractId, eventId])
+  @@index([network, contractId, sequence])
+}
+
+// ---------------------------------------------------------------------------
+// Contract decommission grace periods (#401)
+// ---------------------------------------------------------------------------
+
+enum ContractLifecyclePhase {
+  ACTIVE
+  GRACE
+  DECOMMISSIONED
+}
+
+/// Indexed successor/decommission state for a deployed contract.
+model ContractDecommissionState {
+  id                  String                 @id @default(cuid())
+  network             String
+  contractId          String
+  phase               ContractLifecyclePhase @default(ACTIVE)
+  graceStartsAt       DateTime?
+  graceEndsAt         DateTime?
+  /// Capabilities still permitted during the grace period.
+  allowedCapabilities String[]               @default([])
+  successorContractId String?
+  terminal            Boolean                @default(false)
+  observedLedger      BigInt
+  lastCheckedAt       DateTime               @default(now())
+  updatedAt           DateTime               @updatedAt
+
+  @@unique([network, contractId])
+  @@index([phase, graceEndsAt])
+}
+
+// ---------------------------------------------------------------------------
+// Proof activation acknowledgement evidence (#399)
+// ---------------------------------------------------------------------------
+
+enum ProofActivationAckStatus {
+  REQUIRED
+  COMPLETED
+}
+
+/// Off-chain projection of one acknowledgement a delayed-activation proof needs.
+/// Evidence only: it never changes Proof.status.
+model ProofActivationAcknowledgement {
+  id              String                   @id @default(cuid())
+  proofId         String
+  proof           Proof                    @relation(fields: [proofId], references: [id], onDelete: Cascade)
+  requirementKey  String
+  requiredRole    String
+  status          ProofActivationAckStatus @default(REQUIRED)
+  requiredLedger  Int?
+  completedLedger Int?
+  completedAt     DateTime?
+  eventId         String?
+  createdAt       DateTime                 @default(now())
+  updatedAt       DateTime                 @updatedAt
+
+  @@unique([proofId, requirementKey])
+  @@index([proofId, status])
+}
+
+/// Freshness marker for a proof's activation acknowledgement projection.
+model ProofActivationProjection {
+  proofId          String   @id
+  proof            Proof    @relation(fields: [proofId], references: [id], onDelete: Cascade)
+  observedLedger   Int
+  lastReconciledAt DateTime
+  updatedAt        DateTime @updatedAt
 }

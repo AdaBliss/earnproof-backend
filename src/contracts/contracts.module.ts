@@ -3,6 +3,8 @@ import { DatabaseModule } from "../database/database.module";
 import { ApiKeysModule } from "../api-keys/api-keys.module";
 import { ContractSuccessorService } from "./contract-successor.service";
 import { ContractsController } from "./contracts.controller";
+import { ContractDecommissionController } from "./contract-decommission.controller";
+import { ContractDecommissionService } from "./contract-decommission.service";
 
 /**
  * Contracts Module
@@ -13,8 +15,8 @@ import { ContractsController } from "./contracts.controller";
  */
 @Module({
   imports: [DatabaseModule, ApiKeysModule],
-  providers: [ContractSuccessorService],
-  controllers: [ContractsController],
-  exports: [ContractSuccessorService],
+  providers: [ContractSuccessorService, ContractDecommissionService],
+  controllers: [ContractsController, ContractDecommissionController],
+  exports: [ContractSuccessorService, ContractDecommissionService],
 })
 export class ContractsModule {}

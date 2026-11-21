@@ -28,6 +28,11 @@ user or organization is answered as `404`, identical to an absent resource.
 | `GET/POST/DELETE /api-keys*`, rotate/revoke | bearer organization creator or ADMIN | organization-scoped query | 401/403/404 |
 | `GET /integrations/auth-context` | API key + `ORG_READ` | key organization selected by `X-Organization-Id` | 401 invalid/cross-org, 403 scope |
 | `GET /health/diagnostics` | API key + `ORG_ADMIN` | key organization | 401/403 |
+| `GET /contracts/:network/:contractId/decommission` | API key + `ORG_READ` | contract identity (network + contract id); read-only derived policy | 401/403 |
+| `GET /health/protocol-pause/:contractId/acknowledgements` | public | contract identity; commitments only, no incident content | 400 |
+| `GET /proofs/:id/activation-acknowledgements` | bearer session | proof owner; ADMIN exception; unknown and foreign proofs both 404 | 401/404 |
+| `GET /proofs/disclosure-receipts/:receiptId/consent-withdrawal/eligibility`, `POST .../consent-withdrawal` (`Idempotency-Key`) | bearer session | receipt's proof owner only; unknown and foreign receipts both 404 | 400/401/404/409/422 |
+| `GET /proofs/consent-withdrawals/:id`, `POST .../:id/reconcile`, `GET .../:id/receipt` | bearer session | the withdrawing subject only; foreign ids 404 | 401/404/409 |
 | `POST /integrations/signature-diagnostics` | API key + `ORG_READ`, 10/min | key organization; nonces consumed in the key's namespace | 400/401/403/429 |
 | `GET /organizations/:id/role-approval-policy`, `GET .../history` | bearer ACTIVE member or ADMIN | path organization | 401/403/404 |
 | `POST /organizations/:id/role-approval-policy/preview` | bearer organization ADMIN/OWNER or ADMIN | path organization | 400/401/403/404 |

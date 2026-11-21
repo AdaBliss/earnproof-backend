@@ -380,6 +380,7 @@ Scopes follow the principle of least privilege: each key should have only the sc
   - `GET /api/v1/organizations/:id/members`
   - `GET /api/v1/organizations/:id/audit-logs`
   - `/api/v1/integrations/signature-diagnostics`
+  - `/api/v1/contracts/:network/:contractId/decommission` (grace-period and successor action policy)
 
 #### ORG_ADMIN
 - **Grants:** Full administrative control (members, settings, key management, webhooks)

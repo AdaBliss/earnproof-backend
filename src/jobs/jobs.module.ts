@@ -42,6 +42,7 @@ import { MetricsModule } from "../metrics/metrics.module";
 import { MetricsRollupJob } from "./metrics-rollup.job";
 import { ApiKeyExpirationJob } from "./api-key-expiration.job";
 import { ContractEventGapService } from "./contract-event-gap.service";
+import { ConsentWithdrawalReconcilerJob } from "./consent-withdrawal-reconciler.job";
 
 @Module({
   imports: [
@@ -90,6 +91,7 @@ import { ContractEventGapService } from "./contract-event-gap.service";
     BulkAdminService,
     MetricsRollupJob,
     ContractEventGapService,
+    ConsentWithdrawalReconcilerJob,
   ],
   exports: [
     AnchoringWorkerService,

@@ -542,3 +542,43 @@ describe("ContractAnchoringService", () => {
     });
   });
 });
+
+describe("ContractAnchoringService.withdrawDisclosureConsent", () => {
+  beforeEach(() => {
+    mockExecFile.mockReset();
+  });
+
+  const input = {
+    disclosureReceiptId: "receipt_1",
+    withdrawalCommitment: "c".repeat(64),
+  };
+
+  it("skips the contract call when anchoring is disabled", async () => {
+    const service = buildService({ "contractAnchoring.enabled": false });
+
+    await expect(service.withdrawDisclosureConsent(input)).resolves.toEqual({
+      anchored: false,
+      reason: "disabled",
+    });
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it("sends only hashes to withdraw_disclosure_consent", async () => {
+    const service = buildService();
+    mockExecFileOnce({ stdout: "WITHDRAWTX" });
+
+    const result = await service.withdrawDisclosureConsent(input);
+
+    expect(result).toEqual({ anchored: true, transactionHash: "WITHDRAWTX" });
+    const args = mockExecFile.mock.calls[0][1] as string[];
+    const invoked = args.slice(args.indexOf("--") + 1);
+    expect(invoked).toEqual([
+      "withdraw_disclosure_consent",
+      "--receipt_id_hash",
+      sha256("receipt_1"),
+      "--withdrawal_commitment",
+      "c".repeat(64),
+    ]);
+    expect(invoked).not.toContain("receipt_1");
+  });
+});

@@ -13,6 +13,7 @@ import {
 import { PrismaService } from "../database/prisma.service";
 import { DeadLetterState } from "./dto/dead-letter.dto";
 import { WebhookDeliveryService } from "./webhook-delivery.service";
+import { currentTraceCarrier } from "../common/observability/trace-context";
 
 const DEFAULT_MAX_BATCH = 25;
 const DEFAULT_PAGE_SIZE = 50;
@@ -234,6 +235,7 @@ export class WebhookDeadLetterService {
 
         const row = await tx.webhookDelivery.create({
           data: {
+            ...currentTraceCarrier(),
             webhookId: deadLetter.webhookId,
             eventType: deadLetter.eventType,
             // Same event identity, version, and bytes as the original.

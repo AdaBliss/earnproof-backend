@@ -5,6 +5,7 @@ import { ProofStatus } from "@prisma/client";
 import { StructuredLogger } from "../common/logger";
 import { PrismaService } from "../database/prisma.service";
 import { ContractAnchoringService } from "./contract-anchoring.service";
+import { currentTraceCarrier } from "../common/observability/trace-context";
 
 /**
  * Maximum number of proofs to reconcile per cycle to bound execution time.
@@ -285,6 +286,7 @@ export class ProofReconciliationService {
         // Create new revocation intent
         await this.prisma.anchoringIntent.create({
           data: {
+            ...currentTraceCarrier(),
             proofId,
             operation: "REVOKE",
             status: "PENDING",

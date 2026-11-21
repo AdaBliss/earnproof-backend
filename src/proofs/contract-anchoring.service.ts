@@ -13,6 +13,13 @@ import {
 } from "../common/resilience/circuit-breaker";
 import { classifyContractError } from "./contract-error";
 import { SorobanRpcResponseError } from "../common/validation/soroban-rpc.schemas";
+import { currentRequestSignal } from "../common/request-context/request-abort";
+import { withSpan } from "../common/observability/trace-context";
+import {
+  OperationAbortedError,
+  boundedDeadlineMs,
+  createDeadline,
+} from "../common/resilience/deadline";
 
 const execFileAsync = promisify(execFile);
 
@@ -22,11 +29,46 @@ export const CONTRACT_CIRCUIT_PREFIX = "contract";
 /** Contract operation classes tracked as distinct circuits. */
 export type ContractOperationClass = "register" | "revoke" | "read";
 
+/**
+ * Per-operation deadline bounds (milliseconds). A contract call below the floor
+ * cannot complete a network round trip; above the ceiling it outlives any
+ * request or worker cycle that could be waiting for it.
+ */
+export const CONTRACT_DEADLINE_BOUNDS = { minMs: 1_000, maxMs: 300_000 } as const;
+
+const DEFAULT_DEADLINES_MS: Record<ContractOperationClass, number> = {
+  register: 120_000,
+  revoke: 120_000,
+  read: 60_000,
+};
+
+/**
+ * Optional caller-supplied cancellation for a contract call. A request-scoped
+ * signal (client disconnect, request timeout) is picked up automatically from
+ * the async context; pass `signal` explicitly from background work such as the
+ * anchoring worker.
+ */
+export type ContractCallOptions = {
+  signal?: AbortSignal;
+};
+
 export type AnchorProofInput = {
   proofId: string;
   commitment: string;
   expiresAt: Date;
 };
+
+/**
+ * `timeout`: the per-operation deadline elapsed and the call was aborted.
+ * `cancelled`: the caller went away (shutdown, client disconnect). In both cases
+ * any late result is suppressed, so the call is never reported as anchored.
+ */
+export type AnchorFailureReason =
+  | "disabled"
+  | "failed"
+  | "circuit_open"
+  | "timeout"
+  | "cancelled";
 
 export type AnchorProofResult =
   | {
@@ -41,7 +83,7 @@ export type AnchorProofResult =
        * the worker should hold it for a later probe rather than count an
        * attempt against it.
        */
-      reason: "disabled" | "failed" | "circuit_open";
+      reason: AnchorFailureReason;
       error?: string;
     };
 
@@ -53,7 +95,7 @@ export type ContractProofStatus =
     }
   | {
       checked: false;
-      reason: "disabled" | "failed" | "circuit_open";
+      reason: AnchorFailureReason;
       error?: string;
     };
 
@@ -69,6 +111,7 @@ export class ContractAnchoringService {
   private readonly issuerAddress: string | undefined;
   private readonly schemaVersion: number;
   private readonly registry?: CircuitBreakerRegistry;
+  private readonly deadlinesMs: Record<ContractOperationClass, number>;
   private readonly breakerOptions: {
     failureThreshold?: number;
     openDurationMs?: number;
@@ -100,6 +143,23 @@ export class ContractAnchoringService {
     this.schemaVersion =
       configService.get<number>("contractAnchoring.schemaVersion") ?? 1;
     this.registry = registry;
+    this.deadlinesMs = {
+      register: boundedDeadlineMs(
+        configService.get<number>("contractAnchoring.deadlines.registerMs"),
+        DEFAULT_DEADLINES_MS.register,
+        CONTRACT_DEADLINE_BOUNDS,
+      ),
+      revoke: boundedDeadlineMs(
+        configService.get<number>("contractAnchoring.deadlines.revokeMs"),
+        DEFAULT_DEADLINES_MS.revoke,
+        CONTRACT_DEADLINE_BOUNDS,
+      ),
+      read: boundedDeadlineMs(
+        configService.get<number>("contractAnchoring.deadlines.readMs"),
+        DEFAULT_DEADLINES_MS.read,
+        CONTRACT_DEADLINE_BOUNDS,
+      ),
+    };
     this.breakerOptions = {
       failureThreshold: configService.get<number>(
         "contractAnchoring.circuitBreaker.failureThreshold",
@@ -153,7 +213,67 @@ export class ContractAnchoringService {
     return breaker.execute(run, classifyContractError);
   }
 
-  async anchorProof(input: AnchorProofInput): Promise<AnchorProofResult> {
+  /**
+   * Runs the CLI under the operation's circuit breaker AND an abort-aware
+   * deadline.
+   *
+   * The deadline signal is passed to the child process, so a timed-out or
+   * cancelled call kills the CLI and frees its resources instead of leaving it
+   * running. Cancellation can come from the per-operation deadline, an explicit
+   * `options.signal`, or the enclosing HTTP request. Even if the child exits
+   * successfully in the instant before the abort is observed, the result is
+   * discarded: an operation whose caller has gone is never reported as done.
+   */
+  private async runCli(
+    operation: ContractOperationClass,
+    label: string,
+    args: string[],
+    options: ContractCallOptions | undefined,
+  ): Promise<string> {
+    const deadline = createDeadline(this.deadlinesMs[operation], [
+      options?.signal,
+      currentRequestSignal(),
+    ]);
+    try {
+      // Refuse to start work for a caller that has already gone.
+      const early = deadline.abortedError(label);
+      if (early) throw early;
+
+      // The span carries only the operation class: never argv, the signing
+      // source, the contract id or the proof id.
+      const { stdout } = await withSpan(
+        "contract.invoke",
+        { "contract.operation": operation },
+        () =>
+          this.guarded(operation, async () => {
+            try {
+              return await execFileAsync(this.stellarCliPath, args, {
+                windowsHide: true,
+                signal: deadline.signal,
+              });
+            } catch (error) {
+              // Replace the raw error (whose message embeds argv) with a safe,
+              // typed one so the breaker and callers can tell abort from failure.
+              const aborted = deadline.abortedError(label);
+              if (aborted) throw aborted;
+              throw error;
+            }
+          }),
+      );
+
+      // Late-result suppression.
+      const late = deadline.abortedError(label);
+      if (late) throw late;
+      return stdout;
+    } finally {
+      deadline.dispose();
+    }
+  }
+
+  async anchorProof(
+    input: AnchorProofInput,
+    options?: ContractCallOptions,
+  ): Promise<AnchorProofResult> {
     if (!this.enabled || !this.hasRequiredConfig()) {
       return {
         anchored: false,
@@ -185,11 +305,11 @@ export class ContractAnchoringService {
     ];
 
     try {
-      const { stdout } = await this.guarded("register", () =>
-        execFileAsync(this.stellarCliPath, args, {
-          windowsHide: true,
-          timeout: 120_000,
-        }),
+      const stdout = await this.runCli(
+        "register",
+        "Contract anchoring",
+        args,
+        options,
       );
       return {
         anchored: true,
@@ -208,7 +328,7 @@ export class ContractAnchoringService {
       this.logger.warn(`Contract anchoring failed: ${message}`);
       return {
         anchored: false,
-        reason: "failed",
+        reason: failureReason(error),
         error: message,
       };
     }
@@ -232,7 +352,10 @@ export class ContractAnchoringService {
     return { anchored: false, reason: "circuit_open" };
   }
 
-  async revokeProof(proofId: string): Promise<AnchorProofResult> {
+  async revokeProof(
+    proofId: string,
+    options?: ContractCallOptions,
+  ): Promise<AnchorProofResult> {
     if (!this.enabled || !this.hasRequiredConfig()) {
       return {
         anchored: false,
@@ -240,13 +363,17 @@ export class ContractAnchoringService {
       };
     }
 
-    return this.invokeMutation("revoke_proof", [
-      "--proof_id_hash",
-      sha256(proofId),
-    ]);
+    return this.invokeMutation(
+      "revoke_proof",
+      ["--proof_id_hash", sha256(proofId)],
+      options,
+    );
   }
 
-  async getProofStatus(proofId: string): Promise<ContractProofStatus> {
+  async getProofStatus(
+    proofId: string,
+    options?: ContractCallOptions,
+  ): Promise<ContractProofStatus> {
     if (!this.enabled || !this.hasRequiredConfig()) {
       return {
         checked: false,
@@ -256,8 +383,12 @@ export class ContractAnchoringService {
 
     try {
       const [revoked, valid] = await Promise.all([
-        this.invokeRead("is_revoked", ["--proof_id_hash", sha256(proofId)]),
-        this.invokeRead("is_valid_proof", ["--proof_id_hash", sha256(proofId)]),
+        this.invokeRead("is_revoked", ["--proof_id_hash", sha256(proofId)], options),
+        this.invokeRead(
+          "is_valid_proof",
+          ["--proof_id_hash", sha256(proofId)],
+          options,
+        ),
       ]);
 
       return {
@@ -282,23 +413,23 @@ export class ContractAnchoringService {
       this.logger.warn(`Contract status check failed: ${message}`);
       return {
         checked: false,
-        reason: "failed",
+        reason: failureReason(error),
         error: message,
       };
     }
   }
 
-  private async invokeMutation(functionName: string, functionArgs: string[]) {
+  private async invokeMutation(
+    functionName: string,
+    functionArgs: string[],
+    options?: ContractCallOptions,
+  ) {
     try {
-      const { stdout } = await this.guarded("revoke", () =>
-        execFileAsync(
-          this.stellarCliPath,
-          this.contractInvokeArgs(functionName, functionArgs, true),
-          {
-            windowsHide: true,
-            timeout: 120_000,
-          },
-        ),
+      const stdout = await this.runCli(
+        "revoke",
+        "Contract mutation",
+        this.contractInvokeArgs(functionName, functionArgs, true),
+        options,
       );
       return {
         anchored: true as const,
@@ -317,22 +448,22 @@ export class ContractAnchoringService {
       this.logger.warn(`Contract mutation failed: ${message}`);
       return {
         anchored: false as const,
-        reason: "failed" as const,
+        reason: failureReason(error),
         error: message,
       };
     }
   }
 
-  private async invokeRead(functionName: string, functionArgs: string[]) {
-    const { stdout } = await this.guarded("read", () =>
-      execFileAsync(
-        this.stellarCliPath,
-        this.contractInvokeArgs(functionName, functionArgs, false),
-        {
-          windowsHide: true,
-          timeout: 60_000,
-        },
-      ),
+  private async invokeRead(
+    functionName: string,
+    functionArgs: string[],
+    options?: ContractCallOptions,
+  ) {
+    const stdout = await this.runCli(
+      "read",
+      "Contract read",
+      this.contractInvokeArgs(functionName, functionArgs, false),
+      options,
     );
     return this.lastOutputLine(stdout);
   }
@@ -396,6 +527,14 @@ export class ContractAnchoringService {
       "result",
     ]);
   }
+}
+
+/** Maps a thrown error to the result reason the caller acts on. */
+function failureReason(error: unknown): "failed" | "timeout" | "cancelled" {
+  if (error instanceof OperationAbortedError) {
+    return error.kind === "deadline" ? "timeout" : "cancelled";
+  }
+  return "failed";
 }
 
 /** Node includes execFile argv in failures, including the signing source. */

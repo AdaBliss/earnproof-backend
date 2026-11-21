@@ -152,6 +152,16 @@ export const configuration = () => ({
     proofRegistryContractId: process.env.PROOF_REGISTRY_CONTRACT_ID,
     issuerAddress: process.env.EARNPROOF_ISSUER_ADDRESS,
     schemaVersion: Number(process.env.EARNPROOF_SCHEMA_VERSION ?? 1),
+    // Per-operation deadlines. The CLI child is aborted when one elapses, and
+    // any late result is discarded. Values are clamped to 1s..300s by the
+    // service, so a typo can neither disable nor unbound a deadline.
+    deadlines: {
+      registerMs: Number(process.env.CONTRACT_REGISTER_DEADLINE_MS ?? 120_000),
+      revokeMs: Number(process.env.CONTRACT_REVOKE_DEADLINE_MS ?? 120_000),
+      readMs: Number(process.env.CONTRACT_READ_DEADLINE_MS ?? 60_000),
+      // Whole reconciler run (clamped to 5s..30min by the job).
+      reconcileRunMs: Number(process.env.CONTRACT_RECONCILE_RUN_DEADLINE_MS ?? 240_000),
+    },
     // Per-network, per-operation circuit breaker around contract invocation.
     // Slightly more tolerant than Horizon's: a contract call is heavier and its
     // transient failures noisier, so the circuit waits for more of them and
@@ -170,6 +180,11 @@ export const configuration = () => ({
         process.env.CONTRACT_CIRCUIT_SUCCESS_THRESHOLD ?? 2,
       ),
     },
+  },
+  http: {
+    // Handler deadline for endpoints guarded by RequestTimeoutInterceptor. The
+    // interceptor clamps it to 100ms..120s and aborts in-flight work on expiry.
+    verificationTimeoutMs: Number(process.env.VERIFICATION_REQUEST_TIMEOUT_MS ?? 5_000),
   },
   health: {
     // Probe timeout. Must stay below the orchestrator's own probe timeout, or a
@@ -205,6 +220,22 @@ export const configuration = () => ({
     unknownPolicy: process.env.CLOCK_SKEW_UNKNOWN_POLICY || "fail_open",
     // critical: readiness fails during a sustained critical alert; none: never.
     readinessImpact: process.env.CLOCK_SKEW_READINESS_IMPACT ?? "critical",
+  },
+  // Event-loop lag and heap pressure readiness budgets. See docs/health-checks.md.
+  // Every value is clamped to a safe range by the monitor, and each recover
+  // threshold is forced below its degrade threshold so hysteresis always exists.
+  processPressure: {
+    // Off by default under NODE_ENV=test so test boots start no sampler.
+    enabled: process.env.PROCESS_PRESSURE_ENABLED
+      ? process.env.PROCESS_PRESSURE_ENABLED === "true"
+      : process.env.NODE_ENV !== "test",
+    sampleIntervalMs: Number(process.env.PROCESS_PRESSURE_SAMPLE_INTERVAL_MS ?? 5_000),
+    eventLoopDegradeMs: Number(process.env.PROCESS_PRESSURE_EVENT_LOOP_DEGRADE_MS ?? 500),
+    eventLoopRecoverMs: Number(process.env.PROCESS_PRESSURE_EVENT_LOOP_RECOVER_MS ?? 200),
+    heapDegradeRatio: Number(process.env.PROCESS_PRESSURE_HEAP_DEGRADE_RATIO ?? 0.9),
+    heapRecoverRatio: Number(process.env.PROCESS_PRESSURE_HEAP_RECOVER_RATIO ?? 0.8),
+    degradeAfterSamples: Number(process.env.PROCESS_PRESSURE_DEGRADE_AFTER_SAMPLES ?? 3),
+    recoverAfterSamples: Number(process.env.PROCESS_PRESSURE_RECOVER_AFTER_SAMPLES ?? 6),
   },
   // Operational metric downsampling (#330). See docs/metrics-rollups.md.
   metricsRollup: {

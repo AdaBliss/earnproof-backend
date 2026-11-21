@@ -205,7 +205,7 @@ describe("ContractAnchoringService", () => {
           "--expires_at",
           String(Math.floor(proofInput.expiresAt.getTime() / 1000)),
         ],
-        expect.objectContaining({ timeout: 120_000 }),
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
         expect.any(Function),
       );
     });

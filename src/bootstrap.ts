@@ -9,6 +9,7 @@ import helmet from "helmet";
 import { GlobalExceptionFilter } from "./common/filters/global-exception.filter";
 import { RequestIdInterceptor } from "./common/interceptors/request-id.interceptor";
 import { RequestContextMiddleware } from "./common/logger/request-context.middleware";
+import { TraceContextMiddleware } from "./common/observability/trace-context.middleware";
 import {
   GLOBAL_BODY_LIMIT_BYTES,
   ROUTE_BODY_LIMITS,
@@ -67,6 +68,11 @@ export function configureApp(
 
   // ── Request context middleware (must run after structural limits but before
   //    other middleware, to establish AsyncLocalStorage for request/user IDs).
+  // Trace context first, so the request context (and every log line) can carry
+  // the trace id and downstream work inherits the span.
+  app.use((req: any, res: any, next: any) =>
+    new TraceContextMiddleware().use(req, res, next),
+  );
   app.use((req: any, res: any, next: any) =>
     new RequestContextMiddleware().use(req, res, next),
   );

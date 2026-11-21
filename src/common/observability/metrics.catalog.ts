@@ -50,6 +50,10 @@ export const METRIC_NAMES = {
   // ─── Revocation propagation ─────────────────────────────────────────────
   revocationPropagationChecksTotal: "revocation_propagation_checks_total",
   revocationPropagationLagSeconds: "revocation_propagation_lag_seconds",
+
+  // ─── Process pressure ───────────────────────────────────────────────────
+  eventLoopDelayMs: "event_loop_delay_ms",
+  heapUsedPercent: "heap_used_percent",
 } as const;
 
 /**
@@ -204,5 +208,22 @@ export function registerCoreMetrics(registry: MetricsRegistry): void {
     // Lag buckets from one minute to three days, bracketing the channels'
     // own retry/dead-letter horizons.
     buckets: [60, 300, 900, 1_800, 3_600, 21_600, 86_400, 259_200],
+  });
+
+  // ─── Process pressure ───────────────────────────────────────────────────
+  // Per-process, unlabelled: the series count is constant. Internals stay in the
+  // metrics pipeline and the authorized diagnostics view, never the public probe.
+  registry.registerHistogram({
+    name: METRIC_NAMES.eventLoopDelayMs,
+    help: "p99 event-loop delay in milliseconds, one observation per sampling window.",
+    labelNames: [],
+    buckets: [10, 25, 50, 100, 200, 500, 1_000, 2_500, 5_000],
+  });
+
+  registry.registerHistogram({
+    name: METRIC_NAMES.heapUsedPercent,
+    help: "V8 heap used as a percentage of the heap size limit, one observation per sampling window.",
+    labelNames: [],
+    buckets: [25, 50, 60, 70, 80, 85, 90, 95, 99],
   });
 }

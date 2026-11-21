@@ -74,6 +74,17 @@ export class DependencyResultDto {
     additionalProperties: true,
   })
   clockSkew?: object;
+
+  @ApiPropertyOptional({
+    description:
+      "Diagnostics only, on the `process_pressure` entry: sampled event-loop " +
+      "delay, heap usage ratio, hysteresis counters and configured thresholds. " +
+      "Never present on the public readiness probe, which reports only a " +
+      "stable reason code. See docs/health-checks.md.",
+    type: "object",
+    additionalProperties: true,
+  })
+  processPressure?: object;
 }
 
 export class ReadinessResponseDto {

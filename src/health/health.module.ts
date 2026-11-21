@@ -8,6 +8,7 @@ import { DeploymentMetadataService } from "./deployment-metadata.service";
 import { HealthController } from "./health.controller";
 import { IncidentsController } from "./incidents.controller";
 import { HealthService } from "./health.service";
+import { ProcessPressureMonitorService } from "./process-pressure-monitor.service";
 import { ProtocolPauseController } from "./protocol-pause.controller";
 import { ProtocolPauseService } from "./protocol-pause.service";
 
@@ -19,8 +20,14 @@ import { ProtocolPauseService } from "./protocol-pause.service";
     DeploymentMetadataService,
     ProtocolPauseService,
     ClockSkewMonitorService,
+    ProcessPressureMonitorService,
     { provide: Clock, useClass: SystemClock },
   ],
-  exports: [HealthService, ProtocolPauseService, ClockSkewMonitorService],
+  exports: [
+    HealthService,
+    ProtocolPauseService,
+    ClockSkewMonitorService,
+    ProcessPressureMonitorService,
+  ],
 })
 export class HealthModule {}

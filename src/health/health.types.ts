@@ -10,6 +10,7 @@
  */
 
 import type { ClockSkewSnapshot } from "./clock-skew-monitor.service";
+import type { ProcessPressureMonitorService } from "./process-pressure-monitor.service";
 
 /**
  * Stable, safe status codes.
@@ -81,6 +82,8 @@ export interface DependencyResult {
    * Numbers, source names and stable codes only — see clock-skew-monitor.
    */
   clockSkew?: ClockSkewSnapshot;
+  /** Diagnostics only. Never set on the public readiness result. */
+  processPressure?: ReturnType<ProcessPressureMonitorService["snapshot"]>;
 }
 
 /** Privacy-safe view of one circuit for the diagnostics endpoint. */

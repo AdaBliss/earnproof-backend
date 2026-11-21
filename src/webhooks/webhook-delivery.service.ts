@@ -38,6 +38,17 @@ import { WebhookCircuitBreakerService } from "./webhook-circuit-breaker.service"
 import { PredicateEvaluatorService } from "./services/predicate-evaluator.service";
 import { Predicate } from "./predicate.types";
 import { processWebhookResponse } from "./webhook-response-safety";
+import {
+  TRACEPARENT_HEADER,
+  TRACESTATE_HEADER,
+  childContext,
+  currentTraceCarrier,
+  emitSpan,
+  formatTraceparent,
+  newTraceContext,
+  parseTraceparent,
+  sanitizeAttribute,
+} from "../common/observability/trace-context";
 
 /** Thrown when a webhook requires mTLS but has no currently valid client certificate. */
 class MtlsCertificateUnavailableError extends Error {
@@ -358,6 +369,7 @@ export class WebhookDeliveryService implements OnModuleInit {
 
       const delivery = await this.prisma.webhookDelivery.create({
         data: {
+          ...currentTraceCarrier(),
           webhookId: hook.id,
           eventType: domainEvent.event,
           eventId,
@@ -436,6 +448,7 @@ export class WebhookDeliveryService implements OnModuleInit {
     // X-EarnProof-Delivery just like they do for normal retries.
     const replayDelivery = await this.prisma.webhookDelivery.create({
       data: {
+        ...currentTraceCarrier(),
         webhookId: original.webhookId,
         eventType: original.eventType,
         payload: original.payload as Prisma.InputJsonValue,
@@ -624,6 +637,15 @@ export class WebhookDeliveryService implements OnModuleInit {
       headers["Sunset"] = new Date(deprecation.sunsetAt).toUTCString();
     }
 
+    // Propagate the trace to the integrator. The attempt is a child span of
+    // whatever created this delivery (restored from the durable row, validated
+    // again here), so retries and the original event share one trace. These
+    // headers are not part of the signed material.
+    const parentTrace = parseTraceparent(delivery.traceparent, delivery.tracestate);
+    const attemptTrace = parentTrace ? childContext(parentTrace) : newTraceContext();
+    headers[TRACEPARENT_HEADER] = formatTraceparent(attemptTrace);
+    if (attemptTrace.tracestate) headers[TRACESTATE_HEADER] = attemptTrace.tracestate;
+
     let statusCode: number | undefined;
     let responseBody: Prisma.InputJsonValue | undefined;
     let durationMs: number | undefined;
@@ -697,6 +719,25 @@ export class WebhookDeliveryService implements OnModuleInit {
             ? "delivery request timed out"
             : "delivery request failed";
       }
+    } finally {
+      // Attributes are an allowlist of bounded values: never the destination
+      // URL, webhook or organization id, delivery id or payload.
+      const attributes: Record<string, string | number | boolean> = {};
+      const put = (key: string, value: unknown) => {
+        const safe = sanitizeAttribute(key, value);
+        if (safe !== undefined) attributes[key] = safe;
+      };
+      put("webhook.attempt", delivery.attempt);
+      put("webhook.event_type", delivery.eventType);
+      put("outcome", success ? "success" : "failure");
+      emitSpan({
+        name: "webhook.deliver",
+        context: attemptTrace,
+        startTimeMs: start,
+        endTimeMs: Date.now(),
+        attributes,
+        status: success ? "ok" : "error",
+      });
     }
 
     if (success) {
@@ -767,6 +808,8 @@ export class WebhookDeliveryService implements OnModuleInit {
 
     const retryDelivery = await this.prisma.webhookDelivery.create({
       data: {
+        traceparent: delivery.traceparent,
+        tracestate: delivery.tracestate,
         webhookId: delivery.webhookId,
         eventType: delivery.eventType,
         payload: delivery.payload as Prisma.InputJsonValue,

@@ -1,5 +1,5 @@
 import { Test, TestingModule } from "@nestjs/testing";
-import { ResourceStatus } from "@prisma/client";
+import { IssuerAssuranceLevel, ResourceStatus } from "@prisma/client";
 import { PrismaService } from "../database/prisma.service";
 import { OrganizationsService } from "../organizations/organizations.service";
 import { IssuersService } from "../issuers/issuers.service";
@@ -247,6 +247,11 @@ describe("Optimistic Concurrency Control", () => {
       contractTransactionHash: null,
       contractSyncedAt: null,
       contractSyncError: null,
+      assuranceLevel: IssuerAssuranceLevel.NONE,
+      accreditationExpiresAt: null,
+      accreditationSyncedAt: null,
+      accreditationContractId: null,
+      accreditationTransactionHash: null,
       verifiedAt: null,
       suspendedAt: null,
       revokedAt: null,
@@ -614,6 +619,11 @@ describe("Optimistic Concurrency Control", () => {
         contractTransactionHash: null,
         contractSyncedAt: null,
         contractSyncError: null,
+        assuranceLevel: IssuerAssuranceLevel.NONE,
+        accreditationExpiresAt: null,
+        accreditationSyncedAt: null,
+        accreditationContractId: null,
+        accreditationTransactionHash: null,
         verifiedAt: null,
         suspendedAt: null,
         revokedAt: null,

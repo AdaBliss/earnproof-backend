@@ -621,6 +621,32 @@ const envSchema = z.object({
   HEALTH_CACHE_TTL_MS: nonnegativeInt("HEALTH_CACHE_TTL_MS").default(5000),
 
   // ──────────────────────────────────────────────────────────────────────
+  // DATABASE POOL SATURATION MONITORING — thresholds, hysteresis, runbook
+  // ──────────────────────────────────────────────────────────────────────
+
+  DB_POOL_MONITOR_ENABLED: z.enum(["true", "false"]).optional().default("true"),
+  DB_POOL_WARN_UTILIZATION: z.coerce
+    .number()
+    .min(0.05)
+    .max(0.9)
+    .optional()
+    .default(0.7),
+  DB_POOL_CRITICAL_UTILIZATION: z.coerce
+    .number()
+    .min(0.1)
+    .max(0.99)
+    .optional()
+    .default(0.9),
+  DB_POOL_WARN_WAIT_MS: boundedInt(1, 60_000, 100),
+  DB_POOL_CRITICAL_WAIT_MS: boundedInt(2, 60_000, 500),
+  DB_POOL_SUSTAIN_SAMPLES: boundedInt(1, 10, 3),
+  DB_POOL_CLEAR_SAMPLES: boundedInt(1, 10, 2),
+  DB_POOL_SAMPLE_TIMEOUT_MS: boundedInt(100, 30_000, 2_000),
+  DB_POOL_MIN_SAMPLE_INTERVAL_MS: boundedInt(0, 60_000, 1_000),
+  DB_POOL_MAX_WAIT_SAMPLES: boundedInt(10, 1_000, 120),
+  DB_POOL_RUNBOOK: optionalString(z.string().min(1)),
+
+  // ──────────────────────────────────────────────────────────────────────
   // CLOCK SKEW MONITORING (#328) — measures only, never adjusts a clock
   // ──────────────────────────────────────────────────────────────────────
 
@@ -952,6 +978,19 @@ function checkCrossVariableInvariants(data: z.infer<typeof envSchema>) {
   if (data.CLOCK_SKEW_MAX_SAMPLE_AGE_MS < data.CLOCK_SKEW_INTERVAL_MS) {
     errors.push(
       "Invalid configuration: CLOCK_SKEW_MAX_SAMPLE_AGE_MS must be at least CLOCK_SKEW_INTERVAL_MS",
+    );
+  }
+
+  // Invariant: pool saturation thresholds must order warn below critical,
+  // or the warning band would be empty and the hysteresis meaningless.
+  if (data.DB_POOL_WARN_UTILIZATION >= data.DB_POOL_CRITICAL_UTILIZATION) {
+    errors.push(
+      "Invalid configuration: DB_POOL_WARN_UTILIZATION must be below DB_POOL_CRITICAL_UTILIZATION",
+    );
+  }
+  if (data.DB_POOL_WARN_WAIT_MS >= data.DB_POOL_CRITICAL_WAIT_MS) {
+    errors.push(
+      "Invalid configuration: DB_POOL_WARN_WAIT_MS must be below DB_POOL_CRITICAL_WAIT_MS",
     );
   }
 

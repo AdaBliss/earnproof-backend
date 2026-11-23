@@ -4,7 +4,7 @@ import {
   ForbiddenException,
   NotFoundException,
 } from "@nestjs/common";
-import { ResourceStatus } from "@prisma/client";
+import { IssuerAssuranceLevel, ResourceStatus } from "@prisma/client";
 import { Test, TestingModule } from "@nestjs/testing";
 import { PrismaService } from "../database/prisma.service";
 import { IssuerRegistryService } from "./issuer-registry.service";
@@ -57,6 +57,11 @@ describe("IssuersService", () => {
     contractTransactionHash: null,
     contractSyncedAt: null,
     contractSyncError: null,
+    assuranceLevel: IssuerAssuranceLevel.STANDARD,
+    accreditationExpiresAt: new Date("2027-06-01T00:00:00.000Z"),
+    accreditationSyncedAt: new Date(),
+    accreditationContractId: "CCONTRACT",
+    accreditationTransactionHash: "tx0",
     revision: 0,
     verifiedAt: null,
     suspendedAt: null,
@@ -99,6 +104,10 @@ describe("IssuersService", () => {
           provide: IssuerRegistryService,
           useValue: {
             sync: jest.fn(),
+            readIssuerAssurance: jest.fn().mockResolvedValue({
+              state: "disabled",
+              reason: "Issuer registry synchronization is not configured",
+            }),
           },
         },
       ],
@@ -373,6 +382,347 @@ describe("IssuersService", () => {
       await expect(
         service.syncIssuerStatus(mockNonAdminUser, "issuer-1"),
       ).rejects.toThrow(ForbiddenException);
+    });
+  });
+
+  describe("syncIssuerStatus assurance refresh", () => {
+    const activeIssuer = {
+      ...mockIssuer,
+      status: ResourceStatus.ACTIVE,
+      verifiedAt: new Date(),
+    };
+
+    it("adopts contract assurance after a successful sync", async () => {
+      jest.spyOn(prisma.issuer, "findUnique").mockResolvedValue(activeIssuer);
+      jest.spyOn(issuerRegistry, "sync").mockResolvedValue({
+        state: "synced",
+        transactionHash: "tx123",
+        operation: "register_issuer",
+      });
+      jest.spyOn(issuerRegistry, "readIssuerAssurance").mockResolvedValue({
+        state: "found",
+        issuerAddress: activeIssuer.stellarAddress,
+        assuranceLevel: IssuerAssuranceLevel.ENHANCED,
+        accreditationExpiresAt: new Date("2027-06-01T00:00:00.000Z"),
+        contractId: "CCONTRACT",
+        network: "testnet",
+        observedAt: new Date("2026-11-19T02:00:00.000Z"),
+      });
+      const update = jest
+        .spyOn(prisma.issuer, "update")
+        .mockResolvedValue(activeIssuer);
+      jest.spyOn(prisma.auditLog, "create").mockResolvedValue({} as any);
+
+      const result = await service.syncIssuerStatus(mockUser, "issuer-1");
+
+      expect(result.synced).toBe(true);
+      expect(result.assuranceRefreshed).toBe(true);
+      expect(issuerRegistry.readIssuerAssurance).toHaveBeenCalledWith(
+        "issuer-1",
+      );
+      // Second update adopts the contract facts with provenance.
+      expect(update).toHaveBeenCalledTimes(2);
+      expect(update).toHaveBeenNthCalledWith(2, {
+        where: { id: "issuer-1" },
+        data: {
+          assuranceLevel: IssuerAssuranceLevel.ENHANCED,
+          accreditationExpiresAt: new Date("2027-06-01T00:00:00.000Z"),
+          accreditationSyncedAt: new Date("2026-11-19T02:00:00.000Z"),
+          accreditationContractId: "CCONTRACT",
+          accreditationTransactionHash: "tx123",
+        },
+      });
+      expect(prisma.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            metadata: expect.objectContaining({ assuranceRefreshed: true }),
+          }),
+        }),
+      );
+    });
+
+    it("leaves stored assurance untouched when the assurance read fails", async () => {
+      jest.spyOn(prisma.issuer, "findUnique").mockResolvedValue(activeIssuer);
+      jest.spyOn(issuerRegistry, "sync").mockResolvedValue({
+        state: "synced",
+        transactionHash: "tx123",
+        operation: "register_issuer",
+      });
+      jest.spyOn(issuerRegistry, "readIssuerAssurance").mockResolvedValue({
+        state: "failed",
+        error: "contract unreachable",
+      });
+      const update = jest
+        .spyOn(prisma.issuer, "update")
+        .mockResolvedValue(activeIssuer);
+      jest.spyOn(prisma.auditLog, "create").mockResolvedValue({} as any);
+
+      const result = await service.syncIssuerStatus(mockUser, "issuer-1");
+
+      expect(result.synced).toBe(true);
+      expect(result.assuranceRefreshed).toBe(false);
+      expect(update).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not read assurance when the sync itself fails", async () => {
+      jest.spyOn(prisma.issuer, "findUnique").mockResolvedValue(mockIssuer);
+      jest.spyOn(issuerRegistry, "sync").mockResolvedValue({
+        state: "failed",
+        reason: "failed",
+        error: "Network error",
+      });
+      jest.spyOn(prisma.issuer, "update").mockResolvedValue(mockIssuer);
+      jest.spyOn(prisma.auditLog, "create").mockResolvedValue({} as any);
+
+      await service.syncIssuerStatus(mockUser, "issuer-1");
+
+      expect(issuerRegistry.readIssuerAssurance).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("accreditation exposure", () => {
+    it("exposes the effective accreditation status for an accredited issuer", async () => {
+      const accredited = {
+        ...mockIssuer,
+        status: ResourceStatus.ACTIVE,
+        verifiedAt: new Date(),
+      };
+      jest.spyOn(prisma.issuer, "findUnique").mockResolvedValue(accredited);
+
+      const result = await service.getIssuer("issuer-1");
+
+      expect(result.assuranceLevel).toBe(IssuerAssuranceLevel.STANDARD);
+      expect(result.accreditationExpiresAt).toEqual(
+        new Date("2027-06-01T00:00:00.000Z"),
+      );
+      expect(result.effectiveAccreditationStatus).toBe("ACTIVE");
+      expect(result.accreditationStale).toBe(false);
+      expect(result.accreditationContractId).toBe("CCONTRACT");
+      expect(result.accreditationTransactionHash).toBe("tx0");
+    });
+
+    it("reports EXPIRED from live fields even before the reconciler runs", async () => {
+      const expired = {
+        ...mockIssuer,
+        status: ResourceStatus.ACTIVE,
+        accreditationExpiresAt: new Date("2020-01-01T00:00:00.000Z"),
+        accreditationSyncedAt: new Date(),
+      };
+      jest.spyOn(prisma.issuer, "findUnique").mockResolvedValue(expired);
+
+      const result = await service.getIssuer("issuer-1");
+
+      // Stored status still says ACTIVE; the effective status must not.
+      expect(result.status).toBe(ResourceStatus.ACTIVE);
+      expect(result.effectiveAccreditationStatus).toBe("EXPIRED");
+    });
+
+    it("reports NOT_ACCREDITED when no accreditation was ever observed", async () => {
+      const neverAccredited = {
+        ...mockIssuer,
+        status: ResourceStatus.ACTIVE,
+        assuranceLevel: IssuerAssuranceLevel.NONE,
+        accreditationExpiresAt: null,
+        accreditationSyncedAt: null,
+        accreditationContractId: null,
+        accreditationTransactionHash: null,
+      };
+      jest.spyOn(prisma.issuer, "findUnique").mockResolvedValue(neverAccredited);
+
+      const result = await service.getIssuer("issuer-1");
+
+      expect(result.effectiveAccreditationStatus).toBe("NOT_ACCREDITED");
+      expect(result.accreditationStale).toBe(false);
+    });
+
+    it("marks an unexpired accreditation stale when its observation is old", async () => {
+      const stale = {
+        ...mockIssuer,
+        status: ResourceStatus.ACTIVE,
+        accreditationSyncedAt: new Date(Date.now() - 2 * 60 * 60_000),
+      };
+      jest.spyOn(prisma.issuer, "findUnique").mockResolvedValue(stale);
+
+      const result = await service.getIssuer("issuer-1");
+
+      expect(result.effectiveAccreditationStatus).toBe("ACTIVE");
+      expect(result.accreditationStale).toBe(true);
+    });
+
+    it("exposes accreditation publicly but keeps provenance admin-only", async () => {
+      const accredited = {
+        ...mockIssuer,
+        status: ResourceStatus.ACTIVE,
+        verifiedAt: new Date(),
+      };
+      jest.spyOn(prisma.issuer, "findUnique").mockResolvedValue(accredited);
+
+      const result = await service.getIssuerPublic("issuer-1");
+
+      expect(result.assuranceLevel).toBe(IssuerAssuranceLevel.STANDARD);
+      expect(result.effectiveAccreditationStatus).toBe("ACTIVE");
+      expect(result.accreditationStale).toBe(false);
+      expect(result).not.toHaveProperty("accreditationContractId");
+      expect(result).not.toHaveProperty("accreditationTransactionHash");
+      expect(result).not.toHaveProperty("accreditationSyncedAt");
+    });
+
+    it("treats rows written before this feature as NOT_ACCREDITED", async () => {
+      const legacy = { ...mockIssuer, status: ResourceStatus.ACTIVE };
+      delete (legacy as any).assuranceLevel;
+      delete (legacy as any).accreditationExpiresAt;
+      delete (legacy as any).accreditationSyncedAt;
+      delete (legacy as any).accreditationContractId;
+      delete (legacy as any).accreditationTransactionHash;
+      jest.spyOn(prisma.issuer, "findUnique").mockResolvedValue(legacy);
+
+      const result = await service.getIssuer("issuer-1");
+
+      expect(result.assuranceLevel).toBe(IssuerAssuranceLevel.NONE);
+      expect(result.effectiveAccreditationStatus).toBe("NOT_ACCREDITED");
+      expect(result.accreditationExpiresAt).toBeNull();
+    });
+  });
+
+  describe("bounded issuer filters", () => {
+    it("passes an assuranceLevel filter to the query and the count", async () => {
+      jest.spyOn(prisma.issuer, "findMany").mockResolvedValue([mockIssuer]);
+      jest.spyOn(prisma.issuer, "count").mockResolvedValue(1);
+
+      await service.listIssuers({
+        assuranceLevel: IssuerAssuranceLevel.ENHANCED,
+      });
+
+      expect(prisma.issuer.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            assuranceLevel: IssuerAssuranceLevel.ENHANCED,
+          }),
+        }),
+      );
+      expect(prisma.issuer.count).toHaveBeenCalledWith({
+        where: expect.objectContaining({
+          assuranceLevel: IssuerAssuranceLevel.ENHANCED,
+        }),
+      });
+    });
+
+    it("passes an accreditationStatus filter as an AND fragment", async () => {
+      jest.spyOn(prisma.issuer, "findMany").mockResolvedValue([mockIssuer]);
+      jest.spyOn(prisma.issuer, "count").mockResolvedValue(1);
+
+      await service.listIssuers({ accreditationStatus: "EXPIRED" });
+
+      const where = (prisma.issuer.findMany as jest.Mock).mock.calls[0][0]
+        .where;
+      expect(where.AND).toEqual([
+        expect.objectContaining({
+          status: ResourceStatus.ACTIVE,
+          assuranceLevel: { not: IssuerAssuranceLevel.NONE },
+          accreditationExpiresAt: expect.objectContaining({
+            lt: expect.any(Date),
+          }),
+        }),
+      ]);
+      expect(prisma.issuer.count).toHaveBeenCalledWith({
+        where: expect.objectContaining({ AND: where.AND }),
+      });
+    });
+
+    it("combines a disagreeing status with the accreditation fragment instead of overriding it", async () => {
+      jest.spyOn(prisma.issuer, "findMany").mockResolvedValue([]);
+      jest.spyOn(prisma.issuer, "count").mockResolvedValue(0);
+
+      await service.listIssuers({
+        status: ResourceStatus.ACTIVE,
+        accreditationStatus: "REVOKED",
+      });
+
+      const where = (prisma.issuer.findMany as jest.Mock).mock.calls[0][0]
+        .where;
+      // Top-level status stays ACTIVE and the fragment asks for REVOKED:
+      // the conjunction matches nothing, rather than one filter winning.
+      expect(where.status).toBe(ResourceStatus.ACTIVE);
+      expect(where.AND).toEqual([{ status: ResourceStatus.REVOKED }]);
+    });
+
+    it("applies the accreditation filter within the public ACTIVE set", async () => {
+      jest.spyOn(prisma.issuer, "findMany").mockResolvedValue([mockIssuer]);
+      jest.spyOn(prisma.issuer, "count").mockResolvedValue(1);
+
+      const result = await service.listIssuersPublic({
+        assuranceLevel: IssuerAssuranceLevel.STANDARD,
+        accreditationStatus: "ACTIVE",
+      });
+
+      expect(result.items).toHaveLength(1);
+      const where = (prisma.issuer.findMany as jest.Mock).mock.calls[0][0]
+        .where;
+      expect(where.status).toBe(ResourceStatus.ACTIVE);
+      expect(where.assuranceLevel).toBe(IssuerAssuranceLevel.STANDARD);
+      expect(where.AND).toEqual([
+        expect.objectContaining({ status: ResourceStatus.ACTIVE }),
+      ]);
+    });
+  });
+
+  describe("tenant metadata cannot override contract facts", () => {
+    it("strips assurance keys from metadata updates and never writes them", async () => {
+      jest.spyOn(prisma.issuer, "findUnique").mockResolvedValue(mockIssuer);
+      const updateMany = jest
+        .spyOn(prisma.issuer, "updateMany")
+        .mockResolvedValue({ count: 1 });
+      jest.spyOn(prisma.issuer, "findUniqueOrThrow").mockResolvedValue({
+        ...mockIssuer,
+        publicMetadata: { name: "New Name" },
+      });
+      jest.spyOn(prisma.auditLog, "create").mockResolvedValue({} as any);
+
+      const result = await service.updateIssuerMetadata(mockUser, "issuer-1", {
+        expectedRevision: 0,
+        publicMetadata: {
+          name: "New Name",
+          assuranceLevel: "ENHANCED",
+          accreditationExpiresAt: "2027-01-01T00:00:00.000Z",
+          accreditationContractId: "CFAKE",
+          accredited: true,
+        },
+      });
+
+      const data = updateMany.mock.calls[0][0].data;
+      expect(data.publicMetadata).toEqual({ name: "New Name" });
+      expect(data).not.toHaveProperty("assuranceLevel");
+      expect(data).not.toHaveProperty("accreditationExpiresAt");
+      expect(data).not.toHaveProperty("accreditationContractId");
+      expect(data).not.toHaveProperty("accreditationSyncedAt");
+      // The stored contract-backed level is untouched by the metadata write.
+      expect(result.assuranceLevel).toBe(IssuerAssuranceLevel.STANDARD);
+    });
+
+    it("never stores assurance keys supplied at creation", async () => {
+      jest
+        .spyOn(prisma.organization, "findUnique")
+        .mockResolvedValue(mockOrganization);
+      jest.spyOn(prisma.issuer, "findUnique").mockResolvedValue(null);
+      const create = jest
+        .spyOn(prisma.issuer, "create")
+        .mockResolvedValue(mockIssuer);
+      jest.spyOn(prisma.auditLog, "create").mockResolvedValue({} as any);
+
+      await service.createIssuer(mockUser, {
+        organizationId: "org-1",
+        stellarAddress: mockIssuer.stellarAddress,
+        publicMetadata: {
+          name: "Test Issuer",
+          assuranceLevel: "ENHANCED",
+          accreditationExpiresAt: "2027-01-01T00:00:00.000Z",
+        },
+      } as never);
+
+      const data = create.mock.calls[0][0].data;
+      expect(data.publicMetadata).toEqual({ name: "Test Issuer" });
+      expect(data).not.toHaveProperty("assuranceLevel");
+      expect(data).not.toHaveProperty("accreditationExpiresAt");
     });
   });
 

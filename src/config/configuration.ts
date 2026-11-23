@@ -259,6 +259,29 @@ export const configuration = () => ({
     // with poll rate rather than with anything meaningful.
     cacheTtlMs: Number(process.env.HEALTH_CACHE_TTL_MS ?? 5000),
   },
+  // Database connection-pool saturation monitoring. See
+  // docs/runbooks/database-pool-saturation.md. Thresholds are validated and
+  // clamped by the monitor itself, so a misconfigured value degrades to a
+  // safe default instead of failing boot.
+  databasePool: {
+    enabled: process.env.DB_POOL_MONITOR_ENABLED !== "false",
+    warnUtilization: Number(process.env.DB_POOL_WARN_UTILIZATION ?? 0.7),
+    criticalUtilization: Number(
+      process.env.DB_POOL_CRITICAL_UTILIZATION ?? 0.9,
+    ),
+    warnWaitMs: Number(process.env.DB_POOL_WARN_WAIT_MS ?? 100),
+    criticalWaitMs: Number(process.env.DB_POOL_CRITICAL_WAIT_MS ?? 500),
+    sustainSamples: Number(process.env.DB_POOL_SUSTAIN_SAMPLES ?? 3),
+    clearSamples: Number(process.env.DB_POOL_CLEAR_SAMPLES ?? 2),
+    sampleTimeoutMs: Number(process.env.DB_POOL_SAMPLE_TIMEOUT_MS ?? 2000),
+    minSampleIntervalMs: Number(
+      process.env.DB_POOL_MIN_SAMPLE_INTERVAL_MS ?? 1000,
+    ),
+    maxWaitSamples: Number(process.env.DB_POOL_MAX_WAIT_SAMPLES ?? 120),
+    runbook:
+      process.env.DB_POOL_RUNBOOK ??
+      "docs/runbooks/database-pool-saturation.md",
+  },
   // Server vs network clock skew monitoring (#328). See docs/clock-skew.md.
   // The monitor only measures; it never adjusts a clock.
   clockSkew: {

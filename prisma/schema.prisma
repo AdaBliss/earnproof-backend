@@ -1,5 +1,6 @@
 generator client {
   provider = "prisma-client-js"
+  previewFeatures = ["metrics"]
 }
 
 datasource db {
@@ -23,6 +24,20 @@ enum ResourceStatus {
   // Reached only by attestations, when the expiration reconciler moves an
   // ACTIVE attestation past its expiry. Other resources never take this value.
   EXPIRED
+}
+
+/// Contract-backed assurance level of an issuer's accreditation.
+///
+/// Ordered by strength. NONE means no contract-backed accreditation has ever
+/// been observed for the issuer — it is not the same as "unknown": a
+/// projection with NONE must never be read as accredited. Only a contract
+/// read (registry sync or reconciliation) may set this; tenant metadata can
+/// never set or override it.
+enum IssuerAssuranceLevel {
+  NONE
+  BASIC
+  STANDARD
+  ENHANCED
 }
 
 enum PaymentClassification {
@@ -636,6 +651,23 @@ model Issuer {
   contractTransactionHash String?
   contractSyncedAt        DateTime?
   contractSyncError       String?
+  /// Contract-backed assurance level, observed from the issuer registry
+  /// contract only. The API accepts no assurance input, so tenant metadata
+  /// can never set or override it; only a contract read (sync or
+  /// reconciliation) writes these columns.
+  assuranceLevel             IssuerAssuranceLevel @default(NONE)
+  /// When the contract-backed accreditation expires. Null means an
+  /// accreditation at this level has no expiry (perpetual).
+  accreditationExpiresAt     DateTime?
+  /// When the contract state behind the assurance fields was last observed.
+  /// A projection older than the staleness bound cannot assert active
+  /// accreditation, even if the expiry has not passed.
+  accreditationSyncedAt      DateTime?
+  /// Registry contract the accreditation was observed from (provenance).
+  accreditationContractId    String?
+  /// Transaction that last established the accreditation on-chain, when the
+  /// observation followed a sync submission.
+  accreditationTransactionHash String?
   verifiedAt              DateTime?
   suspendedAt             DateTime?
   revokedAt               DateTime?
@@ -654,6 +686,11 @@ model Issuer {
   @@index([status])
   @@index([organizationId, createdAt, id])
   @@index([status, createdAt, id])
+  /// Bounded issuer filters: by assurance level, and by assurance level with
+  /// expiry for the accreditation-expiry reconciliation scan.
+  @@index([status, assuranceLevel])
+  @@index([assuranceLevel, accreditationExpiresAt])
+  @@index([accreditationExpiresAt])
 }
 
 /// A requested change of an issuer's Stellar address, reconciled against the
@@ -1738,6 +1775,13 @@ model ApprovalRequest {
   /// Canonical hash of `payload`, used so callers can detect a changed
   /// request before approving it.
   payloadHash         String
+  /// Version of the canonicalization/hash scheme that produced
+  /// `payloadHash` (see `src/common/crypto/request-body-hash.ts`). Version
+  /// 1 hashes the canonical form of the payload with secret-bearing keys
+  /// stripped. Verification dispatches on this column and fails closed on
+  /// unknown versions, so the scheme can evolve without invalidating or
+  /// silently reinterpreting older rows.
+  payloadHashVersion  Int               @default(1)
   payload             Json
   requestedById       String
   status              ApprovalRequestStatus @default(PENDING)

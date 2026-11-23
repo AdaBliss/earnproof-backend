@@ -32,6 +32,7 @@ import { IssuerSigningKeysService } from "./issuer-signing-keys.service";
     { provide: Clock, useClass: SystemClock },
   ],
   exports: [
+    IssuerRegistryService,
     IssuersService,
     IssuerReconciliationService,
     IssuerAddressRotationService,

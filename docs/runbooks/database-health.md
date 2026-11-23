@@ -29,6 +29,13 @@ histogram_quantile(0.95, database_probe_duration_ms)
 - **Down** → connectivity or the database process. Steps 2–3.
 - **Slow but up** → contention or pool pressure. Step 4.
 
+Pool saturation has its own monitor and runbook:
+[database-pool-saturation.md](database-pool-saturation.md). The bounded
+pool snapshot (occupancy, wait latency, timeout counts, thresholds) is at
+`GET /metrics/database/pool` (ADMIN) and in authorized
+`GET /health/diagnostics` under `database_pool`. Readiness fails only on
+sustained saturation — 3 consecutive saturated samples — not on a spike.
+
 ### 2. Is the database reachable?
 
 Check the instance directly: is the process running, accepting connections, and

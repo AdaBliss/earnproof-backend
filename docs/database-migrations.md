@@ -26,6 +26,12 @@ timestamp is allowed. The existing `20260825100000_store_payment_memo_context`
 conversion is likewise grandfathered because editing its applied SQL changes
 its Prisma checksum.
 
+Row-level-security migrations have their own contract on top of this gate:
+new protected tables must be added to `src/database/rls-policy.ts` and to the
+migration's policy list together, with `USING` and `WITH CHECK` identical,
+and `src/database/rls-migration.spec.ts` enforces that. See
+[`docs/row-level-security.md`](row-level-security.md).
+
 ## Production migration procedure
 
 Apply migrations as a pre-deploy job separate from application replicas. This

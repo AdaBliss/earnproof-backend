@@ -510,6 +510,7 @@ model Organization {
   apiKeyRotations                  ApiKeyRotation[]
   apiKeyCutoverReceipts            ApiKeyCutoverReceipt[]
   invitations                      OrganizationInvitation[]
+  rlsBypassAudits                  RlsBypassAudit[]
 
   @@index([status])
   @@index([archivedAt])
@@ -1453,6 +1454,12 @@ model WebhookDelivery {
   payloadBody       String                @default("")
   predicateSnapshot Json?                 // Snapshot of predicate at delivery time (null if no predicate)
   attempt           Int                   @default(1)
+  // Retry-chain identifier. One value per chain: the first attempt's
+  // delivery id for a fresh chain, a fresh random id for a replay/redrive
+  // chain. Null only for rows created before receipts existed; those
+  // resolve to their own id. Carried to every retry row, so a receipt can
+  // bind an attempt to its lineage without re-reading the chain.
+  lineageId         String?
   status            WebhookDeliveryStatus @default(PENDING)
   statusCode        Int?
   responseBody      Json?
@@ -1475,6 +1482,51 @@ model WebhookDelivery {
   @@index([eventId])
   @@index([status, nextRetryAt])
   @@index([deadLetteredAt])
+  @@index([lineageId])
+}
+
+/**
+ * Versioned idempotency receipt for one webhook delivery attempt.
+ *
+ * One row per `WebhookDelivery` row (attempt), issued when the delivery is
+ * created. `receiptId` is deterministic — recomputable from the delivery
+ * row alone (see `src/webhooks/webhook-delivery-receipt.ts`) — so a receipt
+ * survives re-derivation and a stored row is never the only copy of the
+ * binding. The row stores the binding fields (event, endpoint, payload
+ * digest, attempt, lineage) so a consumer-presented receipt id resolves to
+ * its delivery without scanning deliveries, and so operators can audit
+ * which attempt a receipt names.
+ *
+ * A receipt holds no signing secret, no payload content (only its SHA-256),
+ * and no HMAC: it identifies a delivery, it cannot authorize one.
+ *
+ * Deliberately relation-free: `webhookId` and `deliveryId` are plain
+ * denormalized references, not Prisma relations. Webhooks are soft-deleted
+ * and deliveries are never deleted, so foreign keys would buy no integrity
+ * here — and relations on this table push the generated client's recursive
+ * types past the TypeScript compiler's default stack (plain `tsc --noEmit`
+ * crashes with a stack overflow). The service always writes both ids from
+ * the delivery row it receipts, and reads resolve the delivery with a
+ * second query.
+ */
+model WebhookDeliveryReceipt {
+  id            String   @id @default(cuid())
+  receiptId     String   @unique
+  version       String   @default("1")
+  webhookId     String
+  deliveryId    String   @unique
+  eventId       String
+  eventType     String
+  payloadHash   String
+  attempt       Int
+  lineageId     String
+  replayOf      String?
+  schemaVersion String   @default("1")
+  createdAt     DateTime @default(now())
+
+  @@index([webhookId, eventId])
+  @@index([lineageId])
+  @@index([eventId])
 }
 
 model AuditLog {
@@ -1528,6 +1580,38 @@ model AuditChainCursor {
   lastSequence BigInt   @default(0)
   lastHash     String?
   updatedAt    DateTime @updatedAt
+}
+
+/// Append-only audit record for privileged row-level-security bypass use.
+///
+/// Every call to `TenantContextService.withBypassContext` writes one row
+/// here, inside the same transaction as the bypassed work, so the record
+/// commits or rolls back with the work it authorizes. There is deliberately
+/// no update or delete path: a bypass that cannot be reconstructed from this
+/// table after the fact is a bypass that should not have happened.
+///
+/// This table itself carries no row-level-security policy: it is the record
+/// of bypasses, so gating it behind the mechanism it audits would hide the
+/// audit trail from exactly the maintenance paths that need to read it. It
+/// is append-only by convention and by the absence of any service that
+/// mutates it; see docs/row-level-security.md.
+model RlsBypassAudit {
+  id             String        @id @default(cuid())
+  /// Bounded caller-supplied justification (1-256 chars, enforced by
+  /// TenantContextService). Never a secret: it is written to the audit log.
+  reason         String
+  /// Who invoked the bypass: a user id, service name, or job name
+  /// (1-128 chars, enforced by TenantContextService).
+  actor          String
+  /// Tenant the maintenance concerned, when the work was scoped to one.
+  /// Null for cross-tenant maintenance (for example a backfill).
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  createdAt      DateTime      @default(now())
+
+  @@index([createdAt])
+  @@index([actor, createdAt])
+  @@index([organizationId, createdAt])
 }
 
 model AnchoringIntent {

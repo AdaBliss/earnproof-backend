@@ -102,3 +102,36 @@ export class ConflictException extends HttpException {
     super(body, HttpStatus.CONFLICT);
   }
 }
+
+/**
+ * Raised when a database statement or transaction times out.
+ * Applies to any workload (interactive, job, migration, report) that exceeds
+ * its configured statement_timeout, idle_in_transaction_session_timeout, or
+ * lock_timeout.
+ *
+ * Never includes SQL text, parameters, query details, table names, or any
+ * internal database error — those are logged separately and never exposed
+ * to the client.
+ */
+export class DatabaseTimeoutError extends StableHttpException {
+  constructor(
+    message = "Database operation timed out",
+    status: HttpStatus = HttpStatus.GATEWAY_TIMEOUT,
+  ) {
+    super(ApiErrorCode.DATABASE_TIMEOUT, message, status);
+  }
+}
+
+/**
+ * Raised when a database operation is cancelled (e.g., by CANCEL request).
+ * Used to distinguish between true timeouts (statement_timeout expiry)
+ * and explicit cancellations (query cancelled by user or admin action).
+ */
+export class DatabaseCancelledError extends StableHttpException {
+  constructor(
+    message = "Database operation was cancelled",
+    status: HttpStatus = HttpStatus.GATEWAY_TIMEOUT,
+  ) {
+    super(ApiErrorCode.DATABASE_CANCELLED, message, status);
+  }
+}

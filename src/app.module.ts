@@ -7,6 +7,8 @@ import { ApiKeysModule } from "./api-keys/api-keys.module";
 import { ApprovalsModule } from "./approvals/approvals.module";
 import { AuthModule } from "./auth/auth.module";
 import { RateLimitModule } from "./common/rate-limit/rate-limit.module";
+import { EnvelopeEncryptionModule } from "./common/crypto/envelope-encryption.module";
+import { TenantBudgetModule } from "./common/limits/tenant-budget.module";
 import { ConsentModule } from "./common/consent/consent.module";
 import { DisclosureModule } from "./common/disclosure/disclosure.module";
 import { AuthorizationPolicyRegistry } from "./common/guards/authorization-policy.registry";
@@ -62,6 +64,9 @@ import { SecurityModule } from "./security/security.module";
     ApprovalsModule,
     AuthModule,
     RateLimitModule,
+    TenantBudgetModule,
+    HealthModule,
+    EnvelopeEncryptionModule,
     DisputesModule,
     HealthModule,
     IntegrationsModule,

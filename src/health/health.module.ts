@@ -13,10 +13,11 @@ import { HealthService } from "./health.service";
 import { DatabasePoolMonitorService } from "./database-pool-monitor.service";
 import { ProtocolPauseController } from "./protocol-pause.controller";
 import { ProtocolPauseService } from "./protocol-pause.service";
+import { CapabilitiesController } from "./capabilities.controller";
 
 @Module({
   imports: [ApiKeysModule, DatabaseModule, ContractsModule],
-  controllers: [HealthController, ProtocolPauseController],
+  controllers: [HealthController, ProtocolPauseController, CapabilitiesController],
   providers: [
     HealthService,
     DatabasePoolMonitorService,

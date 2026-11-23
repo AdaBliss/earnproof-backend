@@ -14,6 +14,8 @@ type WebhooksServiceMock = {
   enable: jest.Mock;
   delete: jest.Mock;
   listDeliveries: jest.Mock;
+  getDeliveryReceipt: jest.Mock;
+  getReceiptById: jest.Mock;
   replayDelivery: jest.Mock;
 };
 
@@ -49,6 +51,8 @@ describe("WebhooksController", () => {
       enable: jest.fn(),
       delete: jest.fn(),
       listDeliveries: jest.fn(),
+      getDeliveryReceipt: jest.fn(),
+      getReceiptById: jest.fn(),
       replayDelivery: jest.fn(),
     };
 
@@ -58,9 +62,27 @@ describe("WebhooksController", () => {
       },
     };
 
+    // The controller constructor is (webhooksService, circuitBreakerService,
+    // prismaService, deadLetters). The receipt endpoints only use the first
+    // and third, but the other two must still occupy their slots — passing
+    // the prisma mock second leaves `this.prisma` undefined and every
+    // endpoint fails in requireOrgId.
+    const circuitBreakerService = {
+      getCircuitStats: jest.fn(),
+      initializeCircuit: jest.fn(),
+      updateConfig: jest.fn(),
+    };
+    const deadLetters = {
+      list: jest.fn(),
+      redrive: jest.fn(),
+      redriveBatch: jest.fn(),
+    };
+
     controller = new WebhooksController(
       webhooksService as never,
+      circuitBreakerService as never,
       prismaService as never,
+      deadLetters as never,
     );
 
     prismaService.user.findUnique.mockResolvedValue({
@@ -151,7 +173,10 @@ describe("WebhooksController", () => {
       const result = await controller.list(authenticatedUser);
 
       expect(result).toEqual(webhooks);
-      expect(webhooksService.listForOrg).toHaveBeenCalledWith(organizationId);
+      expect(webhooksService.listForOrg).toHaveBeenCalledWith(
+        organizationId,
+        undefined,
+      );
     });
 
     it("should return empty list when no webhooks exist", async () => {
@@ -353,7 +378,11 @@ describe("WebhooksController", () => {
       const result = await controller.listDeliveries(authenticatedUser, webhookId);
 
       expect(result).toEqual(deliveries);
-      expect(webhooksService.listDeliveries).toHaveBeenCalledWith(organizationId, webhookId);
+      expect(webhooksService.listDeliveries).toHaveBeenCalledWith(
+        organizationId,
+        webhookId,
+        undefined,
+      );
     });
 
     it("should return 404 for non-existent webhook", async () => {
@@ -363,6 +392,106 @@ describe("WebhooksController", () => {
 
       await expect(
         controller.listDeliveries(authenticatedUser, "nonexistent"),
+      ).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe("getDeliveryReceipt", () => {
+    const receipt = {
+      receiptId: "wr_v1_" + "0".repeat(64),
+      version: "1",
+      webhookId,
+      deliveryId: "ckv8v6h2b0003qzrm4d8n2plq",
+      eventId: "evt_01hxk8s3n7q9v2m4c6d8e0f2g4",
+      eventType: "proof.created",
+      payloadHash: "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+      attempt: 1,
+      lineageId: "ckv8v6h2b0003qzrm4d8n2plq",
+      replayOf: null,
+      schemaVersion: "1",
+      source: "stored",
+      status: "SUCCESS",
+      deliveredAt: "2026-08-24T12:30:01.000Z",
+      createdAt: "2026-08-24T12:30:00.000Z",
+    };
+
+    it("should return the receipt for an owned delivery", async () => {
+      webhooksService.getDeliveryReceipt.mockResolvedValueOnce(receipt);
+
+      const result = await controller.getDeliveryReceipt(
+        authenticatedUser,
+        webhookId,
+        "ckv8v6h2b0003qzrm4d8n2plq",
+      );
+
+      expect(result).toEqual(receipt);
+      expect(webhooksService.getDeliveryReceipt).toHaveBeenCalledWith(
+        organizationId,
+        webhookId,
+        "ckv8v6h2b0003qzrm4d8n2plq",
+      );
+    });
+
+    it("should return 404 for a delivery of another organisation", async () => {
+      webhooksService.getDeliveryReceipt.mockRejectedValueOnce(
+        new NotFoundException("Delivery not found"),
+      );
+
+      await expect(
+        controller.getDeliveryReceipt(
+          authenticatedUser,
+          webhookId,
+          "ckv8v6h2b0003qzrm4d8n2plq",
+        ),
+      ).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe("getReceiptById", () => {
+    const receiptId = "wr_v1_" + "0".repeat(64);
+
+    it("should resolve a receipt id to its delivery attempt", async () => {
+      const receipt = {
+        receiptId,
+        version: "1",
+        webhookId,
+        deliveryId: "ckv8v6h2b0003qzrm4d8n2plq",
+        eventId: "evt_01hxk8s3n7q9v2m4c6d8e0f2g4",
+        eventType: "proof.created",
+        payloadHash:
+          "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+        attempt: 1,
+        lineageId: "ckv8v6h2b0003qzrm4d8n2plq",
+        replayOf: null,
+        schemaVersion: "1",
+        source: "stored",
+        status: "SUCCESS",
+        deliveredAt: "2026-08-24T12:30:01.000Z",
+        createdAt: "2026-08-24T12:30:00.000Z",
+      };
+      webhooksService.getReceiptById.mockResolvedValueOnce(receipt);
+
+      const result = await controller.getReceiptById(
+        authenticatedUser,
+        webhookId,
+        receiptId,
+      );
+
+      expect(result).toEqual(receipt);
+      expect(webhooksService.getReceiptById).toHaveBeenCalledWith(
+        organizationId,
+        webhookId,
+        receiptId,
+      );
+    });
+
+    it("should return 404 for an unknown receipt id", async () => {
+      webhooksService.getReceiptById.mockRejectedValueOnce(
+        new NotFoundException("Delivery receipt not found"),
+      );
+
+      await expect(
+        controller.getReceiptById(authenticatedUser, webhookId, receiptId),
       ).rejects.toThrow(NotFoundException);
     });
   });

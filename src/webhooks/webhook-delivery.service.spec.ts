@@ -2,6 +2,7 @@
 import { WebhookDeliveryStatus } from "@prisma/client";
 import { encryptProtectedAmount } from "../common/crypto/protected-amount";
 import { WebhookDeliveryService } from "./webhook-delivery.service";
+import { buildDeliveryReceipt } from "./webhook-delivery-receipt";
 import { WebhookSigningService } from "./webhook-signing.service";
 import { WebhookEnvelope } from "./webhook-event.types";
 
@@ -641,6 +642,296 @@ describe("WebhookDeliveryService", () => {
   });
 
   // -------------------------------------------------------------------------
+  // Delivery receipts
+  // -------------------------------------------------------------------------
+  describe("delivery receipts", () => {
+    function receiptsOf(prisma: unknown) {
+      return (prisma as unknown as { receipts: Map<string, Record<string, unknown>> })
+        .receipts;
+    }
+
+    it("issues a receipt when a delivery is enqueued", async () => {
+      const secretEncrypted = makeEncryptedSecret();
+      const deliveries = new Map<string, Record<string, unknown>>();
+
+      const prisma = buildPrisma(
+        deliveries,
+        [
+          {
+            id: "webhook_1",
+            url: "https://example.com/hook",
+            secretEncrypted,
+            status: "ACTIVE",
+            events: ["proof.created"],
+            payloadVersion: "1",
+          },
+        ],
+        { orgIds: ["org_1"] },
+      );
+
+      const service = new WebhookDeliveryService(
+        prisma as never,
+        new WebhookSigningService(),
+        makeNoMtlsCertificateService() as never,
+        makeConfig() as never,
+      );
+
+      await service.enqueueForUser("user_1", {
+        event: "proof.created",
+        source: {
+          proofId: "proof_1",
+          proofType: "MINIMUM_INCOME",
+          credentialSchemaVersion: "earnproof.minimum-income.v1",
+          status: "ACTIVE",
+          network: "testnet",
+          assetCode: "XLM",
+          assetIssuer: null,
+          periodStart: null,
+          periodEnd: null,
+          expiresAt: new Date("2027-09-01T00:00:00.000Z"),
+          credentialHash: "sha256:abc",
+          contractTransactionHash: null,
+          issuedAt: new Date("2026-09-01T00:00:00.000Z"),
+        },
+      });
+
+      expect(deliveries.size).toBe(1);
+      const [delivery] = [...deliveries.values()];
+      expect(delivery.attempt).toBe(1);
+      expect(typeof delivery.lineageId).toBe("string");
+
+      const receipts = receiptsOf(prisma);
+      expect(receipts.size).toBe(1);
+      const [receipt] = [...receipts.values()];
+      expect(receipt.deliveryId).toBe(delivery.id);
+      expect(receipt.webhookId).toBe("webhook_1");
+      expect(receipt.eventId).toBe(delivery.eventId);
+      expect(receipt.eventType).toBe("proof.created");
+      expect(receipt.attempt).toBe(1);
+      expect(receipt.lineageId).toBe(delivery.lineageId);
+      expect(receipt.replayOf).toBeNull();
+      expect(receipt.receiptId).toBe(
+        buildDeliveryReceipt({
+          deliveryId: delivery.id as string,
+          webhookId: "webhook_1",
+          eventId: delivery.eventId as string,
+          eventType: "proof.created",
+          payloadBody: delivery.payloadBody as string,
+          schemaVersion: "1",
+          attempt: 1,
+          lineageId: delivery.lineageId as string,
+          replayOf: null,
+        }).receiptId,
+      );
+    });
+
+    // The two runDelivery tests below use a literal public IP as the
+    // endpoint URL (fetch is mocked, so nothing is ever contacted): the
+    // SSRF guard resolves hostnames, and example.com resolves to CGNAT
+    // space in this sandbox, which the guard rightly blocks.
+    it("sends the receipt id as X-EarnProof-Receipt, derived from the row", async () => {
+      const secretEncrypted = makeEncryptedSecret();
+      const deliveries = new Map<string, Record<string, unknown>>();
+      const deliveryId = "delivery_receipt_header";
+
+      const prisma = buildPrisma(deliveries, [
+        { id: "webhook_1", url: "https://93.184.216.34/hook", secretEncrypted, status: "ACTIVE" },
+      ]);
+
+      // Legacy row: no lineageId — the receipt still derives, rooted at
+      // the delivery's own id.
+      const payloadBody = JSON.stringify(makeEnvelope({ id: "event_abc" }));
+      deliveries.set(deliveryId, {
+        id: deliveryId,
+        webhookId: "webhook_1",
+        eventType: "proof.created",
+        eventId: "event_abc",
+        schemaVersion: "1",
+        payloadBody,
+        attempt: 1,
+        status: WebhookDeliveryStatus.PENDING,
+        replayOf: null,
+        createdAt: new Date(),
+        webhook: {
+          id: "webhook_1",
+          url: "https://93.184.216.34/hook",
+          secretEncrypted,
+          status: "ACTIVE",
+        },
+      });
+
+      const fetchMock = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () => "OK",
+      });
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      const service = new WebhookDeliveryService(
+        prisma as never,
+        new WebhookSigningService(),
+        makeNoMtlsCertificateService() as never,
+        makeConfig() as never,
+      );
+
+      await (service as unknown as { runDelivery: Function }).runDelivery(deliveryId);
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const headers = fetchMock.mock.calls[0][1].headers as Record<string, string>;
+      const expected = buildDeliveryReceipt({
+        deliveryId,
+        webhookId: "webhook_1",
+        eventId: "event_abc",
+        eventType: "proof.created",
+        payloadBody,
+        schemaVersion: "1",
+        attempt: 1,
+        lineageId: deliveryId,
+        replayOf: null,
+      }).receiptId;
+      expect(headers["X-EarnProof-Receipt"]).toBe(expected);
+      expect(headers["X-EarnProof-Delivery"]).toBe("event_abc");
+    });
+
+    it("issues a distinct receipt for a retry in the same lineage", async () => {
+      const secretEncrypted = makeEncryptedSecret();
+      const deliveries = new Map<string, Record<string, unknown>>();
+      const deliveryId = "delivery_retry_receipt";
+
+      const prisma = buildPrisma(deliveries, [
+        { id: "webhook_1", url: "https://93.184.216.34/hook", secretEncrypted, status: "ACTIVE" },
+      ]);
+
+      const payloadBody = JSON.stringify(makeEnvelope({ id: "event_abc" }));
+      deliveries.set(deliveryId, {
+        id: deliveryId,
+        webhookId: "webhook_1",
+        eventType: "proof.created",
+        eventId: "event_abc",
+        schemaVersion: "1",
+        payloadBody,
+        attempt: 1,
+        lineageId: "lineage_1",
+        status: WebhookDeliveryStatus.PENDING,
+        replayOf: null,
+        createdAt: new Date(),
+        webhook: {
+          id: "webhook_1",
+          url: "https://93.184.216.34/hook",
+          secretEncrypted,
+          status: "ACTIVE",
+        },
+      });
+
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 503,
+        text: async () => "Service Unavailable",
+      }) as unknown as typeof fetch;
+
+      const service = new WebhookDeliveryService(
+        prisma as never,
+        new WebhookSigningService(),
+        makeNoMtlsCertificateService() as never,
+        makeConfig() as never,
+      );
+
+      await (service as unknown as { runDelivery: Function }).runDelivery(deliveryId);
+
+      const retry = [...deliveries.values()].find(
+        (d) => d.attempt === 2,
+      ) as Record<string, unknown>;
+      expect(retry).toBeDefined();
+      expect(retry.lineageId).toBe("lineage_1");
+
+      const receipts = [...receiptsOf(prisma).values()];
+      const retryReceipt = receipts.find((r) => r.deliveryId === retry.id);
+      expect(retryReceipt).toBeDefined();
+      expect(retryReceipt!.attempt).toBe(2);
+      expect(retryReceipt!.lineageId).toBe("lineage_1");
+      expect(retryReceipt!.replayOf).toBeNull();
+      expect(retryReceipt!.receiptId).not.toBe(
+        buildDeliveryReceipt({
+          deliveryId,
+          webhookId: "webhook_1",
+          eventId: "event_abc",
+          eventType: "proof.created",
+          payloadBody,
+          schemaVersion: "1",
+          attempt: 1,
+          lineageId: "lineage_1",
+          replayOf: null,
+        }).receiptId,
+      );
+    });
+
+    it("issues a fresh-lineage receipt for a replay", async () => {
+      const secretEncrypted = makeEncryptedSecret();
+      const deliveries = new Map<string, Record<string, unknown>>();
+      const originalId = "delivery_replay_receipt";
+
+      const payloadBody = JSON.stringify(makeEnvelope({ id: "event_replay" }));
+      deliveries.set(originalId, {
+        id: originalId,
+        webhookId: "webhook_1",
+        eventType: "proof.created",
+        eventId: "event_replay",
+        payload: makeEnvelope({ id: "event_replay" }),
+        schemaVersion: "1",
+        payloadBody,
+        attempt: 1,
+        lineageId: "lineage_orig",
+        status: WebhookDeliveryStatus.FAILED,
+        replayOf: null,
+        createdAt: new Date(),
+        webhook: {
+          id: "webhook_1",
+          url: "https://example.com/hook",
+          secretEncrypted,
+          status: "ACTIVE",
+          events: ["proof.created"],
+        },
+      });
+
+      const prisma = buildPrisma(deliveries, [
+        { id: "webhook_1", url: "https://example.com/hook", secretEncrypted, status: "ACTIVE" },
+      ]);
+
+      const service = new WebhookDeliveryService(
+        prisma as never,
+        new WebhookSigningService(),
+        makeNoMtlsCertificateService() as never,
+        makeConfig() as never,
+      );
+
+      const newId = await service.replay(originalId, "user_admin");
+      const replayRow = deliveries.get(newId) as Record<string, unknown>;
+      expect(replayRow.lineageId).toBeDefined();
+      expect(replayRow.lineageId).not.toBe("lineage_orig");
+
+      const receipts = [...receiptsOf(prisma).values()];
+      const replayReceipt = receipts.find((r) => r.deliveryId === newId);
+      expect(replayReceipt).toBeDefined();
+      expect(replayReceipt!.attempt).toBe(1);
+      expect(replayReceipt!.lineageId).toBe(replayRow.lineageId);
+      expect(replayReceipt!.replayOf).toBe(originalId);
+      expect(replayReceipt!.receiptId).not.toBe(
+        buildDeliveryReceipt({
+          deliveryId: originalId,
+          webhookId: "webhook_1",
+          eventId: "event_replay",
+          eventType: "proof.created",
+          payloadBody,
+          schemaVersion: "1",
+          attempt: 1,
+          lineageId: "lineage_orig",
+          replayOf: null,
+        }).receiptId,
+      );
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // Organization archival
   // -------------------------------------------------------------------------
   describe("organization archival", () => {
@@ -718,12 +1009,37 @@ function buildPrisma(
     secretEncrypted: string;
     status: string;
     events?: string[];
+    payloadVersion?: string;
   }>,
+  opts: { orgIds?: string[] } = {},
 ) {
   let nextId = 1;
   const genId = () => `delivery_gen_${nextId++}`;
+  const receipts = new Map<string, Record<string, unknown>>();
 
   return {
+    receipts,
+    webhookDeliveryReceipt: {
+      create: jest.fn(({ data }: { data: Record<string, unknown> }) => {
+        const row = { ...data, id: `receipt_${receipts.size + 1}` };
+        receipts.set(data.receiptId as string, row);
+        return Promise.resolve(row);
+      }),
+      findUnique: jest.fn(
+        ({
+          where,
+        }: {
+          where: { receiptId?: string; deliveryId?: string };
+        }) => {
+          const row = where.receiptId
+            ? receipts.get(where.receiptId)
+            : [...receipts.values()].find(
+                (r) => r.deliveryId === where.deliveryId,
+              );
+          return Promise.resolve(row ?? null);
+        },
+      ),
+    },
     webhookDelivery: {
       findMany: jest.fn(({ where }: { where: Record<string, unknown> }) => {
         const status = where?.status as string | undefined;
@@ -771,7 +1087,9 @@ function buildPrisma(
     },
     user: {
       findUnique: jest.fn(() =>
-        Promise.resolve({ organizations: [] }),
+        Promise.resolve({
+          organizations: (opts.orgIds ?? []).map((id) => ({ id })),
+        }),
       ),
     },
     webhook: {

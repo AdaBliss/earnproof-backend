@@ -29,6 +29,9 @@ export enum ApiErrorCode {
   INVALID_CREDENTIALS = "INVALID_CREDENTIALS",
   SESSION_EXPIRED = "SESSION_EXPIRED",
 
+  // 499 – the client closed the connection before the response completed
+  REQUEST_ABORTED = "REQUEST_ABORTED",
+
   // 403 – authenticated but not allowed
   FORBIDDEN = "FORBIDDEN",
 

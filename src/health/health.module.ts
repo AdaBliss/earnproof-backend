@@ -4,6 +4,8 @@ import { DatabaseModule } from "../database/database.module";
 import { ContractsModule } from "../contracts/contracts.module";
 import { Clock, SystemClock } from "../common/time/clock";
 import { ClockSkewMonitorService } from "./clock-skew-monitor.service";
+import { SorobanRpcClient } from "../proofs/soroban/soroban-rpc.client";
+import { ContractIdentityService } from "./contract-identity.service";
 import { DeploymentMetadataService } from "./deployment-metadata.service";
 import { HealthController } from "./health.controller";
 import { IncidentsController } from "./incidents.controller";
@@ -21,8 +23,15 @@ import { ProtocolPauseService } from "./protocol-pause.service";
     DeploymentMetadataService,
     ProtocolPauseService,
     ClockSkewMonitorService,
+    SorobanRpcClient,
+    ContractIdentityService,
     { provide: Clock, useClass: SystemClock },
   ],
-  exports: [HealthService, DatabasePoolMonitorService, ProtocolPauseService, ClockSkewMonitorService],
+  exports: [
+    HealthService,
+    ProtocolPauseService,
+    ClockSkewMonitorService,
+    ContractIdentityService,
+  ],
 })
 export class HealthModule {}

@@ -10,9 +10,11 @@ import {
   ResourceStatus,
   WebhookDeliveryStatus,
 } from "@prisma/client";
+import { randomUUID } from "crypto";
 import { PrismaService } from "../database/prisma.service";
 import { DeadLetterState } from "./dto/dead-letter.dto";
 import { WebhookDeliveryService } from "./webhook-delivery.service";
+import { buildDeliveryReceipt } from "./webhook-delivery-receipt";
 
 const DEFAULT_MAX_BATCH = 25;
 const DEFAULT_PAGE_SIZE = 50;
@@ -232,6 +234,10 @@ export class WebhookDeadLetterService {
         const late = hook ? this.webhookBlock(hook.status) : "webhook_deleted";
         if (late) throw new WebhookNotRedrivable(late);
 
+        // A redrive starts a fresh lineage (and a fresh receipt) so its
+        // attempt 1 never collides with the dead letter's chain, even
+        // though both share the event id, endpoint, and payload bytes.
+        const lineageId = randomUUID();
         const row = await tx.webhookDelivery.create({
           data: {
             webhookId: deadLetter.webhookId,
@@ -242,6 +248,7 @@ export class WebhookDeadLetterService {
             schemaVersion: deadLetter.schemaVersion,
             payloadBody: deadLetter.payloadBody,
             attempt: 1,
+            lineageId,
             status: WebhookDeliveryStatus.PENDING,
             replayOf: deadLetter.id,
             replayedBy: operatorId,
@@ -249,6 +256,35 @@ export class WebhookDeadLetterService {
             redriveReason: reason,
           },
           select: { id: true },
+        });
+
+        // The receipt is issued inside the same transaction as the redrive
+        // claim, so a redrive either has its receipt or does not happen.
+        const receipt = buildDeliveryReceipt({
+          deliveryId: row.id,
+          webhookId: deadLetter.webhookId,
+          eventId: deadLetter.eventId,
+          eventType: deadLetter.eventType,
+          payloadBody: deadLetter.payloadBody,
+          schemaVersion: deadLetter.schemaVersion,
+          attempt: 1,
+          lineageId,
+          replayOf: deadLetter.id,
+        });
+        await tx.webhookDeliveryReceipt.create({
+          data: {
+            receiptId: receipt.receiptId,
+            version: receipt.version,
+            webhookId: receipt.webhookId,
+            deliveryId: receipt.deliveryId,
+            eventId: receipt.eventId,
+            eventType: receipt.eventType,
+            payloadHash: receipt.payloadHash,
+            attempt: receipt.attempt,
+            lineageId: receipt.lineageId,
+            replayOf: receipt.replayOf,
+            schemaVersion: receipt.schemaVersion,
+          },
         });
 
         await tx.auditLog.create({

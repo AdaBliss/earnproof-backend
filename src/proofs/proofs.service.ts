@@ -1,3 +1,4 @@
+import { parseStellarAmount } from "../common/validation/stellar-amount";
 import {
   BadRequestException,
   ConflictException,
@@ -106,6 +107,7 @@ import { RevokeProofDto } from "./dto/revoke-proof.dto";
 import { RenewProofDto } from "./dto/renew-proof.dto";
 import { SignedCursorService } from "../common/pagination/signed-cursor.service";
 import { computeFilterIdFromDto } from "../common/pagination/filter-id";
+import { throwIfRequestAborted } from "../common/request-context/request-abort";
 import {
   evaluateRenewalEligibility,
   evaluateSupersessionCompatibility,
@@ -1011,6 +1013,8 @@ export class ProofsService {
         issuedFrom || issuedTo ? { gte: issuedFrom, lte: issuedTo } : undefined,
       ...(cursorWhere as Prisma.ProofWhereInput),
     };
+    // Do not start a list query for a client that has already gone away.
+    throwIfRequestAborted();
     const proofs = await this.prisma.proof.findMany({
       where,
       orderBy: cursorOrderBy("createdAt"),
@@ -3764,10 +3768,13 @@ export class ProofsService {
     return `redacted:${Buffer.from(amount).toString("base64url")}`;
   }
 
+  /** Delegates to the canonical parser; a non-canonical amount is a 400. */
   private parseAmount(amount: string) {
-    const [whole, decimal = ""] = amount.split(".");
-    const paddedDecimal = decimal.padEnd(7, "0");
-    return BigInt(whole) * 10_000_000n + BigInt(paddedDecimal);
+    try {
+      return parseStellarAmount(amount);
+    } catch {
+      throw new BadRequestException("Amount is not a canonical Stellar amount");
+    }
   }
 
   private qualifyingPaymentCount(claim: {

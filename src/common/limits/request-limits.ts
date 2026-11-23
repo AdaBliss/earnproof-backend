@@ -21,15 +21,18 @@
 const KB = 1024;
 
 /**
- * Global JSON body limit.
+ * Global transport body limit.
  *
  * 64 KB is roughly forty times the largest legitimate request this API has
  * (a proof creation carrying a few dozen payment ids), and small enough that a
  * thousand concurrent oversized requests cannot exhaust a small container's
- * memory. Enforced by the body parser, so an oversized body is refused while it
- * is still bytes on a socket — never parsed, never logged, never validated.
+ * memory. Compressed bytes are bounded before decompression and expanded bytes
+ * before JSON or form parsing.
  */
 export const GLOBAL_BODY_LIMIT_BYTES = 64 * KB;
+
+/** Maximum accepted ratio of expanded request bytes to compressed bytes. */
+export const MAX_BODY_EXPANSION_RATIO = 100;
 
 /**
  * Route-specific overrides, matched by path prefix, longest prefix first.

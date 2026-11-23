@@ -164,6 +164,9 @@ enum QuarantineReasonCode {
   /// Flagged by the reconciler for a state disagreement it cannot repair
   /// automatically.
   MANUAL_REVIEW
+  /// The source account sequence stayed out of sync after bounded
+  /// reconciliation; no safe automatic retry exists.
+  SEQUENCE_DIVERGENCE
 }
 
 /// An operator's disposition of a quarantined intent. PENDING means no
@@ -522,6 +525,7 @@ model Organization {
   apiKeyRotations                  ApiKeyRotation[]
   apiKeyCutoverReceipts            ApiKeyCutoverReceipt[]
   invitations                      OrganizationInvitation[]
+  rlsBypassAudits                  RlsBypassAudit[]
 
   @@index([status])
   @@index([archivedAt])
@@ -1487,11 +1491,21 @@ model WebhookDelivery {
   payloadBody       String                @default("")
   predicateSnapshot Json?                 // Snapshot of predicate at delivery time (null if no predicate)
   attempt           Int                   @default(1)
+  // Retry-chain identifier. One value per chain: the first attempt's
+  // delivery id for a fresh chain, a fresh random id for a replay/redrive
+  // chain. Null only for rows created before receipts existed; those
+  // resolve to their own id. Carried to every retry row, so a receipt can
+  // bind an attempt to its lineage without re-reading the chain.
+  lineageId         String?
   status            WebhookDeliveryStatus @default(PENDING)
   statusCode        Int?
   responseBody      Json?
   durationMs        Int?
   failureReason     String?
+  // DNS pinning fields (#371): per-attempt resolution metadata for diagnostics
+  dnsPinned         Boolean               @default(false) // Whether this attempt used DNS pinning
+  dnsResolutionMs   Int?                  // Time taken to resolve hostname (milliseconds)
+  dnsAddressCount   Int?                  // Number of addresses returned by resolver (not exposing IPs)
   replayOf          String?
   replayedBy        String?
   replayKey         String?               @unique
@@ -1509,6 +1523,51 @@ model WebhookDelivery {
   @@index([eventId])
   @@index([status, nextRetryAt])
   @@index([deadLetteredAt])
+  @@index([lineageId])
+}
+
+/**
+ * Versioned idempotency receipt for one webhook delivery attempt.
+ *
+ * One row per `WebhookDelivery` row (attempt), issued when the delivery is
+ * created. `receiptId` is deterministic — recomputable from the delivery
+ * row alone (see `src/webhooks/webhook-delivery-receipt.ts`) — so a receipt
+ * survives re-derivation and a stored row is never the only copy of the
+ * binding. The row stores the binding fields (event, endpoint, payload
+ * digest, attempt, lineage) so a consumer-presented receipt id resolves to
+ * its delivery without scanning deliveries, and so operators can audit
+ * which attempt a receipt names.
+ *
+ * A receipt holds no signing secret, no payload content (only its SHA-256),
+ * and no HMAC: it identifies a delivery, it cannot authorize one.
+ *
+ * Deliberately relation-free: `webhookId` and `deliveryId` are plain
+ * denormalized references, not Prisma relations. Webhooks are soft-deleted
+ * and deliveries are never deleted, so foreign keys would buy no integrity
+ * here — and relations on this table push the generated client's recursive
+ * types past the TypeScript compiler's default stack (plain `tsc --noEmit`
+ * crashes with a stack overflow). The service always writes both ids from
+ * the delivery row it receipts, and reads resolve the delivery with a
+ * second query.
+ */
+model WebhookDeliveryReceipt {
+  id            String   @id @default(cuid())
+  receiptId     String   @unique
+  version       String   @default("1")
+  webhookId     String
+  deliveryId    String   @unique
+  eventId       String
+  eventType     String
+  payloadHash   String
+  attempt       Int
+  lineageId     String
+  replayOf      String?
+  schemaVersion String   @default("1")
+  createdAt     DateTime @default(now())
+
+  @@index([webhookId, eventId])
+  @@index([lineageId])
+  @@index([eventId])
 }
 
 model AuditLog {
@@ -1562,6 +1621,38 @@ model AuditChainCursor {
   lastSequence BigInt   @default(0)
   lastHash     String?
   updatedAt    DateTime @updatedAt
+}
+
+/// Append-only audit record for privileged row-level-security bypass use.
+///
+/// Every call to `TenantContextService.withBypassContext` writes one row
+/// here, inside the same transaction as the bypassed work, so the record
+/// commits or rolls back with the work it authorizes. There is deliberately
+/// no update or delete path: a bypass that cannot be reconstructed from this
+/// table after the fact is a bypass that should not have happened.
+///
+/// This table itself carries no row-level-security policy: it is the record
+/// of bypasses, so gating it behind the mechanism it audits would hide the
+/// audit trail from exactly the maintenance paths that need to read it. It
+/// is append-only by convention and by the absence of any service that
+/// mutates it; see docs/row-level-security.md.
+model RlsBypassAudit {
+  id             String        @id @default(cuid())
+  /// Bounded caller-supplied justification (1-256 chars, enforced by
+  /// TenantContextService). Never a secret: it is written to the audit log.
+  reason         String
+  /// Who invoked the bypass: a user id, service name, or job name
+  /// (1-128 chars, enforced by TenantContextService).
+  actor          String
+  /// Tenant the maintenance concerned, when the work was scoped to one.
+  /// Null for cross-tenant maintenance (for example a backfill).
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  createdAt      DateTime      @default(now())
+
+  @@index([createdAt])
+  @@index([actor, createdAt])
+  @@index([organizationId, createdAt])
 }
 
 model AnchoringIntent {
@@ -4450,4 +4541,103 @@ model OfflineBundle {
   @@index([organizationId, expiresAt])
   @@index([organizationId, createdAt])
   @@index([expiresAt])
+}
+
+/// Exclusive, expiring lease on one Stellar source account. Holding it is what
+/// stops two workers from building transactions against the same account (and
+/// therefore the same sequence number) at once. `accountKey` is a SHA-256 of
+/// the source identifier; the identifier itself is never stored.
+model SourceAccountSequenceLease {
+  id             String   @id @default(cuid())
+  accountKey     String   @unique
+  holderToken    String
+  holderId       String
+  /// Incremented on every takeover of an expired lease, so a stale holder can
+  /// be recognised by the token it no longer owns.
+  fencingCounter Int      @default(1)
+  expiresAt      DateTime
+  acquiredAt     DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([expiresAt])
+}
+
+/// Privacy-safe audit of one pre-submission Soroban simulation. It holds
+/// numbers and stable reason codes only: no XDR, no contract arguments, no
+/// error text, and the proof id appears only as a hash. `correlationId` is also
+/// emitted in the submission log line so a simulation can be tied to the
+/// transaction that followed it.
+model ContractSimulationRecord {
+  id                       String    @id @default(cuid())
+  correlationId            String    @unique
+  operation                String
+  proofIdHash              String
+  outcome                  String
+  reasonCode               String?
+  latestLedger             Int?
+  minResourceFee           String?
+  cpuInstructions          String?
+  memoryBytes              String?
+  authEntryCount           Int?
+  restoreRequired          Boolean   @default(false)
+  submittedTransactionHash String?
+  submittedAt              DateTime?
+  createdAt                DateTime  @default(now())
+
+  @@index([proofIdHash])
+  @@index([createdAt])
+}
+
+enum ContractEventGapStatus {
+  /// Missing range recorded; waiting for a backfill to claim it.
+  DETECTED
+  /// A backfill worker holds the range.
+  BACKFILLING
+  /// Every ledger in the range has been covered.
+  RESOLVED
+  /// The range can no longer be recovered (provider retention or retries exhausted).
+  IRRECOVERABLE
+}
+
+/// How far live ingestion has seen a contract event stream. Gaps below this
+/// ledger are recorded in ContractEventGap rather than implied by the cursor.
+model ContractEventCursor {
+  /// `<network>:<contractId>`
+  streamKey          String   @id
+  highestSeenLedger  Int
+  /// Optimistic concurrency guard: every update must match the version it read.
+  version            Int      @default(0)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+/// A durable record of a ledger range of contract events that has not been
+/// projected. Partially backfilled ranges shrink to what remains.
+model ContractEventGap {
+  id            String                 @id @default(cuid())
+  streamKey     String
+  fromLedger    Int
+  toLedger      Int
+  status        ContractEventGapStatus @default(DETECTED)
+  attempts      Int                    @default(0)
+  /// Stable reason code only; never raw provider output.
+  failureReason String?
+  detectedAt    DateTime               @default(now())
+  resolvedAt    DateTime?
+  updatedAt     DateTime               @updatedAt
+
+  @@unique([streamKey, fromLedger, toLedger])
+  @@index([status, streamKey, fromLedger])
+}
+
+/// Events already applied to the projection. The primary key makes applying an
+/// event idempotent across live ingestion and backfill.
+model ContractEventApplied {
+  streamKey String
+  eventId   String
+  ledger    Int
+  appliedAt DateTime @default(now())
+
+  @@id([streamKey, eventId])
+  @@index([streamKey, ledger])
 }

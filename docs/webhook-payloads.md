@@ -47,6 +47,13 @@ Byte-exact version-1 examples for every event type live in
 - **Pinned versions.** Each endpoint stores the `payloadVersion` it was created
   with (default: current). Introducing a new version does not change what
   existing endpoints receive.
+- **Versioned delivery receipts.** Every attempt carries a deterministic
+  receipt id (`X-EarnProof-Receipt`, `wr_v1_` + SHA-256) bound to the event
+  id, endpoint, attempt lineage, and the SHA-256 of the exact payload bytes.
+  Retries share a lineage and differ by attempt; replays and redrives start
+  a fresh lineage. Receipts contain no secret and no payload content, so
+  they identify a delivery without authorizing one. See
+  [webhooks.md](webhooks.md#delivery-receipts).
 
 ## Changing a payload
 

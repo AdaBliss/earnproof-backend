@@ -1,3 +1,4 @@
+import { tryParseStellarAmount } from "../common/validation/stellar-amount";
 import { FIELD_LIMITS } from "../common/limits/request-limits";
 
 /**
@@ -156,9 +157,7 @@ export function resolvePeriod(periodStart: string, periodEnd: string, now: Date)
 
 /** Parses a Stellar decimal amount into stroops, or `null` if it is not one. */
 export function parseStroops(amount: string): bigint | null {
-  const match = /^(\d{1,19})(?:\.(\d{1,7}))?$/.exec(amount);
-  if (!match) return null;
-  return BigInt(match[1]) * STROOPS_PER_UNIT + BigInt((match[2] ?? "").padEnd(7, "0"));
+  return tryParseStellarAmount(amount);
 }
 
 /** Formats stroops as a canonical seven-decimal string. */

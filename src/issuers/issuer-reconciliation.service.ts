@@ -1,9 +1,11 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Interval } from "@nestjs/schedule";
-import { ResourceStatus } from "@prisma/client";
+import { IssuerAssuranceLevel, ResourceStatus } from "@prisma/client";
 import { StructuredLogger } from "../common/logger";
 import { PrismaService } from "../database/prisma.service";
+import { DEFAULT_ACCREDITATION_CLOCK_SKEW_MS } from "./issuer-assurance";
+import { IssuerRegistryService } from "./issuer-registry.service";
 
 /**
  * Maximum number of issuers to reconcile per cycle to bound execution time.
@@ -16,6 +18,24 @@ const RECONCILE_BATCH_SIZE = 30;
 const CHECKPOINT_UPDATE_THROTTLE_MS = 60_000;
 
 /**
+ * Outcome counts for one accreditation-expiry reconciliation pass.
+ *
+ * - `checked`: issuers selected as expired at read time (bounded batch).
+ * - `refreshed`: contract facts differed from the projection and were adopted.
+ * - `unchanged`: contract confirmed the projection; only the observation
+ *   marker (`accreditationSyncedAt`) moved.
+ * - `skipped`: contract read unavailable, or the row left ACTIVE between the
+ *   read and the write — left untouched, which fails closed because the local
+ *   expiry already yields an EXPIRED effective status.
+ */
+export type AccreditationExpiryReconciliationSummary = {
+  checked: number;
+  refreshed: number;
+  unchanged: number;
+  skipped: number;
+};
+
+/**
  * IssuerReconciliationService
  * 
  * Reconciles live issuer contract state into backend projections.
@@ -26,6 +46,9 @@ const CHECKPOINT_UPDATE_THROTTLE_MS = 60_000;
  * - Handle lifecycle changes (suspension, reactivation, revocation)
  * - Process address rotation and metadata updates
  * - Quarantine conflicts that cannot be resolved automatically
+ * - Reconcile accreditation expiry against the registry contract, so an
+ *   expired accreditation is re-observed (and renewed or withdrawn
+ *   accreditation adopted) instead of lingering in a stale projection
  * - Maintain bounded reconciliation checkpoints
  * 
  * This extends existing issuer registry sync rather than replacing it.
@@ -41,6 +64,7 @@ export class IssuerReconciliationService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly issuerRegistryService: IssuerRegistryService,
   ) {
     this.enabled = config.get<boolean>("issuerRegistry.enabled") ?? false;
     this.contractId = config.get<string>("issuerRegistry.contractId") ?? "";
@@ -58,6 +82,10 @@ export class IssuerReconciliationService {
       
       // For MVP, focus on reconciling issuers that have been synced to contract
       await this.reconcileSyncedIssuers();
+
+      // Re-observe accreditation expiry from the contract, so expired
+      // accreditations do not linger in stale projections.
+      await this.reconcileAccreditationExpiry();
       
       await this.updateCheckpointIfThrottled(checkpoint);
       
@@ -127,6 +155,184 @@ export class IssuerReconciliationService {
         contractId: this.contractId,
       });
     }
+  }
+
+  /**
+   * Reconcile accreditation expiry against the registry contract.
+   *
+   * Accreditation expires with the passage of time, so a projection can lag
+   * reality: the effective status is computed live from the stored expiry
+   * (and already reads EXPIRED the instant it passes), but the stored
+   * projection still needs re-observation — the contract may have renewed
+   * the accreditation, withdrawn it, or changed its level since the last
+   * sync. This pass selects the bounded batch of ACTIVE, accredited issuers
+   * whose expiry has passed (beyond the clock-skew tolerance, on the
+   * `(assuranceLevel, accreditationExpiresAt)` index), reads each one from
+   * the contract, and adopts the contract facts.
+   *
+   * Design guarantees:
+   *  - Contract wins, always. Adopted level and expiry come only from the
+   *    contract read; tenant metadata is never consulted.
+   *  - Fail closed. A disabled or failed contract read leaves the row
+   *    untouched — the local expiry already yields an EXPIRED effective
+   *    status, so skipping cannot assert an active accreditation.
+   *  - Deterministic and bounded. One batch per call, oldest expiry first,
+   *    same skew boundary as the effective-status function and the API
+   *    filter, so the job and the API never disagree about what is expired.
+   *  - Idempotent and restartable. A row that left ACTIVE between the read
+   *    and the write is skipped via the conditional update; a re-run finds
+   *    only rows whose observation is still the old one, and audit logs are
+   *    written only when contract facts actually change.
+   *  - The stored lifecycle `status` is never moved here: issuers never take
+   *    EXPIRED as a stored status — expiry is an effective status derived
+   *    from the assurance fields.
+   */
+  async reconcileAccreditationExpiry(
+    now: Date = new Date(),
+  ): Promise<AccreditationExpiryReconciliationSummary> {
+    if (!this.enabled || !this.contractId) {
+      return { checked: 0, refreshed: 0, unchanged: 0, skipped: 0 };
+    }
+
+    // The skew tolerance is folded into the query bound so the database
+    // returns only rows that are genuinely past expiry, keeping the scan on
+    // the accreditation index and the effective-status verdict consistent.
+    const cutoff = new Date(
+      now.getTime() - DEFAULT_ACCREDITATION_CLOCK_SKEW_MS,
+    );
+
+    const due = await this.prisma.issuer.findMany({
+      where: {
+        status: ResourceStatus.ACTIVE,
+        assuranceLevel: { not: IssuerAssuranceLevel.NONE },
+        accreditationExpiresAt: { not: null, lte: cutoff },
+      },
+      select: {
+        id: true,
+        stellarAddress: true,
+        status: true,
+        assuranceLevel: true,
+        accreditationExpiresAt: true,
+        accreditationSyncedAt: true,
+        updatedAt: true,
+      },
+      take: RECONCILE_BATCH_SIZE,
+      orderBy: { accreditationExpiresAt: "asc" },
+    });
+
+    let refreshed = 0;
+    let unchanged = 0;
+    let skipped = 0;
+
+    for (const issuer of due) {
+      try {
+        const outcome = await this.reconcileIssuerAccreditation(issuer, now);
+        if (outcome === "refreshed") refreshed++;
+        else if (outcome === "unchanged") unchanged++;
+        else skipped++;
+      } catch (error) {
+        skipped++;
+        this.logger.warn("Failed to reconcile issuer accreditation", {
+          issuerId: issuer.id,
+          stellarAddress: issuer.stellarAddress,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    if (due.length > 0) {
+      this.logger.log("Issuer accreditation expiry reconciliation completed", {
+        issuerCount: due.length,
+        refreshed,
+        unchanged,
+        skipped,
+        contractId: this.contractId,
+      });
+    }
+
+    return { checked: due.length, refreshed, unchanged, skipped };
+  }
+
+  /**
+   * Re-observe one expired-accreditation issuer from the contract and adopt
+   * the contract facts. Returns whether the projection changed, was
+   * confirmed, or was left untouched.
+   */
+  private async reconcileIssuerAccreditation(
+    issuer: {
+      id: string;
+      stellarAddress: string;
+      status: ResourceStatus;
+      assuranceLevel: IssuerAssuranceLevel;
+      accreditationExpiresAt: Date | null;
+      accreditationSyncedAt: Date | null;
+      updatedAt: Date;
+    },
+    now: Date,
+  ): Promise<"refreshed" | "unchanged" | "skipped"> {
+    const assurance = await this.issuerRegistryService.readIssuerAssurance(
+      issuer.id,
+    );
+    if (assurance.state !== "found") {
+      this.logger.warn("Issuer accreditation reconciliation skipped", {
+        issuerId: issuer.id,
+        stellarAddress: issuer.stellarAddress,
+        reason:
+          assurance.state === "disabled" ? assurance.reason : assurance.error,
+      });
+      return "skipped";
+    }
+
+    const changed =
+      assurance.assuranceLevel !== issuer.assuranceLevel ||
+      (assurance.accreditationExpiresAt?.getTime() ?? null) !==
+        (issuer.accreditationExpiresAt?.getTime() ?? null);
+
+    // Adopt the contract facts only while the row is still the ACTIVE row we
+    // read. A concurrent lifecycle change (suspend/revoke) wins over this
+    // write: `count` is 0 and the row is left for the next cycle.
+    const applied = await this.prisma.issuer.updateMany({
+      where: { id: issuer.id, status: ResourceStatus.ACTIVE },
+      data: {
+        assuranceLevel: assurance.assuranceLevel,
+        accreditationExpiresAt: assurance.accreditationExpiresAt,
+        accreditationSyncedAt: assurance.observedAt,
+        accreditationContractId: assurance.contractId,
+      },
+    });
+    if (applied.count === 0) return "skipped";
+
+    if (!changed) return "unchanged";
+
+    await this.prisma.auditLog.create({
+      data: {
+        actorType: "System",
+        actorId: "issuer_reconciliation_service",
+        action: "RECONCILE_ACCREDITATION",
+        resourceType: "Issuer",
+        resourceId: issuer.id,
+        metadata: {
+          previousAssuranceLevel: issuer.assuranceLevel,
+          newAssuranceLevel: assurance.assuranceLevel,
+          previousAccreditationExpiresAt:
+            issuer.accreditationExpiresAt?.toISOString() ?? null,
+          newAccreditationExpiresAt:
+            assurance.accreditationExpiresAt?.toISOString() ?? null,
+          contractId: assurance.contractId,
+          reason: "accreditation_expiry_reconciliation",
+          timestamp: now.toISOString(),
+        },
+      },
+    });
+
+    this.logger.log("Issuer accreditation reconciled from contract state", {
+      issuerId: issuer.id,
+      stellarAddress: issuer.stellarAddress,
+      previousAssuranceLevel: issuer.assuranceLevel,
+      newAssuranceLevel: assurance.assuranceLevel,
+    });
+
+    return "refreshed";
   }
 
   /**
@@ -417,6 +623,20 @@ export class IssuerReconciliationService {
         },
       });
 
+      // Currently-expired accreditations, by the same boundary the API filter
+      // and the reconciler use. Observable so operators can see whether the
+      // expiry pass is keeping up, without reading the issuer table.
+      const expiredAccreditationCount = await this.prisma.issuer.count({
+        where: {
+          status: ResourceStatus.ACTIVE,
+          assuranceLevel: { not: IssuerAssuranceLevel.NONE },
+          accreditationExpiresAt: {
+            not: null,
+            lte: new Date(Date.now() - DEFAULT_ACCREDITATION_CLOCK_SKEW_MS),
+          },
+        },
+      });
+
       return {
         enabled: true,
         contractId: this.contractId,
@@ -424,6 +644,7 @@ export class IssuerReconciliationService {
         lastSyncedAt: checkpoint?.lastSyncedAt?.toISOString() ?? null,
         syncState: checkpoint?.syncState ?? "UNKNOWN",
         quarantinedConflicts: conflictCount,
+        expiredAccreditationCount,
       };
     } catch (error) {
       return {

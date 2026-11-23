@@ -9,6 +9,13 @@ import { NotificationsModule } from "../notifications/notifications.module";
 import { WebhooksModule } from "../webhooks/webhooks.module";
 import { CredentialVerificationKeyService } from "../common/crypto/credential-verification-key.service";
 import { ContractAnchoringService } from "./contract-anchoring.service";
+import {
+  SequenceCoordinatorPort,
+  SimulationAuditPort,
+} from "./soroban/ports";
+import { SorobanRpcClient } from "./soroban/soroban-rpc.client";
+import { SimulationAuditService } from "./soroban/simulation-audit.service";
+import { SourceSequenceCoordinator } from "./soroban/source-sequence-coordinator.service";
 import { ProofsController } from "./proofs.controller";
 import { ProofsService } from "./proofs.service";
 import { ProofSharingService } from "./proof-sharing.service";
@@ -38,6 +45,11 @@ import { PurposeDeclarationsController } from "./purpose-declarations.controller
   controllers: [ProofsController, ProofExpirationReminderController, RevocationCheckpointController, PurposeDeclarationsController],
   providers: [
     ContractAnchoringService,
+    SorobanRpcClient,
+    SimulationAuditService,
+    SourceSequenceCoordinator,
+    { provide: SimulationAuditPort, useExisting: SimulationAuditService },
+    { provide: SequenceCoordinatorPort, useExisting: SourceSequenceCoordinator },
     CredentialVerificationKeyService,
     ProofsService,
     ProofSharingService,

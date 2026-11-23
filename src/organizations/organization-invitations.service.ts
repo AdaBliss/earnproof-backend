@@ -15,6 +15,12 @@ import {
 import { randomBytes, timingSafeEqual } from "crypto";
 import { AuthenticatedUser } from "../auth/auth.types";
 import { sha256 } from "../common/crypto/hash";
+import {
+  assertTenantOwnershipOrNotFound,
+  TenantContext,
+  tenantContextFromRequest,
+  tenantWhere,
+} from "../common/database/tenant-context";
 import { Clock, SystemClock } from "../common/time/clock";
 import { PrismaService } from "../database/prisma.service";
 import { AcceptOrganizationInvitationDto } from "./dto/accept-organization-invitation.dto";
@@ -506,16 +512,24 @@ export class OrganizationInvitationsService {
     organizationId: string,
     query: ListOrganizationInvitationsDto,
   ): Promise<PaginatedOrganizationInvitationsDto> {
+    // Validate the tenant context before any data access — including the
+    // membership lookup below — so a malformed organizationId fails
+    // closed here rather than anywhere downstream.
+    const tenant = tenantContextFromRequest(user, organizationId);
     await this.ensureCanManageOrganization(user, organizationId);
 
     const page = Math.max(1, query.page || 1);
     const limit = Math.min(100, Math.max(1, query.limit || 20));
     const skip = (page - 1) * limit;
 
-    const where: Prisma.OrganizationInvitationWhereInput = {
-      organizationId,
-      ...(query.status ? { status: query.status } : {}),
-    };
+    // Tenant predicate is built by tenantWhere: the query is scoped to
+    // this organization by construction, never by a bare caller-supplied
+    // value, and a malformed organizationId fails closed here.
+    const where: Prisma.OrganizationInvitationWhereInput = tenantWhere(
+      tenant,
+      query.status ? { status: query.status } : {},
+      { operation: "listInvitations", resourceType: "OrganizationInvitation" },
+    );
 
     const [items, total] = await Promise.all([
       this.prisma.organizationInvitation.findMany({
@@ -543,32 +557,49 @@ export class OrganizationInvitationsService {
     organizationId: string,
     invitationId: string,
   ): Promise<OrganizationInvitationResponseDto> {
+    // Validate the tenant context before any data access.
+    const tenant = tenantContextFromRequest(user, organizationId);
     await this.ensureCanManageOrganization(user, organizationId);
 
     const invitation = await this.prisma.organizationInvitation.findUnique({
       where: { id: invitationId },
     });
 
-    if (!invitation || invitation.organizationId !== organizationId) {
-      throw new NotFoundException("Invitation not found");
-    }
+    // A row owned by another tenant is reported as not found
+    // (information hiding), exactly as the previous inline check did.
+    assertTenantOwnershipOrNotFound(invitation, tenant, {
+      operation: "getInvitation",
+      resourceType: "OrganizationInvitation",
+    });
 
-    return this.toResponseDto(invitation);
+    return this.toResponseDto(invitation!);
   }
 
   /**
    * Reconcile/cleanup expired invitations by transitioning PENDING invitations
    * past expiresAt to EXPIRED status.
+   *
+   * Background-job entry point: the caller must supply an explicit tenant
+   * context (see `tenantContextFromJob`). A missing context fails closed —
+   * this method no longer sweeps across all organizations when called
+   * without one, so a job payload without an `organizationId` reconciles
+   * nothing instead of every tenant's invitations.
    */
   async cleanupExpiredInvitations(
-    organizationId?: string,
+    context: TenantContext,
   ): Promise<{ reconciledCount: number }> {
     const now = this.clock.now();
-    const where: Prisma.OrganizationInvitationWhereInput = {
-      ...(organizationId ? { organizationId } : {}),
-      status: OrganizationInvitationStatus.PENDING,
-      expiresAt: { lte: now },
-    };
+    const where: Prisma.OrganizationInvitationWhereInput = tenantWhere(
+      context,
+      {
+        status: OrganizationInvitationStatus.PENDING,
+        expiresAt: { lte: now },
+      },
+      {
+        operation: "cleanupExpiredInvitations",
+        resourceType: "OrganizationInvitation",
+      },
+    );
 
     const result = await this.prisma.organizationInvitation.updateMany({
       where,

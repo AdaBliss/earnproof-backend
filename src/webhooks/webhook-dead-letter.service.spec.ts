@@ -6,6 +6,7 @@ import { validate } from "class-validator";
 import { encryptProtectedAmount } from "../common/crypto/protected-amount";
 import { RedriveDeadLetterDto, RedriveDeadLettersBatchDto } from "./dto/dead-letter.dto";
 import { WebhookDeadLetterService, redriveKey } from "./webhook-dead-letter.service";
+import { buildDeliveryReceipt } from "./webhook-delivery-receipt";
 import { DeadLetterReason, WebhookDeliveryService } from "./webhook-delivery.service";
 import { WebhookSigningService } from "./webhook-signing.service";
 import { WebhooksController } from "./webhooks.controller";
@@ -34,6 +35,7 @@ function cond(value: unknown, c: unknown): boolean {
 function buildStore(hooks: Hook[]) {
   let deliveries = new Map<string, Row>();
   let audit: Row[] = [];
+  let receipts: Row[] = [];
   let seq = 0;
   const hookOf = (row: Row) => hooks.find((h) => h.id === row.webhookId)!;
   const whereMatch = (row: Row, where: Record<string, unknown>) =>
@@ -93,6 +95,13 @@ function buildStore(hooks: Hook[]) {
 
   const tx = {
     webhookDelivery,
+    webhookDeliveryReceipt: {
+      create: jest.fn(async ({ data }: { data: Row }) => {
+        await tick();
+        receipts.push({ ...data, id: `receipt_${receipts.length + 1}` });
+        return data;
+      }),
+    },
     webhook: {
       findUnique: jest.fn(async ({ where }: { where: { id: string } }) => {
         const hook = hooks.find((h) => h.id === where.id);
@@ -107,11 +116,13 @@ function buildStore(hooks: Hook[]) {
     $transaction: jest.fn(async (fn: (t: typeof tx) => unknown) => {
       const snapshot = new Map([...deliveries].map(([k, v]) => [k, { ...v }]));
       const auditSnapshot = [...audit];
+      const receiptsSnapshot = [...receipts];
       try {
         return await fn(tx);
       } catch (error) {
         deliveries = snapshot;
         audit = auditSnapshot;
+        receipts = receiptsSnapshot;
         throw error;
       }
     }),
@@ -122,6 +133,7 @@ function buildStore(hooks: Hook[]) {
     hooks,
     get deliveries() { return deliveries; },
     get audit() { return audit; },
+    get receipts() { return receipts; },
     add(row: Partial<Row> & { id: string }) {
       deliveries.set(row.id, {
         webhookId: "hook_a",
@@ -229,6 +241,41 @@ describe("WebhookDeadLetterService", () => {
         }),
       ]);
       expect(delivery.dispatch).toHaveBeenCalledWith(result.redriveDeliveryId, "hook_a");
+    });
+
+    it("issues a fresh-lineage receipt for the redrive delivery", async () => {
+      const { service, store } = setup();
+      store.add({ id: "dl_a" });
+
+      const result = await service.redrive("org_a", "dl_a", "op_1", "endpoint restored after outage");
+
+      expect(result.outcome).toBe("redriven");
+      const created = store.deliveries.get(result.redriveDeliveryId!)!;
+      expect(store.receipts).toHaveLength(1);
+      const [receipt] = store.receipts;
+      expect(receipt.deliveryId).toBe(result.redriveDeliveryId);
+      expect(receipt.webhookId).toBe("hook_a");
+      expect(receipt.eventId).toBe("evt_1");
+      expect(receipt.eventType).toBe("proof.created");
+      expect(receipt.attempt).toBe(1);
+      expect(receipt.replayOf).toBe("dl_a");
+      // Fresh lineage: the redrive's attempt 1 never collides with the
+      // dead letter's chain, which shares event, endpoint, and bytes.
+      expect(receipt.lineageId).toBe(created.lineageId);
+      expect(receipt.lineageId).not.toBe("dl_a");
+      expect(receipt.receiptId).toBe(
+        buildDeliveryReceipt({
+          deliveryId: result.redriveDeliveryId!,
+          webhookId: "hook_a",
+          eventId: "evt_1",
+          eventType: "proof.created",
+          payloadBody: BODY,
+          schemaVersion: "1",
+          attempt: 1,
+          lineageId: created.lineageId as string,
+          replayOf: "dl_a",
+        }).receiptId,
+      );
     });
 
     it("is idempotent: a repeat returns the same redrive delivery", async () => {

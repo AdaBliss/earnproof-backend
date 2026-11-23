@@ -7,12 +7,12 @@ import { ApiKeysModule } from "./api-keys/api-keys.module";
 import { ApprovalsModule } from "./approvals/approvals.module";
 import { AuthModule } from "./auth/auth.module";
 import { RateLimitModule } from "./common/rate-limit/rate-limit.module";
+import { EnvelopeEncryptionModule } from "./common/crypto/envelope-encryption.module";
+import { TenantBudgetModule } from "./common/limits/tenant-budget.module";
 import { ConsentModule } from "./common/consent/consent.module";
 import { DisclosureModule } from "./common/disclosure/disclosure.module";
 import { AuthorizationPolicyRegistry } from "./common/guards/authorization-policy.registry";
 import { CommonModule } from "./common/common.module";
-import { EnvelopeEncryptionModule } from "./common/crypto/envelope-encryption.module";
-import { TenantBudgetModule } from "./common/limits/tenant-budget.module";
 import { configuration } from "./config/configuration";
 import { validateEnv } from "./config/env.validation";
 import { CredentialsModule } from "./credentials/credentials.module";
@@ -20,6 +20,7 @@ import { DatabaseModule } from "./database/database.module";
 import { DisputesModule } from "./disputes/disputes.module";
 import { HealthModule } from "./health/health.module";
 import { IntegrationsModule } from "./integrations/integrations.module";
+import { RequestAbortInterceptor } from "./common/interceptors/request-abort.interceptor";
 import { HttpMetricsInterceptor } from "./common/interceptors/http-metrics.interceptor";
 import { IdempotentInterceptor } from "./common/interceptors/idempotent.interceptor";
 import { ObservabilityModule } from "./common/observability/observability.module";
@@ -63,10 +64,11 @@ import { SecurityModule } from "./security/security.module";
     ApprovalsModule,
     AuthModule,
     RateLimitModule,
-    DisputesModule,
     TenantBudgetModule,
     HealthModule,
     EnvelopeEncryptionModule,
+    DisputesModule,
+    HealthModule,
     IntegrationsModule,
     OrganizationsModule,
     DataResidencyModule,
@@ -89,6 +91,10 @@ import { SecurityModule } from "./security/security.module";
     SecurityModule,
   ],
   providers: [
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: RequestAbortInterceptor,
+    },
     {
       provide: APP_INTERCEPTOR,
       useClass: HttpMetricsInterceptor,

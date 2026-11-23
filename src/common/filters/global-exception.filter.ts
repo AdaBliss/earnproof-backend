@@ -14,7 +14,12 @@ import {
   FieldViolationDto,
 } from "../dto/api-error.dto";
 import { REQUEST_ID_HEADER } from "../interceptors/request-id.interceptor";
+import { TransactionRetryExhaustedError } from "../../database/transaction-retry.service";
 import { randomBytes } from "crypto";
+import { RequestAbortedError } from "../request-context/request-abort";
+
+/** Non-standard but widely used status for "client closed request". */
+const CLIENT_CLOSED_REQUEST = 499;
 
 // ─── Prisma error-code buckets ───────────────────────────────────────────────
 // P2002 – unique constraint violation
@@ -73,6 +78,8 @@ export class GlobalExceptionFilter implements ExceptionFilter {
         `[${requestId}] ${statusCode} ${code}: ${this.safeMessage(exception)}`,
         exception instanceof Error ? exception.stack : undefined,
       );
+    } else if (statusCode === CLIENT_CLOSED_REQUEST) {
+      this.logger.debug(`[${requestId}] ${statusCode} ${code}`);
     } else {
       this.logger.warn(`[${requestId}] ${statusCode} ${code}: ${message}`);
     }
@@ -100,6 +107,16 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     violations?: FieldViolationDto[];
     currentRevision?: number;
   } {
+    // A client disconnect is a cancellation, not a fault: never an
+    // INTERNAL_ERROR, and never logged as one.
+    if (exception instanceof RequestAbortedError) {
+      return {
+        statusCode: CLIENT_CLOSED_REQUEST,
+        code: ApiErrorCode.REQUEST_ABORTED,
+        message: "The request was aborted before it completed.",
+      };
+    }
+
     // ── NestJS HTTP exceptions ───────────────────────────────────────────────
     if (exception instanceof HttpException) {
       return this.classifyHttpException(exception);
@@ -113,6 +130,21 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     const parserFailure = this.classifyBodyParserError(exception);
     if (parserFailure) {
       return parserFailure;
+    }
+
+    // ── Exhausted transaction retries ──────────────────────────────────────
+    // A stable 503 with the existing DEPENDENCY_UNAVAILABLE code: every
+    // exhausted retry is the same client-visible condition ("the database
+    // kept conflicting, try again later"), regardless of which Postgres
+    // error ended the last attempt. The per-attempt detail stays
+    // server-side in the redacted retry diagnostics.
+    if (exception instanceof TransactionRetryExhaustedError) {
+      return {
+        statusCode: HttpStatus.SERVICE_UNAVAILABLE,
+        code: ApiErrorCode.DEPENDENCY_UNAVAILABLE,
+        message:
+          "A required service dependency is temporarily unavailable. Please try again later.",
+      };
     }
 
     // ── Prisma errors ────────────────────────────────────────────────────────
@@ -305,11 +337,21 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     const type = (exception as { type?: unknown }).type;
     if (typeof type !== "string") return undefined;
 
-    if (type === "entity.too.large") {
+    if (
+      type === "entity.too.large" ||
+      type === "request.compressed.too.large" ||
+      type === "request.expanded.too.large" ||
+      type === "request.expansion.ratio.exceeded"
+    ) {
       return {
         statusCode: HttpStatus.PAYLOAD_TOO_LARGE,
         code: ApiErrorCode.PAYLOAD_TOO_LARGE,
-        message: "The request exceeds the maximum permitted size.",
+        message:
+          type === "request.expansion.ratio.exceeded"
+            ? "The request exceeds the maximum permitted expansion ratio."
+            : type === "request.compressed.too.large"
+              ? "The compressed request exceeds the maximum permitted size."
+              : "The request exceeds the maximum permitted size.",
       };
     }
 

@@ -1,3 +1,11 @@
+/** Parses a comma-separated list of hex hashes, dropping blanks. */
+function parseHashList(value: string | undefined): string[] {
+  return (value ?? "")
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+}
+
 /**
  * Collects PAYMENT_ENCRYPTION_KEY_V0, _V1, ... into an indexed object
  * (`{ 0: "...", 1: "..." }`) for the payment-encryption keyring service.
@@ -54,6 +62,10 @@ function loadCredentialSigningKeyVerifyUntil(): Record<number, string> {
 export const configuration = () => ({
   nodeEnv: process.env.NODE_ENV ?? "development",
   port: Number(process.env.PORT ?? 4000),
+  trustProxyHops: Number(process.env.TRUST_PROXY_HOPS ?? 0),
+  trustedProxyCidrs: process.env.TRUSTED_PROXY_CIDRS
+    ? process.env.TRUSTED_PROXY_CIDRS.split(",").map((cidr) => cidr.trim())
+    : [],
   databaseUrl: process.env.DATABASE_URL,
   redisUrl: process.env.REDIS_URL,
   appUrl: process.env.APP_URL ?? "http://localhost:3000",
@@ -155,6 +167,69 @@ export const configuration = () => ({
     proofRegistryContractId: process.env.PROOF_REGISTRY_CONTRACT_ID,
     issuerAddress: process.env.EARNPROOF_ISSUER_ADDRESS,
     schemaVersion: Number(process.env.EARNPROOF_SCHEMA_VERSION ?? 1),
+    // Soroban RPC used for pre-submission simulation and the startup identity
+    // check. Unset keeps both off, so existing deployments are unchanged.
+    sorobanRpcUrl: process.env.SOROBAN_RPC_URL,
+    rpcTimeoutMs: Number(process.env.SOROBAN_RPC_TIMEOUT_MS ?? 5_000),
+    // Simulation preflight policy. Defaults sit at Soroban's per-transaction
+    // limits (100M CPU instructions, 40 MiB) and 1 XLM of resource fee.
+    simulation: {
+      enabled: process.env.CONTRACT_SIMULATION_ENABLED !== "false",
+      maxMinResourceFee: Number(
+        process.env.CONTRACT_SIMULATION_MAX_RESOURCE_FEE ?? 10_000_000,
+      ),
+      maxCpuInstructions: Number(
+        process.env.CONTRACT_SIMULATION_MAX_CPU_INSTRUCTIONS ?? 100_000_000,
+      ),
+      maxMemoryBytes: Number(
+        process.env.CONTRACT_SIMULATION_MAX_MEMORY_BYTES ?? 41_943_040,
+      ),
+    },
+    // Window, in ledgers from the current ledger, an authorization entry's
+    // expiration must fall in (both ends inclusive). 17,280 ledgers is ~1 day.
+    authExpiration: {
+      minLedgers: Number(process.env.CONTRACT_AUTH_EXPIRATION_MIN_LEDGERS ?? 2),
+      maxLedgers: Number(process.env.CONTRACT_AUTH_EXPIRATION_MAX_LEDGERS ?? 17_280),
+    },
+    // Lease on the Stellar source account; must exceed one submission attempt.
+    sequenceLease: {
+      ttlMs: Number(process.env.CONTRACT_SEQUENCE_LEASE_TTL_MS ?? 150_000),
+    },
+    // Startup/periodic network + contract identity gate (readiness).
+    identity: {
+      enabled: process.env.CONTRACT_IDENTITY_CHECK_ENABLED !== "false",
+      timeoutMs: Number(process.env.CONTRACT_IDENTITY_TIMEOUT_MS ?? 8_000),
+      recheckIntervalMs: Number(
+        process.env.CONTRACT_IDENTITY_RECHECK_INTERVAL_MS ?? 300_000,
+      ),
+      retryIntervalMs: Number(
+        process.env.CONTRACT_IDENTITY_RETRY_INTERVAL_MS ?? 10_000,
+      ),
+      // Comma-separated hex WASM hashes the deployed contracts may have.
+      proofRegistryWasmHashes: parseHashList(
+        process.env.PROOF_REGISTRY_EXPECTED_WASM_HASHES,
+      ),
+      issuerRegistryWasmHashes: parseHashList(
+        process.env.ISSUER_REGISTRY_EXPECTED_WASM_HASHES,
+      ),
+    },
+    // Fee ceilings and surge policy for contract submissions (stroops).
+    // Validated at startup by env.validation; see src/config/fee-policy.ts.
+    fee: {
+      estimateEnabled: process.env.CONTRACT_FEE_ESTIMATE_ENABLED !== "false",
+      baseFeeStroops: Number(process.env.CONTRACT_FEE_BASE_STROOPS ?? 100),
+      maxFeeStroops: Number(process.env.CONTRACT_FEE_MAX_STROOPS ?? 100_000),
+      surgeThresholdStroops: Number(
+        process.env.CONTRACT_FEE_SURGE_THRESHOLD_STROOPS ?? 1_000,
+      ),
+      surgeMultiplier: Number(process.env.CONTRACT_FEE_SURGE_MULTIPLIER ?? 2),
+      refusalThresholdStroops: Number(
+        process.env.CONTRACT_FEE_REFUSAL_THRESHOLD_STROOPS ?? 1_000_000,
+      ),
+      estimateMaxAgeMs: Number(
+        process.env.CONTRACT_FEE_ESTIMATE_MAX_AGE_MS ?? 60_000,
+      ),
+    },
     // Per-network, per-operation circuit breaker around contract invocation.
     // Slightly more tolerant than Horizon's: a contract call is heavier and its
     // transient failures noisier, so the circuit waits for more of them and
@@ -183,6 +258,29 @@ export const configuration = () => ({
     // every replica and load balancer, so without caching the probe load scales
     // with poll rate rather than with anything meaningful.
     cacheTtlMs: Number(process.env.HEALTH_CACHE_TTL_MS ?? 5000),
+  },
+  // Database connection-pool saturation monitoring. See
+  // docs/runbooks/database-pool-saturation.md. Thresholds are validated and
+  // clamped by the monitor itself, so a misconfigured value degrades to a
+  // safe default instead of failing boot.
+  databasePool: {
+    enabled: process.env.DB_POOL_MONITOR_ENABLED !== "false",
+    warnUtilization: Number(process.env.DB_POOL_WARN_UTILIZATION ?? 0.7),
+    criticalUtilization: Number(
+      process.env.DB_POOL_CRITICAL_UTILIZATION ?? 0.9,
+    ),
+    warnWaitMs: Number(process.env.DB_POOL_WARN_WAIT_MS ?? 100),
+    criticalWaitMs: Number(process.env.DB_POOL_CRITICAL_WAIT_MS ?? 500),
+    sustainSamples: Number(process.env.DB_POOL_SUSTAIN_SAMPLES ?? 3),
+    clearSamples: Number(process.env.DB_POOL_CLEAR_SAMPLES ?? 2),
+    sampleTimeoutMs: Number(process.env.DB_POOL_SAMPLE_TIMEOUT_MS ?? 2000),
+    minSampleIntervalMs: Number(
+      process.env.DB_POOL_MIN_SAMPLE_INTERVAL_MS ?? 1000,
+    ),
+    maxWaitSamples: Number(process.env.DB_POOL_MAX_WAIT_SAMPLES ?? 120),
+    runbook:
+      process.env.DB_POOL_RUNBOOK ??
+      "docs/runbooks/database-pool-saturation.md",
   },
   // Server vs network clock skew monitoring (#328). See docs/clock-skew.md.
   // The monitor only measures; it never adjusts a clock.

@@ -712,7 +712,11 @@ describe("OrganizationInvitationsService", () => {
     it("transitions pending invitations past expiry to EXPIRED", async () => {
       prisma.organizationInvitation.updateMany.mockResolvedValueOnce({ count: 5 });
 
-      const result = await service.cleanupExpiredInvitations(ORG_ID);
+      const result = await service.cleanupExpiredInvitations({
+        organizationId: ORG_ID,
+        source: "job",
+        actorId: "invitation-expiry-cleanup",
+      });
 
       expect(result.reconciledCount).toBe(5);
       expect(prisma.organizationInvitation.updateMany).toHaveBeenCalledWith({
@@ -727,21 +731,15 @@ describe("OrganizationInvitationsService", () => {
       });
     });
 
-    it("reconciles across all organizations when organizationId is omitted", async () => {
-      prisma.organizationInvitation.updateMany.mockResolvedValueOnce({ count: 12 });
-
-      const result = await service.cleanupExpiredInvitations();
-
-      expect(result.reconciledCount).toBe(12);
-      expect(prisma.organizationInvitation.updateMany).toHaveBeenCalledWith({
-        where: {
-          status: OrganizationInvitationStatus.PENDING,
-          expiresAt: { lte: clock.now() },
-        },
-        data: {
-          status: OrganizationInvitationStatus.EXPIRED,
-        },
-      });
+    it("fails closed without a tenant context instead of reconciling across all organizations", async () => {
+      await expect(
+        service.cleanupExpiredInvitations(
+          undefined as unknown as Parameters<
+            typeof service.cleanupExpiredInvitations
+          >[0],
+        ),
+      ).rejects.toThrow("Tenant context is required");
+      expect(prisma.organizationInvitation.updateMany).not.toHaveBeenCalled();
     });
   });
 });

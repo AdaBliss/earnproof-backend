@@ -1,3 +1,4 @@
+import { IsStellarAmount, STELLAR_AMOUNT_PATTERN } from "../../common/validation/stellar-amount";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import {
   ArrayMinSize,
@@ -6,7 +7,6 @@ import {
   IsInt,
   IsOptional,
   IsString,
-  Matches,
   Max,
   Min,
 } from "class-validator";
@@ -30,11 +30,11 @@ export class CreateIncomeRangeProofDto {
       "Inclusive lower bound of the income range, expressed as a decimal string with up to " +
       "7 decimal places. The sum of selected payment amounts must be greater than or equal to " +
       "this value.",
-    pattern: "^\\d+(\\.\\d{1,7})?$",
+    pattern: STELLAR_AMOUNT_PATTERN,
     example: "500.0000000",
   })
   @IsString()
-  @Matches(/^\d+(\.\d{1,7})?$/)
+  @IsStellarAmount()
   lowerBound!: string;
 
   @ApiProperty({
@@ -42,11 +42,11 @@ export class CreateIncomeRangeProofDto {
       "Inclusive upper bound of the income range, expressed as a decimal string with up to " +
       "7 decimal places. The sum of selected payment amounts must be less than or equal to " +
       "this value. Must be strictly greater than `lowerBound`.",
-    pattern: "^\\d+(\\.\\d{1,7})?$",
+    pattern: STELLAR_AMOUNT_PATTERN,
     example: "1500.0000000",
   })
   @IsString()
-  @Matches(/^\d+(\.\d{1,7})?$/)
+  @IsStellarAmount()
   upperBound!: string;
 
   @ApiProperty({

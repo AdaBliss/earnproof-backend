@@ -86,7 +86,6 @@ describe("parseStroops", () => {
     ["1.5", BigInt(15_000_000)],
     ["0.0000001", BigInt(1)],
     ["922337203685.4775807", BigInt("9223372036854775807")],
-    ["9999999999999999999.9999999", BigInt("99999999999999999999999999")],
   ])("parses %s", (amount, stroops) => {
     expect(parseStroops(amount)).toBe(stroops);
   });
@@ -102,6 +101,10 @@ describe("parseStroops", () => {
     ["a comma", "1,000"],
     ["twenty integer digits", "1".repeat(20)],
     ["empty", ""],
+    ["negative zero", "-0"],
+    ["leading zeros", "01.5"],
+    ["above the int64 stroop ceiling", "922337203685.4775808"],
+    ["nineteen integer digits (beyond int64)", "9999999999999999999.9999999"],
   ])("rejects %s", (_label, amount) => {
     expect(parseStroops(amount)).toBeNull();
   });

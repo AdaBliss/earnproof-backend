@@ -36,6 +36,7 @@ export const METRIC_NAMES = {
   // ─── Database health ────────────────────────────────────────────────────
   databaseProbesTotal: "database_probes_total",
   databaseProbeDurationMs: "database_probe_duration_ms",
+  databaseTransactionRetriesTotal: "database_transaction_retries_total",
 
   // ─── Database pool saturation ─────────────────────────────────────────
   databasePoolTimeoutsTotal: "database_pool_timeouts_total",

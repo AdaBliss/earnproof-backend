@@ -106,6 +106,97 @@ runs `npm run sbom:check` in the `backend` job, alongside `lint` and `test`,
 so a PR that lets the inventory drift or introduces a prohibited license
 fails the same way a lint or test failure would.
 
+## Publishing the SBOM with release provenance
+
+The human-readable inventory above is for review. Releases also publish a
+machine-readable SBOM and a provenance record tying it to its source and
+build, so a release can be checked by tooling instead of by reading a
+Markdown table.
+
+### Artifacts
+
+- [`scripts/sbom/sbom.cyclonedx.json`](../scripts/sbom/sbom.cyclonedx.json)
+  — CycloneDX 1.6 SBOM covering the **full** lockfile tree (direct and
+  transitive), deduplicated by name@version and sorted, with each component
+  carrying its package URL, its integrity hash (when recorded), its source
+  classification, and its category (runtime / build / transitive). It is
+  committed: it is fully deterministic — same lockfile, byte-identical
+  file — because the serial number is derived from the component list and
+  there is no wall-clock timestamp anywhere in it.
+- `scripts/sbom/provenance.json` —
+  the release provenance record: schema version, repository URL (with any
+  credentials stripped), source commit SHA and commit date, the SHA-256 of
+  `package-lock.json`, and the SHA-256 of the SBOM. It is **not** committed
+  (gitignored): it names the commit that produced it, so it is regenerated
+  at release time and uploaded by the release workflow.
+
+### Commands
+
+```bash
+npm run sbom:publish       # regenerate both artifacts from the lockfile
+npm run sbom:release-gate  # enforce the release checks (below)
+```
+
+[`scripts/sbom/publish.ts`](../scripts/sbom/publish.ts) writes the
+artifacts; [`scripts/sbom/release-gate.ts`](../scripts/sbom/release-gate.ts)
+re-derives them and fails the release when anything disagrees. The rules
+live in [`scripts/sbom/publish-lib.ts`](../scripts/sbom/publish-lib.ts)
+and are unit-tested in
+[`scripts/sbom/publish-lib.spec.ts`](../scripts/sbom/publish-lib.spec.ts).
+
+### Release gate
+
+`npm run sbom:release-gate` fails (exit 1) when any of these hold:
+
+1. **Drift** — the committed SBOM does not match a fresh regeneration
+   from the current lockfile. Fix with `npm run sbom:publish`.
+2. **Unknown dependency source** — a package has no `resolved` URL in the
+   lockfile, a source host outside the approved list
+   (`registry.npmjs.org`), or a non-https source. A package with no
+   recorded source is "unknown", not "assumed npmjs": the SBOM attests to
+   provenance, it does not guess it.
+3. **Missing integrity hash** — a package with a recorded source URL but
+   no integrity hash cannot be verified against that source.
+4. **Secrets** — any environment value (8+ characters) or generic secret
+   pattern (private-key headers, `ghp_`/`github_pat_` tokens, `sk-` keys,
+   AWS access keys, and similar) appearing in the SBOM or the provenance.
+   Findings name the variable or pattern, never the value, so a gate
+   failure cannot leak the secret into CI logs. The SBOM is built from the
+   lockfile only and never embeds environment values in the first place;
+   the scan exists to prove that.
+5. **Bounds** — more than 5,000 components or a serialized SBOM over
+   5 MiB. The cap keeps a published SBOM reviewable and the gate fast.
+6. **Provenance mismatch** — the provenance lockfile hash does not match
+   `package-lock.json`, or the provenance SBOM hash does not match the
+   committed SBOM. A missing git state (tarball build) is a warning, not
+   a failure, and the provenance record says so explicitly.
+
+Publish and gate are separate on purpose: publish records the truth about
+dependency sources (including `unknown` ones) so the deficiency is
+visible; only the gate decides whether that truth is shippable.
+
+### Release workflow
+
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) runs
+on version tags (`v*`) and manual dispatch. It runs `sbom:publish`,
+then `sbom:release-gate`, and uploads both artifacts
+(`sbom-<tag>`, retained 90 days). It never pushes a tag, publishes to a
+registry, or deploys anything.
+
+### Known gap: lockfile sources are mostly unrecorded
+
+As of the commit that introduced this machinery, `package-lock.json`
+records a `resolved` URL and integrity hash for only 204 of its 820
+packages; the other 616 have neither, so the release gate currently
+fails with 616 unknown-source packages. That is the gate working as
+designed — a release must not ship an SBOM that cannot say where most of
+its dependencies came from — but it means no release can pass the gate
+until the lockfile is regenerated so npm records the sources (for
+example, a clean `npm install` that rewrites the lockfile, followed by
+`npm run sbom:publish`). Regenerating the lockfile is a separate change
+with its own review: it must not change resolved versions, and it must
+re-run `sbom:check` afterwards.
+
 ## Severity triage
 
 Severity is judged on two axes: the **advisory's stated severity** (CVSS /

@@ -3,6 +3,7 @@ import { PrismaService } from "./prisma.service";
 import { MigrationLeaseService } from "./migration-lease.service";
 import { TenantContextService } from "./tenant-context.service";
 import { DistributedLeaseService } from "../jobs/distributed-lease.service";
+import { TransactionRetryService } from "./transaction-retry.service";
 
 @Global()
 @Module({

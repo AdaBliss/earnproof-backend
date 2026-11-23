@@ -139,9 +139,9 @@ something is.
 
 | | |
 |---|---|
-| **Metrics** | `database_probes_total{dependency,health}`, `database_probe_duration_ms{dependency}` |
-| **SLI** | Probe success rate and probe latency |
-| **Objective** | 99.9% probe success; p95 probe < 50 ms |
+| **Metrics** | `database_probes_total{dependency,health}`, `database_probe_duration_ms{dependency}`, `database_transaction_retries_total{db_error_category,retry_outcome}` |
+| **SLI** | Probe success rate and probe latency; transaction retry rate |
+| **Objective** | 99.9% probe success; p95 probe < 50 ms; retried transactions < 1% of transactions |
 | **Runbook** | [database-health.md](runbooks/database-health.md) |
 
 ### Database pool saturation

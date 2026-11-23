@@ -6,6 +6,7 @@
 |---|---|---|---|
 | Database probe failure | `database_probes_total{health="down"}` in 2 consecutive probes | **P1** | Platform on-call |
 | Database probe latency | p95 `database_probe_duration_ms` > 200 ms over 10 min | **P2** | Platform on-call |
+| Transaction retries exhausted | `database_transaction_retries_total{retry_outcome="exhausted"}` rising over 10 min | **P2** | Platform on-call |
 
 The probe is the `SELECT 1` behind `GET /health`. If it fails, essentially every
 endpoint fails with it — this is the most upstream alert in the catalog, and
@@ -70,6 +71,34 @@ If the probe is slow, the trivial query is queueing behind something. Check:
 
 A new unindexed query, or a migration on a large table, both present as sudden
 probe latency.
+
+### 6. Are transactions deadlocking?
+
+Concurrent administrative and worker writes can deadlock under production
+ordering. PostgreSQL aborts one transaction with SQLSTATE 40P01, and
+`TransactionRetryService` retries the aborted transaction with bounded
+jittered backoff (default 3 attempts). Retries are the system working as
+designed; exhausted retries are the signal.
+
+```promql
+# Retries by failure kind — a rise in `deadlock` points at lock ordering,
+# a rise in `pool_timeout` points at pool sizing.
+sum by (db_error_category) (rate(database_transaction_retries_total{retry_outcome="retried"}[10m]))
+# Exhausted retries — operations that failed on every attempt.
+sum by (db_error_category) (rate(database_transaction_retries_total{retry_outcome="exhausted"}[10m]))
+```
+
+- **Retries, no exhaustion** → contention, not an outage. Check which
+  operations are retrying in the logs (`Retrying transaction "..."` lines,
+  correlated by request ID) and whether two writers are taking locks in
+  opposite order.
+- **Exhaustion rising** → the contention is not transient. Look for a
+  long-running transaction holding locks (step 4), and for a hot row or
+  table both writers touch.
+- **Exhausted retries surface as 503 `DEPENDENCY_UNAVAILABLE`** to the
+  client, with the same stable code regardless of which Postgres error
+  ended the last attempt. The per-attempt detail is in the redacted retry
+  diagnostics in the logs, never in the response.
 
 ## Mitigate
 

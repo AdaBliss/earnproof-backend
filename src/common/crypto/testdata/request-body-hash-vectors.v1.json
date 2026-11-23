@@ -1,0 +1,148 @@
+{
+  "version": 1,
+  "vectors": [
+    {
+      "name": "empty-object",
+      "version": 1,
+      "payload": {},
+      "canonical": "{}",
+      "hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "redactedKeys": []
+    },
+    {
+      "name": "flat-key-order",
+      "version": 1,
+      "payload": {
+        "b": 1,
+        "a": "x"
+      },
+      "canonical": "{\"a\":\"x\",\"b\":1}",
+      "hash": "cdab067e9f3beb32d1252cfd63e492592fecbf591b0d08cadb24bb17f3864246",
+      "redactedKeys": []
+    },
+    {
+      "name": "nested-arrays-and-null",
+      "version": 1,
+      "payload": {
+        "z": {
+          "b": [
+            3,
+            2,
+            1
+          ],
+          "a": null
+        },
+        "a": true
+      },
+      "canonical": "{\"a\":true,\"z\":{\"a\":null,\"b\":[3,2,1]}}",
+      "hash": "31cc52e0002885d14e4f86deab29a93db50e924bf64ac6cb8a8d76d3440abb04",
+      "redactedKeys": []
+    },
+    {
+      "name": "unicode",
+      "version": 1,
+      "payload": {
+        "name": "café ☃ 🎉",
+        "emoji": "🎉"
+      },
+      "canonical": "{\"emoji\":\"🎉\",\"name\":\"café ☃ 🎉\"}",
+      "hash": "2424e8989b6bf8e8427a65dc0424829c872d60dfe5058f301f27fadb7b9f027a",
+      "redactedKeys": []
+    },
+    {
+      "name": "numbers",
+      "version": 1,
+      "payload": {
+        "int": 42,
+        "neg": -7,
+        "float": 12.5,
+        "big": 9007199254740991,
+        "exp": 1e+21
+      },
+      "canonical": "{\"big\":9007199254740991,\"exp\":1e+21,\"float\":12.5,\"int\":42,\"neg\":-7}",
+      "hash": "20ac812e6990fb8b953069ceef604b5d52d7f8403f75d70bd09353d7f5441794",
+      "redactedKeys": []
+    },
+    {
+      "name": "array-order-preserved",
+      "version": 1,
+      "payload": {
+        "items": [
+          {
+            "b": 2,
+            "a": 1
+          },
+          "x",
+          null,
+          false
+        ]
+      },
+      "canonical": "{\"items\":[{\"a\":1,\"b\":2},\"x\",null,false]}",
+      "hash": "be45402d7d756f8e14464fc8872c8f2949e19d17de1853724de7ab71e3e7d3ca",
+      "redactedKeys": []
+    },
+    {
+      "name": "secret-keys-redacted",
+      "version": 1,
+      "payload": {
+        "apiKey": "sk-live-123",
+        "nested": {
+          "password": "hunter2",
+          "ok": 1
+        },
+        "token": "abc",
+        "tokenId": "tok_123",
+        "amount": "500.0000000"
+      },
+      "canonical": "{\"amount\":\"500.0000000\",\"nested\":{\"ok\":1},\"tokenId\":\"tok_123\"}",
+      "hash": "7e6935145276beca20c4b602f8e345b13bd1dff5a78e03dfde6338ab9b1c5835",
+      "redactedKeys": [
+        "apiKey",
+        "nested.password",
+        "token"
+      ]
+    },
+    {
+      "name": "escaping",
+      "version": 1,
+      "payload": {
+        "a\"b": "line\nbreak\ttab",
+        "slash": "a/b"
+      },
+      "canonical": "{\"a\\\"b\":\"line\\nbreak\\ttab\",\"slash\":\"a/b\"}",
+      "hash": "1b7cf0f2a96b937db2452ac7a6d2bfd4fd96fd6829469fcaf8763a2b59312dc1",
+      "redactedKeys": []
+    },
+    {
+      "name": "deep-nesting",
+      "version": 1,
+      "payload": {
+        "l1": {
+          "l2": {
+            "l3": {
+              "l4": {
+                "l5": "deep"
+              }
+            }
+          }
+        }
+      },
+      "canonical": "{\"l1\":{\"l2\":{\"l3\":{\"l4\":{\"l5\":\"deep\"}}}}}",
+      "hash": "b253b3b6ac1aec738c46aeee658b7b3db916efeec3208f2ed9999af0569cb8c6",
+      "redactedKeys": []
+    },
+    {
+      "name": "empty-string-and-zero",
+      "version": 1,
+      "payload": {
+        "s": "",
+        "n": 0,
+        "f": false,
+        "arr": []
+      },
+      "canonical": "{\"arr\":[],\"f\":false,\"n\":0,\"s\":\"\"}",
+      "hash": "c0d2742cbab787141d644e96f37afcd6353439c14a40e88621b009c15ba3b06b",
+      "redactedKeys": []
+    }
+  ]
+}

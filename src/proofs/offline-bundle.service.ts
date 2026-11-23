@@ -1,3 +1,4 @@
+import { toSafeNumber } from "../common/validation/safe-integer";
 import { Injectable, Logger, BadRequestException, ForbiddenException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../database/prisma.service";
@@ -296,7 +297,8 @@ export class OfflineBundleService {
   private buildCheckpointSummaries(checkpoints: any[]): CheckpointSummaryDto[] {
     return checkpoints.map((cp) => ({
       proofId: cp.ledger, // Simplified; real implementation would join to proofs
-      version: Number(cp.sequence),
+      // Explicit failure beyond 2^53-1 instead of silent rounding.
+      version: toSafeNumber(cp.sequence),
       observedAt: cp.observedAt.toISOString(),
       status: cp.status,
       revocationHash: cp.root,

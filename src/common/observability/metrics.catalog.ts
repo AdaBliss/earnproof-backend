@@ -17,6 +17,7 @@ export const METRIC_NAMES = {
   // ─── API availability and latency ───────────────────────────────────────
   httpRequestsTotal: "http_requests_total",
   httpRequestDurationMs: "http_request_duration_ms",
+  requestBodyRejectionsTotal: "request_body_rejections_total",
 
   // ─── Horizon sync freshness ─────────────────────────────────────────────
   horizonSyncRunsTotal: "horizon_sync_runs_total",
@@ -35,6 +36,11 @@ export const METRIC_NAMES = {
   // ─── Database health ────────────────────────────────────────────────────
   databaseProbesTotal: "database_probes_total",
   databaseProbeDurationMs: "database_probe_duration_ms",
+  databaseTransactionRetriesTotal: "database_transaction_retries_total",
+
+  // ─── Database pool saturation ─────────────────────────────────────────
+  databasePoolTimeoutsTotal: "database_pool_timeouts_total",
+  databasePoolWaitDurationMs: "database_pool_wait_duration_ms",
 
   // ─── Verification outcomes ──────────────────────────────────────────────
   verificationsTotal: "verifications_total",
@@ -73,6 +79,12 @@ export function registerCoreMetrics(registry: MetricsRegistry): void {
     name: METRIC_NAMES.httpRequestDurationMs,
     help: "HTTP request handling latency in milliseconds, by route template.",
     labelNames: ["route", "method"],
+  });
+
+  registry.registerCounter({
+    name: METRIC_NAMES.requestBodyRejectionsTotal,
+    help: "Request bodies rejected by representation or expansion limits.",
+    labelNames: ["rejection"],
   });
 
   // ─── Horizon sync freshness ─────────────────────────────────────────────
@@ -145,6 +157,24 @@ export function registerCoreMetrics(registry: MetricsRegistry): void {
     name: METRIC_NAMES.databaseProbeDurationMs,
     help: "Database connectivity probe duration in milliseconds.",
     labelNames: ["dependency"],
+  });
+
+  // ─── Database pool saturation ─────────────────────────────────────────
+  // Timeout counts and wait latency from the pool monitor. The wait
+  // histogram observes the p95 wait of each sample, labelled by the
+  // monitor's bounded pool status — never by host, database, or query.
+  registry.registerCounter({
+    name: METRIC_NAMES.databasePoolTimeoutsTotal,
+    help: "Database pool sample and probe timeouts.",
+    labelNames: ["outcome"],
+  });
+
+  registry.registerHistogram({
+    name: METRIC_NAMES.databasePoolWaitDurationMs,
+    help: "Connection wait latency (p95 of each pool sample) in milliseconds, by pool status.",
+    labelNames: ["pool_status"],
+    // Bracketed around the 100 ms warn and 500 ms critical thresholds.
+    buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000],
   });
 
   // ─── Verification outcomes ──────────────────────────────────────────────

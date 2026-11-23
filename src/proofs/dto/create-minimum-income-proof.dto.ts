@@ -1,3 +1,4 @@
+import { IsStellarAmount, STELLAR_AMOUNT_PATTERN } from "../../common/validation/stellar-amount";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import {
   ArrayMaxSize,
@@ -7,7 +8,6 @@ import {
   IsInt,
   IsOptional,
   IsString,
-  Matches,
   Max,
   MaxLength,
   Min,
@@ -36,12 +36,12 @@ export class CreateMinimumIncomeProofDto {
     description:
       "Minimum income threshold expressed as a decimal string with up to 7 decimal places. " +
       "The sum of selected payment amounts must be greater than or equal to this value.",
-    pattern: "^\\d+(\\.\\d{1,7})?$",
+    pattern: STELLAR_AMOUNT_PATTERN,
     example: "500.0000000",
   })
   @IsString()
   @MaxLength(FIELD_LIMITS.decimalAmount)
-  @Matches(/^\d+(\.\d{1,7})?$/)
+  @IsStellarAmount()
   thresholdAmount!: string;
 
   @ApiProperty({

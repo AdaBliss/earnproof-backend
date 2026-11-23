@@ -29,6 +29,9 @@ export enum ApiErrorCode {
   INVALID_CREDENTIALS = "INVALID_CREDENTIALS",
   SESSION_EXPIRED = "SESSION_EXPIRED",
 
+  // 499 – the client closed the connection before the response completed
+  REQUEST_ABORTED = "REQUEST_ABORTED",
+
   // 403 – authenticated but not allowed
   FORBIDDEN = "FORBIDDEN",
 
@@ -75,6 +78,10 @@ export enum ApiErrorCode {
   // TOO_MANY_REQUESTS: retrying immediately will not succeed; the quota
   // resets at the window boundary or when usage is reduced.
   QUOTA_EXCEEDED = "QUOTA_EXCEEDED",
+
+  // 504 – database operation timed out or was cancelled
+  DATABASE_TIMEOUT = "DATABASE_TIMEOUT",
+  DATABASE_CANCELLED = "DATABASE_CANCELLED",
 
   // 503 – a required dependency is unavailable
   DEPENDENCY_UNAVAILABLE = "DEPENDENCY_UNAVAILABLE",

@@ -7,7 +7,11 @@ import {
   Logger,
 } from "@nestjs/common";
 import { PrismaService } from "../database/prisma.service";
-import { CredentialVerificationKeyTrustPin, Prisma } from "@prisma/client";
+import {
+  CredentialVerificationKeyTrustPin,
+  IssuerKeyLifecycleState,
+  Prisma,
+} from "@prisma/client";
 import {
   CreateCredentialVerificationKeyTrustPinDto,
   UpdateCredentialVerificationKeyTrustPinStatusDto,
@@ -61,6 +65,10 @@ export class CredentialVerificationKeyTrustPinService {
         `Issuer ${dto.issuerId} does not belong to organization ${dto.organizationId}`,
       );
     }
+
+    // A compromised or revoked signing key can never be trusted again:
+    // refuse a new pin instead of silently restoring trust.
+    await this.assertSigningKeyTrustable(dto.issuerId, dto.keyId);
 
     // Validate trusted key snapshot doesn't contain private key material
     this.validateKeySnapshot(dto.trustedKeySnapshot);
@@ -288,6 +296,8 @@ export class CredentialVerificationKeyTrustPinService {
    * Check if a key is trusted for verification.
    *
    * Returns true if:
+   * - The issuer signing key is not COMPROMISED or REVOKED (a compromised
+   *   key fails closed even if an ACTIVE pin somehow still exists)
    * - An ACTIVE trust pin exists for the issuer/network/key
    * - The pin is within its effective window (now >= effectiveAt)
    * - The pin has not expired (expiresAt is null or in the future)
@@ -300,6 +310,14 @@ export class CredentialVerificationKeyTrustPinService {
     network: string,
     keyId: string,
   ): Promise<boolean> {
+    const keyState = await this.signingKeyState(issuerId, keyId);
+    if (
+      keyState === IssuerKeyLifecycleState.COMPROMISED ||
+      keyState === IssuerKeyLifecycleState.REVOKED
+    ) {
+      return false;
+    }
+
     const now = new Date();
 
     const pin = await this.prisma.credentialVerificationKeyTrustPin.findFirst({
@@ -352,6 +370,42 @@ export class CredentialVerificationKeyTrustPinService {
     });
 
     this.logger.log(`Deleted trust pin ${id}`);
+  }
+
+  /**
+   * Lifecycle state of the issuer signing key for (issuerId, keyId), or
+   * null when no signing-key row exists (legacy pins predate key
+   * registration). Callers treat null as "no key-level veto": the pin
+   * itself decides, preserving existing behavior for legacy pins.
+   */
+  private async signingKeyState(
+    issuerId: string,
+    keyId: string,
+  ): Promise<IssuerKeyLifecycleState | null> {
+    const key = await this.prisma.issuerSigningKey.findUnique({
+      where: { issuerId_keyId: { issuerId, keyId } },
+      select: { state: true },
+    });
+    return key?.state ?? null;
+  }
+
+  /**
+   * Reject pin creation for a COMPROMISED or REVOKED signing key. A
+   * compromised key must never regain trust through a fresh pin.
+   */
+  private async assertSigningKeyTrustable(
+    issuerId: string,
+    keyId: string,
+  ): Promise<void> {
+    const keyState = await this.signingKeyState(issuerId, keyId);
+    if (
+      keyState === IssuerKeyLifecycleState.COMPROMISED ||
+      keyState === IssuerKeyLifecycleState.REVOKED
+    ) {
+      throw new BadRequestException(
+        `Cannot create a trust pin for a ${keyState.toLowerCase()} signing key`,
+      );
+    }
   }
 
   /**

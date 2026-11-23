@@ -70,6 +70,11 @@ jobs:
       - run: npm ci
       - run: npm run prisma:generate
       - run: npm run migration:safety
+      # Static gate on the production container runtime policy (non-root user,
+      # read-only root filesystem, dropped capabilities, bounded healthcheck,
+      # explicit writable paths). No Docker daemon needed; see
+      # scripts/runtime-policy.ts.
+      - run: npm run runtime:policy
       - run: npm run lint
       - run: npm test -- --runInBand
       # Replays every frozen signing vector through the reference verifier and

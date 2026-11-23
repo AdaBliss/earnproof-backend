@@ -98,4 +98,54 @@ describe("ContractDigestClient", () => {
       // Implementation pending with mocked RPC transport
     });
   });
+
+  describe("response schema validation", () => {
+    const CONTRACT = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
+    const valid = {
+      network: "testnet",
+      contractId: CONTRACT,
+      checkpointNumber: "100",
+      digestVersion: "1.0",
+      components: { issuerCount: "5" },
+      timestamp: new Date().toISOString(),
+    };
+
+    function stubRpc(response: unknown) {
+      const spy = jest
+        .spyOn(client as unknown as { callContractRpc: () => Promise<unknown> }, "callContractRpc")
+        .mockResolvedValue(response);
+      return spy;
+    }
+
+    it("accepts a valid response and tolerates unknown additive fields", async () => {
+      stubRpc({ ...valid, futureField: "ignored" });
+
+      const result = await client.fetchAndVerify("testnet", CONTRACT, "100");
+
+      expect(result.ok).toBe(true);
+    });
+
+    it.each([
+      ["a missing field", { ...valid, components: undefined }],
+      ["a wrong-typed field", { ...valid, checkpointNumber: 100 }],
+      ["an invalid timestamp", { ...valid, timestamp: "not-a-date" }],
+      ["an oversized field", { ...valid, digestVersion: "9".repeat(10_000) }],
+    ])("fails closed on %s without retrying", async (_label, response) => {
+      const spy = stubRpc(response);
+
+      const result = await client.fetchAndVerify("testnet", CONTRACT, "100");
+
+      expect(result.ok).toBe(false);
+      // A schema failure is permanent: exactly one attempt, no backoff.
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not echo the received payload in the failure message", async () => {
+      stubRpc({ ...valid, checkpointNumber: "LEAKED-VALUE" });
+
+      const result = await client.fetchAndVerify("testnet", CONTRACT, "100");
+
+      expect(JSON.stringify(result)).not.toContain("LEAKED-VALUE");
+    });
+  });
 });

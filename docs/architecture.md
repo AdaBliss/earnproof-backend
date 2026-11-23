@@ -181,7 +181,7 @@ Trusted attestation sources and their on-chain registry mirror.
 |---|---|
 | **Public interface** | `/issuers` CRUD, status transitions, registry sync, ADMIN-only `/issuers/:id/address-rotations` |
 | **Owned tables** | `Issuer`, `Attestation`, `IssuerAddressRotation`, `IssuerAddressHistory` |
-| **Key files** | [`issuers.service.ts`](../src/issuers/issuers.service.ts), [`issuer-registry.service.ts`](../src/issuers/issuer-registry.service.ts), [`issuer-address-rotation.service.ts`](../src/issuers/issuer-address-rotation.service.ts) |
+| **Key files** | [`issuers.service.ts`](../src/issuers/issuers.service.ts), [`issuer-registry.service.ts`](../src/issuers/issuer-registry.service.ts), [`issuer-address-rotation.service.ts`](../src/issuers/issuer-address-rotation.service.ts), [`issuer-assurance.ts`](../src/issuers/issuer-assurance.ts) ([details](issuer-assurance-accreditation.md)) |
 | **Must not depend on** | `proofs`, `payments` |
 
 ### `payments` — [`src/payments/`](../src/payments/)

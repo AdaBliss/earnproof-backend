@@ -19,3 +19,13 @@ overlap at least as long as the maximum credential verification lifetime.
 The response is sorted by key identifier and includes an `ETag` plus
 `Cache-Control: public, max-age=300, must-revalidate`. A matching
 `If-None-Match` receives `304 Not Modified`.
+
+## Compromised issuer keys
+
+When an issuer signing key is reported compromised (see
+`docs/issuer-signing-key-compromise-response.md`), every `ACTIVE` trust
+pin for that key is revoked and no new pin can be created for it, so
+the key fails verification policy immediately and permanently. Trust
+decisions for such keys fail closed even if an `ACTIVE` pin somehow
+still exists. Recovery means registering a new key under a new `keyId`;
+the compromised `keyId` is never trusted again.

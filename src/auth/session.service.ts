@@ -1,9 +1,10 @@
-import { Injectable, UnauthorizedException } from "@nestjs/common";
+import { Injectable, Logger, UnauthorizedException } from "@nestjs/common";
 import type { Prisma } from "@prisma/client";
 import { ConfigService } from "@nestjs/config";
 import { randomBytes } from "crypto";
 import { PrismaService } from "../database/prisma.service";
 import { sha256 } from "../common/crypto/hash";
+import { VersionedHashService } from "../common/crypto/versioned-hash.service";
 import { AuthenticatedUser } from "./auth.types";
 import { Clock, SystemClock } from "../common/time/clock";
 import { deriveDeviceLabel, escapeLabel, SessionDeviceHeaders } from "./session-device-metadata";
@@ -17,6 +18,7 @@ type SessionLookup = {
   walletHash: string | null;
   expiresAt: Date;
   revokedAt: Date | null;
+  tokenHashVersion?: number;
 };
 
 export type SessionIdentity = {
@@ -40,16 +42,10 @@ export class SessionService {
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly versionedHashService: VersionedHashService,
     configService: ConfigService,
-    // Defaults to the real system clock so every existing call site (Nest's
-    // DI container, and every test that constructs SessionService directly)
-    // keeps working unchanged; pass a FixedClock (test/time/fixed-clock.ts)
-    // to control "now" deterministically in boundary tests.
     private readonly clock: Clock = new SystemClock(),
   ) {
-    // Re-use the existing SESSION_SECRET env var to confirm the config is
-    // present; actual token confidentiality comes from the random bytes,
-    // not from HMAC signing.
     configService.getOrThrow<string>("sessionSecret");
     this.sessionTtlSeconds = DEFAULT_TTL_SECONDS;
   }
@@ -99,6 +95,9 @@ export class SessionService {
    * the wallet identity the session was issued to (null for legacy sessions).
    * Comparing that identity with the account's current wallet is the caller's
    * job (`AuthGuard`), since only the caller loads the account.
+   *
+   * Supports progressive upgrade: if the token verifies with an old hash version,
+   * the hash is automatically re-hashed with the current version on next persist.
    */
   async validate(
     token: string,
@@ -122,11 +121,21 @@ export class SessionService {
       throw new UnauthorizedException("Session has expired");
     }
 
-    // Fire-and-forget lastUsedAt update — failure is non-fatal.
+    // Fire-and-forget lastUsedAt update and progressive hash upgrade
     this.prisma.authSession
       .update({
         where: { id: session.id },
-        data: { lastUsedAt: this.clock.now(), lastSeenAt: this.clock.now() },
+        data: {
+          lastUsedAt: this.clock.now(),
+          lastSeenAt: this.clock.now(),
+          // Progressive upgrade: if hash uses old version, store the upgraded hash
+          ...(session.tokenHashVersion && session.tokenHashVersion < 2
+            ? {
+                tokenHash: this.versionedHashService.hashToken(token),
+                tokenHashVersion: 2,
+              }
+            : {}),
+        },
       })
       .catch(() => {
         // Deliberately swallowed: a failed timestamp update must not break
@@ -455,14 +464,15 @@ export class SessionService {
   }
 
   /**
-   * Hash an arbitrary token string for database lookup.
+   * Hash an arbitrary token string for database lookup using versioned hashing.
    * Returns `null` for obviously malformed inputs (missing `.` separator).
    */
   private hashToken(token: string): string | null {
     if (!/^[A-Za-z0-9_-]{16}\.[a-f0-9]{64}$/.test(token)) {
       return null;
     }
-    return sha256(token);
+    // Use versioned hashing service instead of simple sha256
+    return this.versionedHashService.hashToken(token);
   }
 
   private findSessionByHash(tokenHash: string): Promise<SessionLookup | null> {
@@ -473,8 +483,9 @@ export class SessionService {
         userId: true,
         walletHash: true,
         expiresAt: true,
-          revokedAt: true,
-          lastSeenAt: true,
+        revokedAt: true,
+        lastSeenAt: true,
+        tokenHashVersion: true,
       },
     });
   }

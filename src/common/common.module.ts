@@ -1,9 +1,11 @@
 import { Module, Global } from "@nestjs/common";
+import { TenantDataAccess } from "./database/tenant-data-access.service";
 import { IdempotencyService } from "./services/idempotency.service";
 import { IdempotentInterceptor } from "./interceptors/idempotent.interceptor";
 import { IdempotentOperationController } from "./idempotency/idempotent-operation.controller";
 import { ConsistencyTokenService } from "./consistency/consistency-token.service";
 import { DomainEventOutboxService } from "./events/domain-event-outbox.service";
+import { ProtocolConfigCache } from "./cache/protocol-config-cache";
 import { PaginationModule } from "./pagination/pagination.module";
 
 /**
@@ -18,12 +20,14 @@ import { PaginationModule } from "./pagination/pagination.module";
     IdempotentInterceptor,
     ConsistencyTokenService,
     DomainEventOutboxService,
+    ProtocolConfigCache,
   ],
   exports: [
     IdempotencyService,
     IdempotentInterceptor,
     ConsistencyTokenService,
     DomainEventOutboxService,
+    ProtocolConfigCache,
     PaginationModule,
   ],
 })

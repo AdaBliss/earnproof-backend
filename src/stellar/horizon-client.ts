@@ -5,6 +5,8 @@ import {
   classifyThrown,
   isRetryable,
 } from "./horizon-fault";
+import { formatStellarAmount, tryParseStellarAmount } from "../common/validation/stellar-amount";
+import { tryParseCounter } from "../common/validation/safe-integer";
 import {
   FetchHorizonTransport,
   HorizonTransport,
@@ -610,12 +612,18 @@ function parsePage(body: unknown): ParsedPage | null {
   };
 }
 
+/** Ledger sequences are canonical decimal integers that must fit a safe number. */
+export function parseLedgerSequence(value: unknown): number | null {
+  const counter = tryParseCounter(value);
+  if (counter === null || counter > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+  return Number(counter);
+}
+
 function parseLedger(body: unknown): HorizonLedgerSummary | null {
   if (!body || typeof body !== "object" || Array.isArray(body)) return null;
   const ledger = body as { sequence?: unknown; hash?: unknown };
-  const sequence =
-    typeof ledger.sequence === "number" ? ledger.sequence : Number(ledger.sequence);
-  if (!Number.isSafeInteger(sequence) || sequence <= 0) return null;
+  const sequence = parseLedgerSequence(ledger.sequence);
+  if (sequence === null || sequence <= 0) return null;
   if (typeof ledger.hash !== "string" || !/^[0-9a-f]{64}$/i.test(ledger.hash)) return null;
   return { sequence, hash: ledger.hash.toLowerCase() };
 }
@@ -695,9 +703,10 @@ export function normalizeRecord(record: unknown, address: string): RecordOutcome
     return "malformed";
   }
   if (typeof candidate.from !== "string" || candidate.from.length === 0) return "malformed";
-  if (typeof candidate.amount !== "string" || !isDecimalAmount(candidate.amount)) {
-    return "malformed";
-  }
+  // One canonical parser decides every amount; a non-canonical or out-of-range
+  // value is a malformed record, never persisted.
+  const amountStroops = tryParseStellarAmount(candidate.amount);
+  if (amountStroops === null) return "malformed";
   if (typeof candidate.created_at !== "string") return "malformed";
 
   const occurredAt = new Date(candidate.created_at);
@@ -725,14 +734,9 @@ export function normalizeRecord(record: unknown, address: string): RecordOutcome
     destinationAddress: candidate.to as string,
     assetCode: isNative ? "XLM" : (candidate.asset_code as string),
     assetIssuer: isNative ? null : (candidate.asset_issuer ?? null),
-    amount: candidate.amount,
+    amount: formatStellarAmount(amountStroops),
     occurredAt,
   };
-}
-
-/** Amounts are decimal strings; anything else would corrupt arithmetic downstream. */
-function isDecimalAmount(value: string): boolean {
-  return /^\d+(\.\d+)?$/.test(value);
 }
 
 function faultMessage(kind: HorizonFaultKind): string {

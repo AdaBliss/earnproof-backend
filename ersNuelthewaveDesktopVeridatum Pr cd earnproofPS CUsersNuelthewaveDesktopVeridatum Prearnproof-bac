@@ -1,0 +1,5 @@
+[33m9598290[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmerge/consolidated-features-20261015[m[33m)[m feat: enforce database statement timeouts by workload (#376)
+[33m261dc15[m[33m ([m[1;31morigin/merge/consolidated-features-20261015[m[33m, [m[1;31morigin/feat/issue-334-offline-verification-bundles[m[33m, [m[1;32mmerge/consolidated-20261015-200203[m[33m, [m[1;32mfeat/issue-334-offline-verification-bundles[m[33m)[m feat: implement bounded offline verification bundles (#334)
+[33m0e1492d[m feat: implement bounded offline verification bundles (#334)
+[33m9bcfe63[m[33m ([m[1;31morigin/feat/project-revocation-checkpoint-commitments[m[33m, [m[1;32mfeat/project-revocation-checkpoint-commitments[m[33m, [m[1;32mfeat/issue-bounded-offline-verification-bundles[m[33m)[m feat(issue333): revocation checkpoints
+[33mf142b19[m feat(#333): Implement revocation checkpoint commitments with monotonic enforcement

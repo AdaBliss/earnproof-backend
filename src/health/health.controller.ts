@@ -29,12 +29,11 @@ import { HealthResponseDto } from "./dto/health-response.dto";
 import { DeploymentMetadataResponseDto } from "./dto/deployment-metadata.dto";
 import {
   LivenessResponseDto,
+  PublicReadinessResponseDto,
   ReadinessResponseDto,
 } from "./dto/health-probe.dto";
 import { HealthService } from "./health.service";
-import { ConfigFingerprintService } from "./config-fingerprint.service";
-import { ConfigFingerprintDto } from "./dto/config-fingerprint.dto";
-import { DependencyStatus } from "./health.types";
+import { DependencyStatus, toPublicReadiness } from "./health.types";
 
 /**
  * Deployment metadata only changes on redeploy, so clients may reuse it
@@ -43,6 +42,22 @@ import { DependencyStatus } from "./health.types";
  */
 export const DEPLOYMENT_METADATA_CACHE_CONTROL =
   "public, max-age=60, must-revalidate";
+
+/**
+ * A request ID is client-controlled input, so it is only echoed back when it
+ * matches the same safe shape the RequestIdInterceptor enforces
+ * (alphanumeric, hyphen, underscore; at most 128 characters). Anything else
+ * is dropped rather than reflected into the response body.
+ */
+const SAFE_REQUEST_ID_PATTERN = /^[a-zA-Z0-9\-_]{1,128}$/;
+
+/** Read the validated correlation reference off a request, if it has one. */
+function readRequestId(request: Request): string | undefined {
+  const candidate = (request as Request & { requestId?: unknown }).requestId;
+  return typeof candidate === "string" && SAFE_REQUEST_ID_PATTERN.test(candidate)
+    ? candidate
+    : undefined;
+}
 
 /**
  * If-None-Match uses weak comparison (RFC 9110 §13.1.2): a list of tags, each
@@ -139,11 +154,20 @@ export class HealthController {
   }
 
   /**
-   * Readiness probe.
+   * Readiness probe (public view).
    *
    * Returns 503 when a required dependency is unhealthy so a load balancer stops
    * routing traffic here, and 200 otherwise. Optional dependencies are reported
-   * but never change the status code.
+   * only in diagnostics and never change the status code.
+   *
+   * The public response carries the aggregate verdict only — no dependency
+   * names, reason codes, durations, or diagnostic detail. An unauthenticated
+   * caller learns whether the service can serve work and, via `requestId`,
+   * how to ask an operator about this specific answer; which dependency
+   * failed, and why, is visible only on the authorized diagnostics endpoint.
+   * The 503 carries the same public verdict shape through the standard error
+   * envelope (which adds the correlation reference); it never carries the
+   * per-dependency payload.
    */
   @ApiOperation({
     summary: "Readiness probe",
@@ -151,30 +175,39 @@ export class HealthController {
       "Reports whether the service can accept dependent work. Required " +
       "dependencies (database, configuration) gate the verdict; optional " +
       "dependencies are excluded so an unrelated outage cannot take unrelated " +
-      "routes offline. Probes are timeout-bounded and cached.",
+      "routes offline. Probes are timeout-bounded and cached. The response " +
+      "is the aggregate verdict only: per-dependency detail is available " +
+      "solely from the authorized diagnostics endpoint.",
   })
   @ApiResponse({
     status: HttpStatus.OK,
     description: "All required dependencies are healthy.",
-    type: ReadinessResponseDto,
+    type: PublicReadinessResponseDto,
   })
   @ApiResponse({
     status: HttpStatus.SERVICE_UNAVAILABLE,
-    description: "A required dependency is unhealthy.",
-    type: ReadinessResponseDto,
+    description:
+      "A required dependency is unhealthy. The standard error envelope " +
+      "carries the correlation reference; per-dependency detail is not exposed.",
+    type: ApiErrorDto,
   })
   @Get("ready")
   @PublicRoute()
-  async getReadiness(): Promise<ReadinessResponseDto> {
+  async getReadiness(
+    @Req() request: Request,
+  ): Promise<PublicReadinessResponseDto> {
     const result = await this.health.checkReadiness();
+    const requestId = readRequestId(request);
 
     if (result.status === "not_ready") {
-      // The body is the readiness result itself, not an error envelope: an
-      // operator needs to see WHICH dependency blocked readiness.
-      throw new ServiceUnavailableException(result);
+      // Generic message only: the full readiness result names dependencies
+      // and reason codes, and must never reach an unauthenticated caller.
+      // The global exception filter maps this onto the standard error
+      // envelope, which includes the requestId for correlation.
+      throw new ServiceUnavailableException("Service is not ready");
     }
 
-    return result;
+    return toPublicReadiness(result, requestId);
   }
 
   /**

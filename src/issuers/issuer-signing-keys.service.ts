@@ -153,6 +153,10 @@ export class IssuerSigningKeysService {
 
   /**
    * Mark key as COMPROMISED (security incident).
+   *
+   * Idempotent: reporting an already-compromised key returns it unchanged
+   * instead of rewriting `compromisedAt`, so the original compromise time
+   * is preserved and the key can never be silently restored by re-reporting.
    */
   async markCompromised(
     issuerId: string,
@@ -162,6 +166,22 @@ export class IssuerSigningKeysService {
       where: { issuerId_keyId: { issuerId, keyId } },
     });
     if (!key) throw new NotFoundException(`Signing key "${keyId}" not found`);
+
+    if (key.state === IssuerKeyLifecycleState.COMPROMISED) {
+      return {
+        id: key.id,
+        issuerId: key.issuerId,
+        keyId: key.keyId,
+        publicKey: key.publicKey,
+        commitmentHash: key.commitmentHash,
+        state: key.state,
+        activatedAt: key.activatedAt,
+        retiredAt: key.retiredAt,
+        compromisedAt: key.compromisedAt,
+        revokedAt: key.revokedAt,
+        createdAt: key.createdAt,
+      };
+    }
 
     const updated = await this.prisma.issuerSigningKey.update({
       where: { id: key.id },

@@ -29,6 +29,12 @@
 ARG NODE_VERSION=20.11.1
 ARG ALPINE_VERSION=3.19
 
+# Release provenance. The release workflow passes the commit and the version
+# tag; a local build leaves both as "unknown" rather than inventing values,
+# so an image that claims a commit actually came from that commit.
+ARG GIT_SHA=unknown
+ARG VERSION=unknown
+
 # ── Stage 1: build ──────────────────────────────────────────────────────────
 FROM node:${NODE_VERSION}-alpine${ALPINE_VERSION} AS build
 
@@ -70,13 +76,37 @@ RUN npm ci --omit=dev && npx prisma generate && npm cache clean --force
 # ── Stage 3: runtime ────────────────────────────────────────────────────────
 FROM node:${NODE_VERSION}-alpine${ALPINE_VERSION} AS runtime
 
+# Runtime contract (enforced by `npm run runtime:policy`, see
+# scripts/runtime-policy.ts): this stage runs as the non-root `node` user on
+# a read-only root filesystem. The only writable path is /tmp, mounted as
+# tmpfs by the operator (`--read-only --tmpfs /tmp`); the application itself
+# writes nothing to disk except export archives staged under
+# $TMPDIR/earnproof-exports, created on demand. No Linux capabilities are
+# granted and privilege escalation is disabled at run time
+# (`--cap-drop=ALL --security-opt=no-new-privileges:true`), so nothing in
+# this stage may assume root, a writable /app, or any capability.
+
+# Re-declared so the global build args are visible in this stage: an ARG
+# declared before the first FROM is not in scope after it.
+ARG GIT_SHA=unknown
+ARG VERSION=unknown
+
+# OCI labels: where this image came from and what it claims to be. The
+# signature and provenance attestation published by the release workflow are
+# what make these claims checkable — see docs/deployment.md. Labels alone
+# prove nothing; they only name the thing the signature covers.
+LABEL org.opencontainers.image.title="earnproof-backend" \
+      org.opencontainers.image.source="https://github.com/veridatum-labs/earnproof-backend" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.version="${VERSION}"
 # The one native dependency the query engine needs. Nothing else is installed:
 # no shell tooling, no curl, no build chain — a smaller image is also a smaller
 # thing to exploit.
 RUN apk add --no-cache openssl
 
 ENV NODE_ENV=production \
-    PORT=4000
+    PORT=4000 \
+    TMPDIR=/tmp
 
 WORKDIR /app
 
@@ -108,4 +138,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 # Exec form, so node runs as PID 1 and receives SIGTERM directly. That is what
 # makes the graceful shutdown in src/main.ts fire: readiness flips first, then
 # in-flight work drains. A shell wrapper here would swallow the signal.
+# STOPSIGNAL states the same expectation explicitly: the orchestrator's stop
+# signal is SIGTERM, not SIGKILL, so a container gets its drain window.
+STOPSIGNAL SIGTERM
 CMD ["node", "dist/main.js"]

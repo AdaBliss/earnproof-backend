@@ -146,6 +146,37 @@ describe("IssuerSigningKeysService", () => {
       expect(result.state).toBe(IssuerKeyLifecycleState.COMPROMISED);
       expect(result.compromisedAt).toBeDefined();
     });
+
+    it("should return an already-compromised key unchanged without rewriting compromisedAt", async () => {
+      const originalCompromisedAt = new Date("2026-11-10T08:00:00.000Z");
+      prisma.issuerSigningKey.findUnique.mockResolvedValue({
+        id: "key-rec-1",
+        issuerId: "iss-1",
+        keyId: "k-1",
+        publicKey: "pub-1",
+        commitmentHash: "hash-1",
+        state: IssuerKeyLifecycleState.COMPROMISED,
+        compromisedAt: originalCompromisedAt,
+        retiredAt: null,
+        revokedAt: null,
+        activatedAt: new Date("2026-01-01T00:00:00.000Z"),
+        createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      });
+
+      const result = await service.markCompromised("iss-1", "k-1");
+
+      expect(result.state).toBe(IssuerKeyLifecycleState.COMPROMISED);
+      expect(result.compromisedAt).toEqual(originalCompromisedAt);
+      expect(prisma.issuerSigningKey.update).not.toHaveBeenCalled();
+    });
+
+    it("should fail when the key does not exist", async () => {
+      prisma.issuerSigningKey.findUnique.mockResolvedValue(null);
+
+      await expect(service.markCompromised("iss-1", "missing")).rejects.toThrow(
+        NotFoundException,
+      );
+    });
   });
 
   describe("reconcileKeyWithContract", () => {

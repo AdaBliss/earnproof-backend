@@ -1,8 +1,14 @@
-import { ConflictException, ForbiddenException, NotFoundException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from "@nestjs/common";
 import { ApprovalRequestStatus } from "@prisma/client";
 import { Test, TestingModule } from "@nestjs/testing";
 import { canonicalize } from "../common/crypto/canonicalize";
 import { sha256 } from "../common/crypto/hash";
+import { hashRequestBody } from "../common/crypto/request-body-hash";
 import { PrismaService } from "../database/prisma.service";
 import { ApprovalsService } from "./approvals.service";
 
@@ -21,7 +27,7 @@ describe("ApprovalsService", () => {
   const approver = { id: "user-2", walletAddress: "G2", walletHash: "h2", role: "ADMIN" };
 
   const payload = { organizationId: "org_1", allowedRegions: ["eu-west-1"] };
-  const payloadHash = sha256(canonicalize(payload));
+  const payloadHash = hashRequestBody(payload).hash;
 
   function pendingRequest(overrides: Record<string, unknown> = {}) {
     return {
@@ -29,6 +35,7 @@ describe("ApprovalsService", () => {
       operationType: "organization.residency_policy.override",
       payload,
       payloadHash,
+      payloadHashVersion: 1,
       requestedById: requester.id,
       status: ApprovalRequestStatus.PENDING,
       decidedById: null,
@@ -81,9 +88,47 @@ describe("ApprovalsService", () => {
 
       const createArgs = prisma.approvalRequest.create.mock.calls[0][0];
       expect(createArgs.data.payloadHash).toBe(payloadHash);
+      expect(createArgs.data.payloadHashVersion).toBe(1);
       expect(createArgs.data.requestedById).toBe(requester.id);
       expect(createArgs.data.expiresAt.getTime()).toBeGreaterThan(Date.now());
       expect(prisma.auditLog.create).toHaveBeenCalled();
+      const auditArgs = prisma.auditLog.create.mock.calls[0][0];
+      expect(auditArgs.data.metadata.payloadHash).toBe(payloadHash);
+      expect(auditArgs.data.metadata.payloadHashVersion).toBe(1);
+      expect(auditArgs.data.metadata.redactedKeys).toEqual([]);
+    });
+
+    it("hashes the payload with secret-bearing keys stripped", async () => {
+      prisma.approvalRequest.create.mockResolvedValue(pendingRequest());
+      const secretPayload = { organizationId: "org_1", apiKey: "sk-live-123" };
+
+      await service.create(requester, {
+        operationType: "organization.residency_policy.override",
+        payload: secretPayload,
+      });
+
+      const createArgs = prisma.approvalRequest.create.mock.calls[0][0];
+      // The hash binds only the reviewed, non-secret parameters.
+      expect(createArgs.data.payloadHash).toBe(
+        hashRequestBody({ organizationId: "org_1" }).hash,
+      );
+      expect(createArgs.data.payloadHashVersion).toBe(1);
+      const auditArgs = prisma.auditLog.create.mock.calls[0][0];
+      expect(auditArgs.data.metadata.redactedKeys).toEqual(["apiKey"]);
+      // The raw payload is still stored — execution reads it — only the
+      // hash input excludes secrets.
+      expect(createArgs.data.payload).toEqual(secretPayload);
+    });
+
+    it("rejects an oversized payload as a client error", async () => {
+      await expect(
+        service.create(requester, {
+          operationType: "organization.residency_policy.override",
+          payload: { blob: "x".repeat(1_048_576) },
+        }),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(prisma.approvalRequest.create).not.toHaveBeenCalled();
     });
   });
 
@@ -107,6 +152,18 @@ describe("ApprovalsService", () => {
 
       await expect(
         service.approve(approver, "req-1", { expectedPayloadHash: "stale-hash" }),
+      ).rejects.toThrow(ConflictException);
+
+      expect(prisma.approvalRequest.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("fails closed on an unknown stored hash version", async () => {
+      prisma.approvalRequest.findUnique.mockResolvedValue(
+        pendingRequest({ payloadHashVersion: 99 }),
+      );
+
+      await expect(
+        service.approve(approver, "req-1", { expectedPayloadHash: payloadHash }),
       ).rejects.toThrow(ConflictException);
 
       expect(prisma.approvalRequest.updateMany).not.toHaveBeenCalled();
@@ -220,12 +277,11 @@ describe("ApprovalsService", () => {
 
   describe("claimForExecution / completeExecution", () => {
     it("lets only one concurrent caller claim the execution lease", async () => {
+      const approved = pendingRequest({ status: ApprovalRequestStatus.APPROVED });
+      prisma.approvalRequest.findUnique.mockResolvedValue(approved);
       prisma.approvalRequest.updateMany
         .mockResolvedValueOnce({ count: 1 })
         .mockResolvedValueOnce({ count: 0 });
-      prisma.approvalRequest.findUnique.mockResolvedValueOnce(
-        pendingRequest({ status: ApprovalRequestStatus.APPROVED, executionLeaseToken: "winner" }),
-      );
 
       const [first, second] = await Promise.all([
         service.claimForExecution("req-1"),
@@ -240,7 +296,6 @@ describe("ApprovalsService", () => {
     });
 
     it("refuses to claim a request that is not APPROVED", async () => {
-      prisma.approvalRequest.updateMany.mockResolvedValueOnce({ count: 0 });
       prisma.approvalRequest.findUnique.mockResolvedValueOnce(pendingRequest());
 
       const result = await service.claimForExecution("req-1");
@@ -248,6 +303,52 @@ describe("ApprovalsService", () => {
       if (!result.claimed) {
         expect(result.request.status).toBe(ApprovalRequestStatus.PENDING);
       }
+      expect(prisma.approvalRequest.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("refuses to claim when the stored payload no longer matches the approved hash", async () => {
+      prisma.approvalRequest.findUnique.mockResolvedValue(
+        pendingRequest({
+          status: ApprovalRequestStatus.APPROVED,
+          payload: { organizationId: "org_2", allowedRegions: ["us-east-1"] },
+        }),
+      );
+
+      await expect(service.claimForExecution("req-1")).rejects.toThrow(
+        ConflictException,
+      );
+      expect(prisma.approvalRequest.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("fails closed on an unknown stored hash version at claim time", async () => {
+      prisma.approvalRequest.findUnique.mockResolvedValue(
+        pendingRequest({
+          status: ApprovalRequestStatus.APPROVED,
+          payloadHashVersion: 99,
+        }),
+      );
+
+      await expect(service.claimForExecution("req-1")).rejects.toThrow(
+        ConflictException,
+      );
+      expect(prisma.approvalRequest.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("still claims a pre-redaction row whose legacy unredacted hash matches", async () => {
+      // Rows approved before redaction hashed the raw payload. The stored
+      // hash here is the legacy form for a payload containing a secret.
+      const legacyPayload = { organizationId: "org_1", apiKey: "sk-old" };
+      prisma.approvalRequest.findUnique.mockResolvedValue(
+        pendingRequest({
+          status: ApprovalRequestStatus.APPROVED,
+          payload: legacyPayload,
+          payloadHash: sha256(canonicalize(legacyPayload)),
+        }),
+      );
+      prisma.approvalRequest.updateMany.mockResolvedValueOnce({ count: 1 });
+
+      const result = await service.claimForExecution("req-1");
+      expect(result.claimed).toBe(true);
     });
 
     it("completes execution exactly once for the winning lease", async () => {
@@ -262,6 +363,13 @@ describe("ApprovalsService", () => {
 
       const result = await service.completeExecution("req-1", "token-1");
       expect(result.status).toBe(ApprovalRequestStatus.EXECUTED);
+      // The execution is recorded in the audit trail with the versioned hash.
+      expect(prisma.auditLog.create).toHaveBeenCalledTimes(1);
+      const auditArgs = prisma.auditLog.create.mock.calls[0][0];
+      expect(auditArgs.data.action).toBe("approval.executed");
+      expect(auditArgs.data.resourceId).toBe("req-1");
+      expect(auditArgs.data.metadata.payloadHash).toBe(payloadHash);
+      expect(auditArgs.data.metadata.payloadHashVersion).toBe(1);
     });
 
     it("is idempotent when the same lease completes execution twice", async () => {
@@ -276,6 +384,8 @@ describe("ApprovalsService", () => {
 
       const result = await service.completeExecution("req-1", "token-1");
       expect(result.status).toBe(ApprovalRequestStatus.EXECUTED);
+      // The repeat call records nothing — the first call already did.
+      expect(prisma.auditLog.create).not.toHaveBeenCalled();
     });
 
     it("rejects completion from a caller that does not hold the active lease", async () => {

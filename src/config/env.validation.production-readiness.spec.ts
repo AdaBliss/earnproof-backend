@@ -20,6 +20,8 @@ describe("validateEnv production-readiness settings", () => {
       METRICS_ROLLUP_RAW_RETENTION_HOURS: 6,
       METRICS_ROLLUP_DAY_RETENTION_DAYS: 730,
       PAYMENT_ACCOUNT_ROTATION_CHALLENGE_TTL_MS: 600_000,
+      TRUST_PROXY_HOPS: 0,
+      TRUSTED_PROXY_CIDRS: [],
     });
   });
 
@@ -30,6 +32,12 @@ describe("validateEnv production-readiness settings", () => {
   });
 
   it.each([
+    ["negative proxy hops", { TRUST_PROXY_HOPS: "-1" }, /TRUST_PROXY_HOPS/],
+    ["too many proxy hops", { TRUST_PROXY_HOPS: "11" }, /TRUST_PROXY_HOPS/],
+    ["malformed proxy CIDR", { TRUSTED_PROXY_CIDRS: "not-a-cidr" }, /TRUSTED_PROXY_CIDRS/],
+    ["empty proxy CIDR entry", { TRUSTED_PROXY_CIDRS: "192.0.2.0/24," }, /TRUSTED_PROXY_CIDRS/],
+    ["proxy ranges without hops", { TRUSTED_PROXY_CIDRS: "192.0.2.0/24" }, /TRUSTED_PROXY_CIDRS requires TRUST_PROXY_HOPS/],
+    ["hops without proxy ranges", { TRUST_PROXY_HOPS: "1" }, /TRUST_PROXY_HOPS greater than 0 requires TRUSTED_PROXY_CIDRS/],
     ["critical at or below warn", { CLOCK_SKEW_WARN_MS: "5000", CLOCK_SKEW_CRITICAL_MS: "5000" }, /CLOCK_SKEW_CRITICAL_MS/],
     ["sample age shorter than the interval", { CLOCK_SKEW_INTERVAL_MS: "120000", CLOCK_SKEW_MAX_SAMPLE_AGE_MS: "60000" }, /CLOCK_SKEW_MAX_SAMPLE_AGE_MS/],
     ["an unknown unknown-time policy", { CLOCK_SKEW_UNKNOWN_POLICY: "ignore" }, /CLOCK_SKEW_UNKNOWN_POLICY/],
@@ -41,6 +49,30 @@ describe("validateEnv production-readiness settings", () => {
     ["a challenge TTL under a minute", { PAYMENT_ACCOUNT_ROTATION_CHALLENGE_TTL_MS: "1000" }, /PAYMENT_ACCOUNT_ROTATION_CHALLENGE_TTL_MS/],
   ])("rejects %s", (_label, overrides, message) => {
     expect(() => validateEnv({ ...baseEnv, ...overrides })).toThrow(message);
+  });
+
+  it("accepts a bounded proxy hop count with IPv4 and IPv6 CIDRs", () => {
+    expect(
+      validateEnv({
+        ...baseEnv,
+        TRUST_PROXY_HOPS: "2",
+        TRUSTED_PROXY_CIDRS: "192.0.2.0/24,2001:db8::/32",
+      }),
+    ).toMatchObject({
+      TRUST_PROXY_HOPS: 2,
+      TRUSTED_PROXY_CIDRS: ["192.0.2.0/24", "2001:db8::/32"],
+    });
+  });
+
+  it.each([
+    ["wildcard", "*"],
+    ["path", "https://app.example.com/dashboard"],
+    ["query", "https://app.example.com?next=/dashboard"],
+    ["fragment", "https://app.example.com#dashboard"],
+    ["credentials", "https://user:pass@app.example.com"],
+    ["non-web scheme", "file://app.example.com"],
+  ])("rejects APP_URL containing a %s instead of one exact origin", (_label, APP_URL) => {
+    expect(() => validateEnv({ ...baseEnv, APP_URL })).toThrow(/APP_URL/);
   });
 
   it("never echoes the snapshot signing secret in an error", () => {

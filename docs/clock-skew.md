@@ -101,18 +101,20 @@ so replaying the same assessments always reproduces the same alerts.
 
 `CLOCK_SKEW_READINESS_IMPACT`:
 
-- `critical` (default) — `/health/ready` includes a required `clock_skew`
-  dependency that is `error` (`clock_skew_sustained_critical`) only while a
-  **sustained critical** alert is active *and* the current assessment is still
-  critical. One slow or lying response cannot drain a replica.
+- `critical` (default) — a sustained critical clock skew alert makes the
+  readiness verdict `not_ready`. The public readiness response does not name
+  the `clock_skew` dependency or its reason code; the verdict alone is
+  public, and the detail lives in diagnostics. One slow or lying response
+  cannot drain a replica.
 - `none` — readiness never includes clock skew.
 
 `/health/diagnostics` (API key + `ORG_ADMIN`) always includes a `clock_skew`
 entry with the instantaneous classification (`ok`, `degraded` for warning,
 `error` for critical, unknown mapped by policy), the alert state, the policy
 and per-source outcome codes. It is `required` only while it blocks readiness,
-so the diagnostics verdict never disagrees with readiness. Readiness carries
-reason codes only; the measured numbers appear in diagnostics only.
+so the diagnostics verdict never disagrees with readiness. The public
+readiness response carries the verdict only — no reason codes, no measured
+numbers; both appear in diagnostics only.
 
 Errors from a source are reported as codes the module minted itself
 (`upstream_status_503`, `ledger_response_malformed`, `probe_timeout`, ...).

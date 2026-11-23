@@ -30,6 +30,7 @@ import { PaymentEligibilityService } from "./payment-eligibility.service";
 import { PaymentClassificationHistoryService } from "./payment-classification-history.service";
 import { PaymentAddressCipher } from "../common/crypto/payment-address-cipher";
 import { PaymentAccountResolver } from "./payment-account.resolver";
+import { throwIfRequestAborted } from "../common/request-context/request-abort";
 
 /**
  * A plan is re-read at most once per sync: when a forward read diverges, the
@@ -366,6 +367,8 @@ export class PaymentsService {
   ) {
     const limit = filters.limit ?? 20;
     const cursorWhere = cursorWhereFragment(filters.cursor, "occurredAt");
+    // Do not start a list query for a client that has already gone away.
+    throwIfRequestAborted();
     const payments = await this.prisma.payment.findMany({
       where: {
         userId,

@@ -11,7 +11,7 @@ import {
 import { Prisma } from "@prisma/client";
 import { GlobalExceptionFilter } from "./global-exception.filter";
 import { ApiErrorCode } from "../dto/api-error.dto";
-import { TransactionRetryExhaustedError } from "../../database/transaction-retry.service";
+import { RequestAbortedError } from "../request-context/request-abort";
 
 // ─── Minimal mock helpers ─────────────────────────────────────────────────────
 
@@ -466,6 +466,33 @@ describe("GlobalExceptionFilter", () => {
       const { host: h2, json: j2 } = makeHost();
       filter.catch(new NotFoundException(), h2);
       expect(j2.mock.calls[0][0]).not.toHaveProperty("violations");
+    });
+  });
+
+  describe("client-aborted requests", () => {
+    it("maps RequestAbortedError to 499 REQUEST_ABORTED, not an internal error", () => {
+      const filter = new GlobalExceptionFilter();
+      const { host, status, json } = makeHost();
+
+      filter.catch(new RequestAbortedError(), host);
+
+      expect(status).toHaveBeenCalledWith(499);
+      expect(json).toHaveBeenCalledWith(
+        expect.objectContaining({ statusCode: 499, code: ApiErrorCode.REQUEST_ABORTED }),
+      );
+      expect(json.mock.calls[0][0].code).not.toBe(ApiErrorCode.INTERNAL_ERROR);
+    });
+
+    it("does not log a cancellation as an error", () => {
+      const filter = new GlobalExceptionFilter();
+      const errorLog = jest
+        .spyOn((filter as unknown as { logger: { error: () => void } }).logger, "error")
+        .mockImplementation();
+      const { host } = makeHost();
+
+      filter.catch(new RequestAbortedError(), host);
+
+      expect(errorLog).not.toHaveBeenCalled();
     });
   });
 });

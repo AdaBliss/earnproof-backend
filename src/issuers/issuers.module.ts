@@ -35,6 +35,7 @@ import { IssuerKeyCompromiseResponseService } from "./issuer-key-compromise-resp
     { provide: Clock, useClass: SystemClock },
   ],
   exports: [
+    IssuerRegistryService,
     IssuersService,
     IssuerReconciliationService,
     IssuerAddressRotationService,

@@ -99,24 +99,22 @@ export const ALLOWED_METRIC_LABELS = {
   /** Health verdict. */
   health: ["up", "down", "degraded"],
 
+  /** Database pool saturation state reported by the pool monitor. */
+  pool_status: ["ok", "warning", "critical", "unknown", "disabled"],
+
   /** Organization operational quota. Names the quota, never the tenant. */
   quota: ["api_keys", "webhooks", "proof_requests", "sync_frequency"],
 
-  /**
-   * Database failure kind behind a retried or exhausted transaction, as
-   * classified in `database-error-classification.ts`. Closed and diagnostic
-   * only — never a client-facing value.
-   */
-  db_error_category: [
-    "deadlock",
-    "serialization_failure",
-    "lock_timeout",
-    "connection",
-    "pool_timeout",
+  /** Deterministic reason a request body was rejected at the HTTP boundary. */
+  rejection: [
+    "ambiguous_content_type",
+    "compressed_too_large",
+    "expanded_too_large",
+    "expansion_ratio_exceeded",
+    "missing_content_type",
+    "unsupported_charset",
+    "unsupported_content_type",
   ],
-
-  /** Terminal outcome of one transaction retry decision. */
-  retry_outcome: ["retried", "exhausted"],
 } as const;
 
 export type MetricLabelName = keyof typeof ALLOWED_METRIC_LABELS;

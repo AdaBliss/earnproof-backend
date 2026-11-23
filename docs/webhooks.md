@@ -28,6 +28,7 @@ Headers on every delivery:
 | `X-EarnProof-Delivery` | Delivery identifier — the idempotency key |
 | `X-EarnProof-Event` | Event type, e.g. `proof.created` |
 | `X-EarnProof-Signature` | `v1=` followed by the hex digest |
+| `X-EarnProof-Receipt` | Versioned idempotency receipt for this attempt — see [Delivery receipts](#delivery-receipts) |
 | `Content-Type` | `application/json` |
 
 The HMAC key is the **raw text of your signing secret**. The API issues secrets
@@ -190,6 +191,46 @@ processed.
 If your processing is already idempotent by the event's own identifiers, a
 dedup store is still worth having — it turns "harmless duplicate work" into "no
 work".
+
+## Delivery receipts
+
+Every delivery attempt also carries a versioned idempotency receipt in the
+`X-EarnProof-Receipt` header, and the same id is returned by the delivery
+API. Use it when `X-EarnProof-Delivery` is not specific enough: the delivery
+id is stable across every attempt of one event, while the receipt id names
+one attempt in one retry chain.
+
+| Property | Value |
+|---|---|
+| Format | `wr_v1_` + 64 lowercase hex characters (70 chars total) |
+| Binding | event id, endpoint id, event type, payload hash, attempt number, attempt lineage, replay source |
+| Payload hash | SHA-256 of the exact bytes signed and sent |
+
+The receipt is deterministic: it is an unkeyed SHA-256 over the canonical
+JSON of those fields (see
+[`webhook-delivery-receipt.ts`](../src/webhooks/webhook-delivery-receipt.ts)),
+so the same delivery row always re-derives the same id, and a receipt issued
+before a migration can be re-derived afterwards. Retries share a lineage and
+differ by attempt number; a manual replay or dead-letter redrive starts a
+fresh lineage, so its attempt 1 never collides with the original chain's
+attempt 1 even though both share the event id, endpoint, and payload bytes.
+
+A receipt contains no signing secret and no payload content — only the
+payload's SHA-256 — and it is not an HMAC. It identifies a delivery; it
+cannot verify a signature, authorize a replay, or reveal another tenant's
+event. Verify the signature first, exactly as in the procedure above; only
+then consult the receipt.
+
+Look a receipt up with the API:
+
+- `GET /webhooks/:id/deliveries/:deliveryId/receipt` — the receipt for one
+  delivery attempt (derived on read for deliveries created before receipts
+  existed).
+- `GET /webhooks/:id/receipts/:receiptId` — resolve a receipt id you received
+  in a header to its delivery attempt. A receipt naming another endpoint or
+  organisation is reported as not found.
+- `GET /webhooks/:id/deliveries` — every listed attempt now carries its
+  `receiptId`.
 
 ## Outbound destination validation (SSRF protection)
 

@@ -17,7 +17,18 @@ import {
   AnchorProofInput,
   ContractAnchoringService,
 } from "../proofs/contract-anchoring.service";
-import { isPermanentContractError } from "../proofs/contract-error";
+import {
+  isPermanentContractError,
+  isSequenceConflict,
+} from "../proofs/contract-error";
+import {
+  SEQUENCE_RECOVERY_BASE_DELAY_MS,
+  SEQUENCE_RECOVERY_MAX_ATTEMPTS,
+  SequenceDivergenceError,
+  SequenceRecoveryGate,
+  isBadSequenceError,
+  sequenceRecoveryDelayMs,
+} from "../stellar/sequence-recovery";
 
 /**
  * Upper bound on how long shutdown waits for an in-flight poll cycle to
@@ -41,8 +52,27 @@ const MAX_ATTEMPTS = 10;
  */
 const BACKOFF_BASE_MS = 30_000;
 
+/** Short retry delay after a sequence conflict that was not recovered inline. */
+const SEQUENCE_CONFLICT_RETRY_MS = 5_000;
+
 /** Maximum backoff ceiling (1 hour). */
 const BACKOFF_CAP_MS = 60 * 60_000;
+
+/** How long an intent is held when the fee policy refused to submit it. */
+const FEE_REFUSED_HOLD_MS = BACKOFF_BASE_MS;
+
+type SubmitOutcome =
+  | { kind: "submitted"; transactionHash: string }
+  | { kind: "already_applied" }
+  | { kind: "released" };
+
+type ExecutableIntent = NonNullable<
+  Awaited<ReturnType<PrismaService["anchoringIntent"]["findUnique"]>>
+> & { proof: { commitment: string | null; expiresAt: Date } };
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 /**
  * Number of intents to claim per poll cycle.
@@ -96,7 +126,10 @@ function isPoisonInput(message: string): boolean {
   return POISON_INPUT_PATTERNS.some((pattern) => pattern.test(message));
 }
 
-function computeNextRetryAt(attemptCount: number): Date {
+function computeNextRetryAt(attemptCount: number, message = ""): Date {
+  if (isSequenceConflict(message)) {
+    return new Date(Date.now() + SEQUENCE_CONFLICT_RETRY_MS);
+  }
   const delayMs = Math.min(
     BACKOFF_BASE_MS * Math.pow(2, attemptCount - 1),
     BACKOFF_CAP_MS,
@@ -120,6 +153,9 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
    * never left half-committed.
    */
   private inFlightCycle: Promise<void> | null = null;
+
+  /** Serializes sequence recovery across concurrent intents in this process. */
+  private readonly sequenceGate = new SequenceRecoveryGate();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -392,7 +428,7 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
   ): Promise<void> {
     if (!intent) return;
 
-    const { id, proofId, operation, attemptCount, proof } = intent;
+    const { id, proofId, operation, attemptCount } = intent;
 
     // Idempotency guard: if a CONFIRMED record already exists for this
     // (proofId, operation) pair, mark this intent confirmed and skip the CLI.
@@ -425,47 +461,31 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
     const newAttemptCount = attemptCount + 1;
 
     try {
-      let transactionHash: string;
+      const outcome = await this.submitWithSequenceRecovery(intent);
 
-      if (operation === AnchoringOperation.REGISTER) {
-        const anchorInput: AnchorProofInput = {
-          proofId,
-          commitment: proof.commitment ?? proofId,
-          expiresAt: proof.expiresAt,
-        };
-        const result = await this.anchoring.anchorProof(anchorInput);
+      if (outcome.kind === "released") return;
 
-        if (!result.anchored) {
-          if (result.reason === "circuit_open") {
-            await this.releaseUnclaimed(id, operation, proofId);
-            return;
-          }
-          // anchorProof returned anchored:false without throwing — treat as
-          // transient unless the reason is "disabled" (config issue, permanent).
-          const isFatal = result.reason === "disabled";
-          throw Object.assign(
-            new Error(result.error ?? `Anchoring ${result.reason}`),
-            { permanent: isFatal },
-          );
-        }
-        transactionHash = result.transactionHash;
-      } else {
-        // REVOKE
-        const result = await this.anchoring.revokeProof(proofId);
-
-        if (!result.anchored) {
-          if (result.reason === "circuit_open") {
-            await this.releaseUnclaimed(id, operation, proofId);
-            return;
-          }
-          const isFatal = result.reason === "disabled";
-          throw Object.assign(
-            new Error(result.error ?? `Revocation ${result.reason}`),
-            { permanent: isFatal },
-          );
-        }
-        transactionHash = result.transactionHash;
+      if (outcome.kind === "already_applied") {
+        // Authoritative on-chain state shows this intent was already submitted
+        // (for example by an external submission or a prior attempt whose
+        // response was lost). Confirm it WITHOUT submitting again.
+        await this.prisma.anchoringIntent.update({
+          where: { id },
+          data: {
+            status: AnchoringStatus.CONFIRMED,
+            attemptCount: newAttemptCount,
+            lastAttemptAt: new Date(),
+            lastErrorSafe: null,
+            permanentError: false,
+          },
+        });
+        this.logger.warn(
+          `Intent ${id} CONFIRMED via sequence reconciliation (already on-chain): ${operation} for proof ${proofId}`,
+        );
+        return;
       }
+
+      const transactionHash = outcome.transactionHash;
 
       // Parse ledger from transaction hash — the CLI may return
       // "<txhash>:<ledger>" or just "<txhash>". Store what we get.
@@ -503,11 +523,13 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
         err instanceof Error ? err.message : "Unknown error";
       const explicitlyPermanent =
         err instanceof Error && (err as Error & { permanent?: boolean }).permanent;
+      const sequenceDivergence = err instanceof SequenceDivergenceError;
       const poisonInput = isPoisonInput(message);
       const chainRejected =
         !poisonInput && (explicitlyPermanent || isPermanentError(message));
       const attemptsExhausted = newAttemptCount >= MAX_ATTEMPTS;
       const permanent =
+        sequenceDivergence ||
         poisonInput ||
         chainRejected ||
         attemptsExhausted ||
@@ -522,11 +544,13 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
         // Idempotent under concurrent workers because this UPDATE only ever
         // reaches an intent this worker itself claimed to PROCESSING in
         // processBatch's atomic FOR UPDATE SKIP LOCKED claim.
-        const quarantineReasonCode = poisonInput
-          ? QuarantineReasonCode.POISON_INPUT
-          : chainRejected
-            ? QuarantineReasonCode.CHAIN_REJECTED
-            : QuarantineReasonCode.MAX_ATTEMPTS_EXCEEDED;
+        const quarantineReasonCode = sequenceDivergence
+          ? QuarantineReasonCode.SEQUENCE_DIVERGENCE
+          : poisonInput
+            ? QuarantineReasonCode.POISON_INPUT
+            : chainRejected
+              ? QuarantineReasonCode.CHAIN_REJECTED
+              : QuarantineReasonCode.MAX_ATTEMPTS_EXCEEDED;
 
         await this.prisma.anchoringIntent.update({
           where: { id },
@@ -546,7 +570,7 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
           `Intent ${id} QUARANTINED (${quarantineReasonCode}): ${operation} for proof ${proofId} — ${safeError}`,
         );
       } else {
-        const nextRetryAt = computeNextRetryAt(newAttemptCount);
+        const nextRetryAt = computeNextRetryAt(newAttemptCount, message);
         await this.prisma.anchoringIntent.update({
           where: { id },
           data: {
@@ -567,6 +591,142 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
   }
 
   /**
+   * One submission attempt for an intent: the existing REGISTER/REVOKE paths.
+   * Throws on failure exactly as before; returns `released` when the dependency
+   * circuit or the fee policy declined to submit.
+   */
+  private async submitOnce(intent: ExecutableIntent): Promise<SubmitOutcome> {
+    const { id, proofId, operation, proof } = intent;
+
+    const hold = async (reason: string): Promise<SubmitOutcome | null> => {
+      if (reason === "circuit_open" || reason === "sequence_busy") {
+        await this.releaseUnclaimed(id, operation, proofId, reason);
+        return { kind: "released" };
+      }
+      if (reason === "fee_refused") {
+        // The contract was not touched and the intent did not fail: hold it,
+        // without spending an attempt, until the fee estimate eases.
+        await this.releaseUnclaimed(
+          id,
+          operation,
+          proofId,
+          "fee_refused",
+          FEE_REFUSED_HOLD_MS,
+        );
+        return { kind: "released" };
+      }
+      return null;
+    };
+
+    if (operation === AnchoringOperation.REGISTER) {
+      const anchorInput: AnchorProofInput = {
+        proofId,
+        commitment: proof.commitment ?? proofId,
+        expiresAt: proof.expiresAt,
+      };
+      const result = await this.anchoring.anchorProof(anchorInput);
+
+      if (!result.anchored) {
+        const released = await hold(result.reason);
+        if (released) return released;
+        // anchorProof returned anchored:false without throwing - treat as
+        // transient unless the reason is "disabled" (config issue, permanent).
+        throw Object.assign(
+          new Error(result.error ?? `Anchoring ${result.reason}`),
+          {
+            permanent:
+              result.reason === "disabled" || result.failureKind === "permanent",
+          },
+        );
+      }
+      return { kind: "submitted", transactionHash: result.transactionHash };
+    }
+
+    // REVOKE
+    const result = await this.anchoring.revokeProof(proofId);
+    if (!result.anchored) {
+      const released = await hold(result.reason);
+      if (released) return released;
+      throw Object.assign(
+        new Error(result.error ?? `Revocation ${result.reason}`),
+        {
+          permanent:
+            result.reason === "disabled" || result.failureKind === "permanent",
+        },
+      );
+    }
+    return { kind: "submitted", transactionHash: result.transactionHash };
+  }
+
+  /**
+   * Submits an intent and recovers from Stellar account sequence
+   * desynchronization (earnproof-backend#421).
+   *
+   * A `tx_bad_seq` outcome means a worker's view of the source account sequence
+   * is stale: an external submission or a failed transaction advanced it. The
+   * recovery is bounded to SEQUENCE_RECOVERY_MAX_ATTEMPTS rounds, serialized so
+   * concurrent intents do not race each other, and each round first reads the
+   * authoritative on-chain state:
+   *
+   * - already registered/revoked on-chain: the intent is confirmed, never
+   *   resubmitted (no duplicate);
+   * - on-chain state cannot be verified: no blind retry; the intent returns to
+   *   the normal transient backoff;
+   * - not applied: the account state is refreshed by the next invocation and
+   *   exactly one more attempt is made;
+   * - still desynchronized after the bound: SequenceDivergenceError, which the
+   *   caller turns into a visible terminal QUARANTINED state.
+   */
+  private async submitWithSequenceRecovery(
+    intent: ExecutableIntent,
+  ): Promise<SubmitOutcome> {
+    try {
+      return await this.submitOnce(intent);
+    } catch (err) {
+      if (!isBadSequenceError(errorMessage(err))) throw err;
+      this.logger.warn(
+        `Intent ${intent.id} hit a stale account sequence; starting bounded reconciliation`,
+      );
+      return this.sequenceGate.run(() => this.recoverSequence(intent));
+    }
+  }
+
+  private async recoverSequence(intent: ExecutableIntent): Promise<SubmitOutcome> {
+    const { proofId, operation } = intent;
+    const baseDelayMs =
+      this.config.get<number>("contractAnchoring.sequenceRecovery.baseDelayMs") ??
+      SEQUENCE_RECOVERY_BASE_DELAY_MS;
+
+    for (let round = 1; round <= SEQUENCE_RECOVERY_MAX_ATTEMPTS; round++) {
+      const status = await this.anchoring.getProofStatus(proofId);
+      if (!status.checked) {
+        // Without authoritative state a retry could duplicate the submission.
+        throw new Error("Sequence recovery paused: on-chain state could not be verified");
+      }
+
+      const alreadyApplied =
+        operation === AnchoringOperation.REGISTER
+          ? status.valid || status.revoked
+          : status.revoked;
+      if (alreadyApplied) return { kind: "already_applied" };
+
+      const delayMs = sequenceRecoveryDelayMs(round, baseDelayMs);
+      if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+
+      try {
+        return await this.submitOnce(intent);
+      } catch (err) {
+        if (!isBadSequenceError(errorMessage(err))) throw err;
+        this.logger.warn(
+          `Intent ${intent.id} still has a stale sequence (round ${round}/${SEQUENCE_RECOVERY_MAX_ATTEMPTS})`,
+        );
+      }
+    }
+
+    throw new SequenceDivergenceError(SEQUENCE_RECOVERY_MAX_ATTEMPTS);
+  }
+
+  /**
    * Returns an intent to PENDING without consuming an attempt.
    *
    * Used when the dependency circuit refused the call: the contract was never
@@ -579,16 +739,18 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
     id: string,
     operation: AnchoringOperation,
     proofId: string,
+    cause: "circuit_open" | "sequence_busy" | "fee_refused" = "circuit_open",
+    holdMs = 0,
   ): Promise<void> {
     await this.prisma.anchoringIntent.update({
       where: { id },
       data: {
         status: AnchoringStatus.PENDING,
-        nextRetryAt: new Date(),
+        nextRetryAt: new Date(Date.now() + holdMs),
       },
     });
     this.logger.warn(
-      `Intent ${id} released unclaimed (circuit open): ${operation} for proof ${proofId}`,
+      `Intent ${id} released unclaimed (${cause}): ${operation} for proof ${proofId}`,
     );
   }
 }

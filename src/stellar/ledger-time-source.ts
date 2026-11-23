@@ -1,3 +1,4 @@
+import { parseLedgerSequence } from "./horizon-client";
 import type { TimeSourceReading } from "../common/time/clock-skew";
 
 /**
@@ -106,8 +107,8 @@ export function parseLatestLedgerTime(
     throw new TimeSourceError("ledger_response_malformed");
   }
   const ledger = records[0] as { sequence?: unknown; closed_at?: unknown };
-  const sequence = typeof ledger.sequence === "number" ? ledger.sequence : Number(ledger.sequence);
-  if (!Number.isSafeInteger(sequence) || sequence <= 0) {
+  const sequence = parseLedgerSequence(ledger.sequence);
+  if (sequence === null || sequence <= 0) {
     throw new TimeSourceError("ledger_response_malformed");
   }
   if (typeof ledger.closed_at !== "string") {

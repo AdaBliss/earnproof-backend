@@ -195,7 +195,9 @@ export class IssuersController {
       "Public, cursor-paginated endpoint listing active issuers with allowlisted " +
       "metadata, ordered deterministically by `createdAt` then `id`. Non-authenticated " +
       "users see public listing. Pass `pageInfo.nextCursor` from a response as the next " +
-      "request's `cursor`.",
+      "request's `cursor`. Filter by `assuranceLevel` or `accreditationStatus` to " +
+      "narrow within the active set; each item carries its effective accreditation " +
+      "status, computed live from the contract-backed assurance level and expiry.",
   })
   @ApiResponse({
     status: 200,
@@ -251,7 +253,10 @@ export class IssuersController {
       "Admin-only, cursor-paginated endpoint to list all issuers with full details and " +
       "ability to filter by status/organization, ordered deterministically by " +
       "`createdAt` then `id`. Pass `pageInfo.nextCursor` from a response as the next " +
-      "request's `cursor`.",
+      "request's `cursor`. Filter by `assuranceLevel` or `accreditationStatus` to " +
+      "narrow by contract-backed accreditation; `accreditationStatus` is combined " +
+      "with `status` under AND. Each item carries its effective accreditation status " +
+      "and provenance (last contract observation and contract id).",
   })
   @ApiResponse({
     status: 200,

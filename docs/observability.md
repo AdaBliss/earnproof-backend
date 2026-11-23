@@ -88,6 +88,14 @@ Failures are included in the histogram. A latency metric that silently excludes
 errors measures the wrong population — during an incident, the failing requests
 are the interesting ones.
 
+### Request representation and expansion rejections
+
+| | |
+|---|---|
+| **Metric** | `request_body_rejections_total{rejection}` |
+| **Purpose** | Count ambiguous/unsupported media types and charsets, plus compressed-size, expanded-size, and expansion-ratio rejections |
+| **Labels** | Closed reason vocabulary only; no route, request, or payload data |
+
 ### Horizon sync freshness
 
 | | |
@@ -136,16 +144,14 @@ something is.
 | **Objective** | 99.9% probe success; p95 probe < 50 ms; retried transactions < 1% of transactions |
 | **Runbook** | [database-health.md](runbooks/database-health.md) |
 
-Transactions that fail with a transient database error — a deadlock, a
-serialisation failure, a lock timeout, or a lost connection — are retried
-inside `TransactionRetryService` with bounded jittered backoff (default 3
-attempts). Each retry is counted on `database_transaction_retries_total` by
-closed failure category and outcome (`retried` / `exhausted`); a retry that
-exhausts its budget surfaces to the client as the stable 503
-`DEPENDENCY_UNAVAILABLE`, never as the underlying Postgres error. Which
-operation retried, and the redacted per-attempt detail, is a log question,
-answered by correlation ID — the metric deliberately carries no operation
-name.
+### Database pool saturation
+
+| | |
+|---|---|
+| **Metrics** | `database_pool_timeouts_total{outcome}`, `database_pool_wait_duration_ms{pool_status}` |
+| **SLI** | Pool utilization and connection wait latency |
+| **Objective** | Utilization < 70%; p95 wait < 100 ms; zero acquisition timeouts |
+| **Runbook** | [database-pool-saturation.md](runbooks/database-pool-saturation.md) |
 
 ### Verification outcomes
 
@@ -285,6 +291,9 @@ Severity is defined by required response, not by how alarming it sounds:
 | Webhook failure rate | > 5% over 15 min | P2 | Integrations on-call | Above 5% the cause is usually ours, not one bad endpoint | [webhook-delivery.md](runbooks/webhook-delivery.md) |
 | Database probe failure | Any failure in 2 consecutive probes | P1 | Platform on-call | Two consecutive rules out a single transient blip | [database-health.md](runbooks/database-health.md) |
 | Database probe latency | p95 > 200 ms over 10 min | P2 | Platform on-call | Four times the objective; usually connection-pool pressure before it becomes an outage | [database-health.md](runbooks/database-health.md) |
+| Pool saturation sustained | 3 consecutive saturated samples (utilization ≥ 90% or wait p95 ≥ 500 ms) | P1 | Platform on-call | Sustained saturation means requests are about to fail acquiring connections; hysteresis rules out a single spike | [database-pool-saturation.md](runbooks/database-pool-saturation.md) |
+| Pool wait latency | p95 > 500 ms over 10 min | P2 | Platform on-call | Requests queueing longer than handlers should take; usually a slow query or an undersized pool | [database-pool-saturation.md](runbooks/database-pool-saturation.md) |
+| Pool timeouts | Any increase in `database_pool_timeouts_total` | P2 | Platform on-call | Acquisitions are timing out; saturation is already dropping work | [database-pool-saturation.md](runbooks/database-pool-saturation.md) |
 | Verification shift | `invalid` share doubles week-on-week | P3 | Product engineering | Could be an attack, a client bug, or a regression. None is an outage; none warrants a page | [verification-outcomes.md](runbooks/verification-outcomes.md) |
 | Job failure | Any job's success rate < 95% over 1 h | P2 | Platform on-call | Sustained failure means work is silently not happening | [job-failures.md](runbooks/job-failures.md) |
 | Job silent | No run recorded in two intervals | P2 | Platform on-call | A job that stopped scheduling emits no failures — absence is the only signal | [job-failures.md](runbooks/job-failures.md) |

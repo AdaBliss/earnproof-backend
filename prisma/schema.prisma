@@ -1465,6 +1465,10 @@ model WebhookDelivery {
   responseBody      Json?
   durationMs        Int?
   failureReason     String?
+  // DNS pinning fields (#371): per-attempt resolution metadata for diagnostics
+  dnsPinned         Boolean               @default(false) // Whether this attempt used DNS pinning
+  dnsResolutionMs   Int?                  // Time taken to resolve hostname (milliseconds)
+  dnsAddressCount   Int?                  // Number of addresses returned by resolver (not exposing IPs)
   replayOf          String?
   replayedBy        String?
   replayKey         String?               @unique

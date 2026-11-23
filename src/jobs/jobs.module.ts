@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 import { AuthModule } from "../auth/auth.module";
 import { ApiKeysModule } from "../api-keys/api-keys.module";
 import { ApprovalsModule } from "../approvals/approvals.module";
+import { CredentialsModule } from "../credentials/credentials.module";
 import { DisclosureModule } from "../common/disclosure/disclosure.module";
 import { IssuerReconciliationService } from "../issuers/issuer-reconciliation.service";
 import { IssuersModule } from "../issuers/issuers.module";
@@ -21,6 +22,8 @@ import { AnchoringReconcilerService } from "./anchoring-reconciler.service";
 import { AnchoringWorkerService } from "./anchoring-worker.service";
 import { ApprovalExpiryJob } from "./approval-expiry.job";
 import { AttestationReconcilerService } from "./attestation-reconciler.service";
+import { CredentialQuarantineExpiryJob } from "./credential-quarantine-expiry.job";
+import { QuarantineCleanupJob } from "./quarantine-cleanup.job";
 import { DisclosureCleanupJob } from "./disclosure-cleanup.job";
 import { JobExecutionMaintenanceJob } from "./execution/job-execution-maintenance.job";
 import { JobExecutionController } from "./execution/job-execution.controller";
@@ -47,6 +50,7 @@ import { ContractEventGapService } from "./contract-event-gap.service";
   imports: [
     AuthModule,
     ApprovalsModule,
+    CredentialsModule,
     IssuersModule,
     PaymentsModule,
     ProofsModule,
@@ -76,6 +80,8 @@ import { ContractEventGapService } from "./contract-event-gap.service";
     ProofExpirationReconcilerService,
     ProofSharingCleanupJob,
     DisclosureCleanupJob,
+    CredentialQuarantineExpiryJob,
+    QuarantineCleanupJob,
     ProofReconciliationService,
     IssuerReconciliationService,
     RetentionCleanupService,

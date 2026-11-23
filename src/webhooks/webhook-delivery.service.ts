@@ -14,6 +14,7 @@ import { PrismaService } from "../database/prisma.service";
 import { WebhookClientCertificateService } from "./webhook-client-certificate.service";
 import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
 import { StructuredLogger } from "../common/logger";
+import { DnsPinningService } from "../common/network/dns-pinning.service";
 import {
   payloadDeprecation,
   serializeWebhookEvent,
@@ -42,6 +43,14 @@ import { WebhookCircuitBreakerService } from "./webhook-circuit-breaker.service"
 import { PredicateEvaluatorService } from "./services/predicate-evaluator.service";
 import { Predicate } from "./predicate.types";
 import { processWebhookResponse } from "./webhook-response-safety";
+import {
+  createRedirectChainContext,
+  validateRedirect,
+  getRedirectMethod,
+  getLocationHeader,
+  isRedirectResponse,
+  type RedirectPolicyRejectionReason,
+} from "./webhook-redirect-policy";
 
 /** Thrown when a webhook requires mTLS but has no currently valid client certificate. */
 class MtlsCertificateUnavailableError extends Error {
@@ -115,6 +124,7 @@ export class WebhookDeliveryService implements OnModuleInit {
   private readonly clientCertificates: WebhookClientCertificateService;
   private readonly circuitBreaker: WebhookCircuitBreakerService;
   private readonly predicateEvaluator: PredicateEvaluatorService;
+  private readonly dnsPinning: DnsPinningService;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -123,6 +133,7 @@ export class WebhookDeliveryService implements OnModuleInit {
     @Optional() circuitBreaker?: WebhookCircuitBreakerService,
     @Optional() predicateEvaluator?: PredicateEvaluatorService,
     @Optional() configService?: ConfigService,
+    @Optional() dnsPinning?: DnsPinningService,
   ) {
     const defaultCircuitBreaker: WebhookCircuitBreakerService = {
       canAttemptDelivery: async () => true,
@@ -140,6 +151,8 @@ export class WebhookDeliveryService implements OnModuleInit {
       deriveContext: () => ({ resource: "", outcome: "", schemaVersion: "" }),
     } as unknown as PredicateEvaluatorService;
 
+    const defaultDnsPinning: DnsPinningService = new DnsPinningService();
+
     const isConfig = (obj: unknown): obj is ConfigService =>
       Boolean(obj && typeof (obj as any).get === "function");
 
@@ -148,26 +161,31 @@ export class WebhookDeliveryService implements OnModuleInit {
       this.clientCertificates = clientCertificates ?? defaultClientCertificates;
       this.circuitBreaker = circuitBreaker ?? defaultCircuitBreaker;
       this.predicateEvaluator = predicateEvaluator ?? defaultPredicateEvaluator;
+      this.dnsPinning = dnsPinning ?? defaultDnsPinning;
       resolvedConfig = configService;
     } else if (predicateEvaluator && isConfig(predicateEvaluator)) {
       this.clientCertificates = clientCertificates ?? defaultClientCertificates;
       this.circuitBreaker = circuitBreaker ?? defaultCircuitBreaker;
       this.predicateEvaluator = defaultPredicateEvaluator;
+      this.dnsPinning = dnsPinning ?? defaultDnsPinning;
       resolvedConfig = predicateEvaluator as unknown as ConfigService;
     } else if (circuitBreaker && isConfig(circuitBreaker)) {
       this.clientCertificates = clientCertificates ?? defaultClientCertificates;
       this.circuitBreaker = defaultCircuitBreaker;
       this.predicateEvaluator = (predicateEvaluator as unknown as PredicateEvaluatorService) ?? defaultPredicateEvaluator;
+      this.dnsPinning = dnsPinning ?? defaultDnsPinning;
       resolvedConfig = circuitBreaker as unknown as ConfigService;
     } else if (clientCertificates && isConfig(clientCertificates)) {
       this.clientCertificates = defaultClientCertificates;
       this.circuitBreaker = defaultCircuitBreaker;
       this.predicateEvaluator = (circuitBreaker as unknown as PredicateEvaluatorService) ?? defaultPredicateEvaluator;
+      this.dnsPinning = dnsPinning ?? defaultDnsPinning;
       resolvedConfig = clientCertificates as unknown as ConfigService;
     } else {
       this.clientCertificates = clientCertificates ?? defaultClientCertificates;
       this.circuitBreaker = circuitBreaker ?? defaultCircuitBreaker;
       this.predicateEvaluator = predicateEvaluator ?? defaultPredicateEvaluator;
+      this.dnsPinning = dnsPinning ?? defaultDnsPinning;
       resolvedConfig = new ConfigService();
     }
 
@@ -765,7 +783,7 @@ export class WebhookDeliveryService implements OnModuleInit {
       }
     }
 
-    if (success) {
+      if (success) {
       await this.prisma.webhookDelivery.update({
         where: { id: deliveryId },
         data: {
@@ -775,6 +793,9 @@ export class WebhookDeliveryService implements OnModuleInit {
           responseBody,
           durationMs,
           deliveredAt: new Date(),
+          dnsPinned: outcome.dnsPinned,
+          dnsResolutionMs: outcome.dnsResolutionMs,
+          dnsAddressCount: outcome.dnsAddressCount,
         },
       });
 
@@ -782,7 +803,7 @@ export class WebhookDeliveryService implements OnModuleInit {
       await this.circuitBreaker.recordSuccess(delivery.webhookId);
 
       this.logger.log(
-        `Delivery ${deliveryId} succeeded (attempt ${delivery.attempt}, ${durationMs}ms, HTTP ${statusCode})`,
+        `Delivery ${deliveryId} succeeded (attempt ${delivery.attempt}, ${durationMs}ms, HTTP ${statusCode}; DNS pinned)`,
       );
       return;
     }
@@ -832,6 +853,9 @@ export class WebhookDeliveryService implements OnModuleInit {
         durationMs,
         failureReason,
         deliveredAt: new Date(),
+        dnsPinned: outcome.dnsPinned,
+        dnsResolutionMs: outcome.dnsResolutionMs,
+        dnsAddressCount: outcome.dnsAddressCount,
       },
     });
 
@@ -1041,9 +1065,32 @@ export class WebhookDeliveryService implements OnModuleInit {
   }
 
   /**
-   * The production send path: sign, check the destination, POST without
-   * following redirects under the delivery timeout, and bound + redact the
-   * response body. Never throws; never writes to the database.
+   * The production send path: resolve DNS, pin address, sign, check destination,
+   * POST with bounded redirect handling under the delivery timeout, and bound + redact
+   * the response body. Never throws; never writes to the database.
+   *
+   * Per-attempt DNS pinning (#371):
+   * - DNS resolution happens immediately before each attempt (not cached)
+   * - The first validated public address is pinned for this attempt's connection
+   * - Resolution metadata is recorded for observability (without exposing topology)
+   *
+   * Redirect Policy (see WEBHOOK_REDIRECT_POLICY.md):
+   *   - Maximum 5 redirects (6 total requests)
+   *   - Each redirect destination re-validated against SSRF guard and DNS pinned
+   *   - Same-origin redirects allowed without restriction
+   *   - Cross-origin redirects allowed only with method preservation (307/308)
+   *   - Loop detection via visited URL set (prevents infinite redirect chains)
+   *   - Invalid redirects (depth limit, loops, SSRF blocks) are permanent failures
+   *
+   * Secrets are never forwarded:
+   *   - Signature computed once over original request body, reused for all redirects
+   *   - Cross-origin redirects blocked if they would change method or have credentials
+   *   - SSRF guard re-applied to each redirect target (blocks private IPs, metadata endpoints)
+   *
+   * Response handling:
+   *   - Response body from final (non-redirect) response is redacted and truncated
+   *   - Size limit (1 KiB) applies to final response
+   *   - Hash computed on redacted final response
    */
   private async sendSignedRequest(
     url: string,
@@ -1059,25 +1106,151 @@ export class WebhookDeliveryService implements OnModuleInit {
 
     const start = Date.now();
     try {
+      // Step 1: Validate URL structure and check no credentials/unusual ports
       await assertSafeWebhookDestination(url);
 
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
+      // Step 2: Resolve hostname to IP and pin to first validated public address
+      const parsedUrl = new URL(url);
+      const hostname = parsedUrl.hostname;
+      
+      const pinningResult = await this.dnsPinning.resolveAndPin(hostname);
+      if (!pinningResult.success) {
+        // DNS resolution failed; record the bounded error code without details
+        const durationMs = Date.now() - start;
+        // Log the failure with bounded information (no resolver details exposed)
+        this.logger.debug(
+          `DNS resolution failed for delivery: ${pinningResult.error.code} ` +
+          `(transient: ${pinningResult.error.transient}, ${durationMs}ms)`,
+        );
+        return {
+          kind: "network_error",
+          success: false,
+          responseTruncated: false,
+          durationMs,
+          failureReason: `DNS resolution failed: ${pinningResult.error.code}`,
+          dnsPinned: false,
+          dnsResolutionMs: pinningResult.record?.resolutionDurationMs,
+          dnsAddressCount: undefined,
+        };
+      }
+
+      const pinnedAddress = pinningResult.record.resolvedAddress;
+
+      // Log successful resolution (without exposing the IP to external logs)
+      this.logger.debug(
+        `DNS pinned to ${pinningResult.record.allResolvedAddresses.length} address(es) ` +
+        `(${pinningResult.record.resolutionDurationMs}ms)`,
+      );
+
+      // Step 3: Initialize redirect chain tracking: POST, no credentials in our request
+      // (we send X-EarnProof-* headers, not HTTP Authorization)
+      const redirectContext = createRedirectChainContext(url, "POST", false);
+
+      let currentUrl = url;
+      let currentMethod: "POST" | "GET" = "POST";
+      let response: Response | null = null;
+
+      // Follow redirects up to the policy limit
+      while (true) {
+        // For each redirect, re-pin the DNS resolution
+        const redirectParsedUrl = new URL(currentUrl);
+        const redirectHostname = redirectParsedUrl.hostname;
+        
+        const redirectPinningResult = await this.dnsPinning.resolveAndPin(redirectHostname);
+        if (!redirectPinningResult.success) {
+          const durationMs = Date.now() - start;
+          return {
+            kind: "network_error",
+            success: false,
+            responseTruncated: false,
+            durationMs,
+            failureReason: `DNS resolution failed for redirect target: ${redirectPinningResult.error.code}`,
+            dnsPinned: false,
+            dnsResolutionMs: pinningResult.record?.resolutionDurationMs,
+            dnsAddressCount: undefined,
+          };
+        }
+
+        const redirectPinnedUrl = new URL(currentUrl);
+        redirectPinnedUrl.hostname = redirectPinningResult.record.resolvedAddress;
+
+        const headers: Record<string, string> = {
           "Content-Type": "application/json",
           "X-EarnProof-Timestamp": String(timestamp),
           "X-EarnProof-Delivery": eventId,
           "X-EarnProof-Event": eventType,
           "X-EarnProof-Signature": signature,
-        },
-        body,
-        // Do NOT follow redirects — prevents an open redirect from
-        // forwarding a signed payload to an internal address.
-        redirect: "error",
-        signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
-      });
+          // Send the original hostname in Host header to ensure correct routing
+          "Host": redirectHostname,
+        };
+
+        response = await fetch(redirectPinnedUrl.toString(), {
+          method: currentMethod,
+          headers,
+          body: currentMethod === "POST" ? body : undefined,
+          // Use "manual" to intercept and validate redirects ourselves
+          redirect: "manual",
+          signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
+        });
+
+        // Check if this is a redirect response
+        if (!isRedirectResponse(response)) {
+          break; // Final response (2xx, 4xx, 5xx, etc.)
+        }
+
+        // Validate redirect according to policy
+        const location = getLocationHeader(response);
+        const validation = await validateRedirect(
+          response.status,
+          location,
+          redirectContext,
+        );
+
+        if (validation.decision !== "allowed") {
+          // Redirect policy rejected this redirect
+          return {
+            kind: "redirect",
+            redirectRejected: true,
+            redirectReason: validation.rejectionReason as RedirectPolicyRejectionReason,
+            statusCode: response.status,
+            responseBody: "",
+            responseTruncated: false,
+            success: false,
+            durationMs: Date.now() - start,
+            failureReason: `redirect policy: ${validation.rejectionReason}`,
+            dnsPinned: true,
+            dnsResolutionMs: pinningResult.record.resolutionDurationMs,
+            dnsAddressCount: pinningResult.record.allResolvedAddresses.length,
+          };
+        }
+
+        // Update method if it changes
+        if (validation.methodWillChange) {
+          currentMethod = getRedirectMethod(response.status, currentMethod);
+        }
+
+        // Consume the response body to prevent resource leaks
+        await response.text();
+
+        // Follow the redirect
+        currentUrl = validation.location!;
+      }
 
       const durationMs = Date.now() - start;
+
+      // Response is now the final (non-redirect) response
+      if (!response) {
+        return {
+          kind: "network_error",
+          success: false,
+          responseTruncated: false,
+          durationMs,
+          failureReason: "no response received",
+          dnsPinned: true,
+          dnsResolutionMs: pinningResult.record.resolutionDurationMs,
+          dnsAddressCount: pinningResult.record.allResolvedAddresses.length,
+        };
+      }
 
       // Truncate response body to prevent large payloads in logs.
       const bounded = boundResponseBody(await response.text());
@@ -1090,6 +1263,9 @@ export class WebhookDeliveryService implements OnModuleInit {
         responseTruncated: bounded.truncated,
         durationMs,
         failureReason: response.ok ? undefined : `HTTP ${response.status}`,
+        dnsPinned: true,
+        dnsResolutionMs: pinningResult.record.resolutionDurationMs,
+        dnsAddressCount: pinningResult.record.allResolvedAddresses.length,
       };
     } catch (err) {
       const durationMs = Date.now() - start;
@@ -1100,6 +1276,7 @@ export class WebhookDeliveryService implements OnModuleInit {
           success: false,
           responseTruncated: false,
           durationMs,
+          dnsPinned: false,
         };
       }
       if (err instanceof Error && err.name === "TimeoutError") {
@@ -1109,14 +1286,16 @@ export class WebhookDeliveryService implements OnModuleInit {
           responseTruncated: false,
           durationMs,
           failureReason: "delivery request timed out",
+          dnsPinned: false,
         };
       }
       return {
-        kind: isRedirectError(err) ? "redirect" : "network_error",
+        kind: "network_error",
         success: false,
         responseTruncated: false,
         durationMs,
         failureReason: "delivery request failed",
+        dnsPinned: false,
       };
     }
   }
@@ -1134,6 +1313,7 @@ export class WebhookDeliveryService implements OnModuleInit {
  *
  * `kind` separates outcomes a caller may want to distinguish (the stored
  * `failureReason` strings for real deliveries are unchanged by it).
+ * DNS pinning fields track resolution details for observability.
  */
 type SignedRequestOutcome =
   | {
@@ -1144,6 +1324,9 @@ type SignedRequestOutcome =
       responseTruncated: boolean;
       durationMs: number;
       failureReason?: string;
+      dnsPinned: boolean;
+      dnsResolutionMs: number;
+      dnsAddressCount: number;
     }
   | {
       kind: "blocked";
@@ -1154,15 +1337,32 @@ type SignedRequestOutcome =
       responseTruncated: false;
       durationMs: number;
       failureReason?: undefined;
+      dnsPinned: false;
+      dnsResolutionMs?: undefined;
+      dnsAddressCount?: undefined;
     }
   | {
-      kind: "timeout" | "redirect" | "network_error";
+      kind: "redirect";
+      redirectRejected: true;
+      redirectReason: RedirectPolicyRejectionReason;
+      statusCode: number;
+      responseBody: string;
+      responseTruncated: false;
+      success: false;
+      durationMs: number;
+      failureReason: string;
+    }
+  | {
+      kind: "timeout" | "network_error";
       success: false;
       statusCode?: undefined;
       responseBody?: undefined;
       responseTruncated: false;
       durationMs: number;
       failureReason: string;
+      dnsPinned: boolean;
+      dnsResolutionMs?: number;
+      dnsAddressCount?: undefined;
     };
 
 /**
@@ -1225,21 +1425,6 @@ function statusClassOf(outcome: SignedRequestOutcome): WebhookTestStatusClass {
     default:
       return "network_error";
   }
-}
-
-/**
- * With `redirect: "error"`, fetch (undici) rejects a 3xx answer with a
- * `TypeError` whose cause mentions the redirect.
- */
-function isRedirectError(err: unknown): boolean {
-  // Duck-typed rather than `instanceof Error`: fetch's errors can come from a
-  // different realm than this module's `Error`.
-  const messageOf = (value: unknown): string =>
-    typeof value === "object" && value !== null && "message" in value
-      ? String((value as { message: unknown }).message)
-      : "";
-  const cause = (err as { cause?: unknown } | null)?.cause;
-  return /redirect/i.test(`${messageOf(err)} ${messageOf(cause)}`);
 }
 
 /**

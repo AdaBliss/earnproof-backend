@@ -62,6 +62,10 @@ function loadCredentialSigningKeyVerifyUntil(): Record<number, string> {
 export const configuration = () => ({
   nodeEnv: process.env.NODE_ENV ?? "development",
   port: Number(process.env.PORT ?? 4000),
+  trustProxyHops: Number(process.env.TRUST_PROXY_HOPS ?? 0),
+  trustedProxyCidrs: process.env.TRUSTED_PROXY_CIDRS
+    ? process.env.TRUSTED_PROXY_CIDRS.split(",").map((cidr) => cidr.trim())
+    : [],
   databaseUrl: process.env.DATABASE_URL,
   redisUrl: process.env.REDIS_URL,
   appUrl: process.env.APP_URL ?? "http://localhost:3000",

@@ -17,6 +17,7 @@ export const METRIC_NAMES = {
   // ─── API availability and latency ───────────────────────────────────────
   httpRequestsTotal: "http_requests_total",
   httpRequestDurationMs: "http_request_duration_ms",
+  requestBodyRejectionsTotal: "request_body_rejections_total",
 
   // ─── Horizon sync freshness ─────────────────────────────────────────────
   horizonSyncRunsTotal: "horizon_sync_runs_total",
@@ -73,6 +74,12 @@ export function registerCoreMetrics(registry: MetricsRegistry): void {
     name: METRIC_NAMES.httpRequestDurationMs,
     help: "HTTP request handling latency in milliseconds, by route template.",
     labelNames: ["route", "method"],
+  });
+
+  registry.registerCounter({
+    name: METRIC_NAMES.requestBodyRejectionsTotal,
+    help: "Request bodies rejected by representation or expansion limits.",
+    labelNames: ["rejection"],
   });
 
   // ─── Horizon sync freshness ─────────────────────────────────────────────

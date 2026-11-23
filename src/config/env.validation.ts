@@ -1,5 +1,7 @@
 import { validateFeePolicy } from "./fee-policy";
 import { z } from "zod";
+import { isExactCorsOrigin } from "../common/http/cors-origin-policy";
+import { isValidCidr } from "../common/http/ip-address";
 import { DEPLOYMENT_MANIFEST_MAX_BYTES } from "./deployment-manifest";
 
 /**
@@ -236,6 +238,28 @@ const envSchema = z.object({
   /** HTTP server port (1–65535, but typically 3000–4000) */
   PORT: positiveInt("PORT").default(4000),
 
+  /** Number of trusted reverse-proxy hops between the client and this service. */
+  TRUST_PROXY_HOPS: z.coerce
+    .number()
+    .int("TRUST_PROXY_HOPS must be an integer")
+    .min(0, "TRUST_PROXY_HOPS must not be negative")
+    .max(10, "TRUST_PROXY_HOPS must not exceed 10")
+    .default(0),
+
+  /** Comma-separated CIDR ranges for proxy peers; empty when no proxy is trusted. */
+  TRUSTED_PROXY_CIDRS: z
+    .string()
+    .default("")
+    .transform((value) =>
+      value === "" ? [] : value.split(",").map((cidr) => cidr.trim()),
+    )
+    .refine(
+      (ranges) =>
+        ranges.length <= 20 &&
+        ranges.every((range) => range.length > 0 && isValidCidr(range)),
+      "TRUSTED_PROXY_CIDRS must contain at most 20 valid comma-separated CIDR ranges",
+    ),
+
   /** PostgreSQL connection string (REQUIRED: checked at startup and readiness) */
   DATABASE_URL: z
     .string()
@@ -253,7 +277,14 @@ const envSchema = z.object({
   // ──────────────────────────────────────────────────────────────────────
 
   /** Frontend application URL (used for CORS origin, must be HTTPS in production) */
-  APP_URL: z.string().url("APP_URL must be a valid URL").default("http://localhost:3000"),
+  APP_URL: z
+    .string()
+    .url("APP_URL must be a valid URL")
+    .refine(
+      isExactCorsOrigin,
+      "APP_URL must be one exact HTTP(S) origin without credentials, path, query, or fragment",
+    )
+    .default("http://localhost:3000"),
 
   /** This backend API URL (used for Swagger docs, must be HTTPS in production) */
   API_URL: z.string().url("API_URL must be a valid URL").default("http://localhost:4000"),
@@ -759,6 +790,17 @@ function isLocalhostUrl(value: string): boolean {
 
 function checkCrossVariableInvariants(data: z.infer<typeof envSchema>) {
   const errors: string[] = [];
+
+  if (data.TRUST_PROXY_HOPS === 0 && data.TRUSTED_PROXY_CIDRS.length > 0) {
+    errors.push(
+      "Invalid configuration: TRUSTED_PROXY_CIDRS requires TRUST_PROXY_HOPS greater than 0",
+    );
+  }
+  if (data.TRUST_PROXY_HOPS > 0 && data.TRUSTED_PROXY_CIDRS.length === 0) {
+    errors.push(
+      "Invalid configuration: TRUST_PROXY_HOPS greater than 0 requires TRUSTED_PROXY_CIDRS",
+    );
+  }
 
   // ────────────────────────────────────────────────────────────────────────
   // PRODUCTION-LIKE PROFILE INVARIANTS

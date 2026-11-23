@@ -287,6 +287,7 @@ describe("MetricsRegistry", () => {
       // API availability and latency
       expect(names).toContain(METRIC_NAMES.httpRequestsTotal);
       expect(names).toContain(METRIC_NAMES.httpRequestDurationMs);
+      expect(names).toContain(METRIC_NAMES.requestBodyRejectionsTotal);
       // Sync freshness
       expect(names).toContain(METRIC_NAMES.horizonSyncLagSeconds);
       // Anchoring backlog

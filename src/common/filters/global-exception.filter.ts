@@ -321,11 +321,21 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     const type = (exception as { type?: unknown }).type;
     if (typeof type !== "string") return undefined;
 
-    if (type === "entity.too.large") {
+    if (
+      type === "entity.too.large" ||
+      type === "request.compressed.too.large" ||
+      type === "request.expanded.too.large" ||
+      type === "request.expansion.ratio.exceeded"
+    ) {
       return {
         statusCode: HttpStatus.PAYLOAD_TOO_LARGE,
         code: ApiErrorCode.PAYLOAD_TOO_LARGE,
-        message: "The request exceeds the maximum permitted size.",
+        message:
+          type === "request.expansion.ratio.exceeded"
+            ? "The request exceeds the maximum permitted expansion ratio."
+            : type === "request.compressed.too.large"
+              ? "The compressed request exceeds the maximum permitted size."
+              : "The request exceeds the maximum permitted size.",
       };
     }
 

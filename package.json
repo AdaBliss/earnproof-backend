@@ -40,9 +40,11 @@
     "webhook:conformance": "ts-node scripts/webhook-receiver/conformance.ts",
     "credential:conformance": "ts-node scripts/credential-verifier/conformance.ts",
     "migration:safety": "ts-node scripts/migration-safety.ts",
+  "runtime:policy": "ts-node scripts/runtime-policy.ts",
     "webhook:receiver": "ts-node scripts/webhook-receiver/receiver.ts",
     "sbom:generate": "ts-node scripts/sbom/generate.ts",
-    "sbom:check": "ts-node scripts/sbom/check.ts"
+    "sbom:check": "ts-node scripts/sbom/check.ts",
+    "image:verify": "ts-node scripts/container-image/verify-image.ts"
   },
   "dependencies": {
     "@nestjs/cli": "^11.0.14",

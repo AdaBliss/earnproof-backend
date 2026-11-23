@@ -5,6 +5,7 @@ import {
   CURRENT_HASH_VERSION,
   resolveChainKey,
 } from "../audit/audit-chain";
+import { guardTransactionsAgainstAbort } from "../common/request-context/request-abort";
 
 /** Row shape read back from `AuditChainCursor` via raw SQL. */
 interface ChainCursorRow {
@@ -21,6 +22,7 @@ export class PrismaService
   constructor() {
     super();
     this.installAuditChainWriter();
+    this.installRequestAbortGuard();
   }
 
   async onModuleInit() {
@@ -33,6 +35,22 @@ export class PrismaService
 
   get webhookCircuitState() {
     return (this as any).webhookCircuit;
+  }
+
+  /**
+   * Makes transactions started on behalf of an HTTP request stop when that
+   * request is aborted.
+   *
+   * The driver cannot cancel a statement already in flight, so cancellation is
+   * cooperative and bounded: no new transaction starts for an aborted request,
+   * no statement is issued after the abort inside an interactive transaction,
+   * and a transaction whose request was aborted before commit is rolled back
+   * (the callback throws). The outcome is therefore always a clean rollback or
+   * a completed commit, never a half-applied transaction. Outside a request
+   * (jobs, scripts) there is no signal and behaviour is unchanged.
+   */
+  private installRequestAbortGuard(): void {
+    guardTransactionsAgainstAbort(this);
   }
 
   /**

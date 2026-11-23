@@ -1,0 +1,225 @@
+name: Release image
+
+# Build, sign and verify the backend container image for a version tag.
+#
+# Signing is keyless: cosign uses the job's GitHub OIDC identity, so there is
+# no long-lived signing key to store, rotate or leak, and nothing in this file
+# can sign anything outside this workflow. The signature and the SLSA
+# provenance attestation are verified in this same run before the digest is
+# published — a release that fails verification publishes nothing.
+#
+# This workflow never runs for a pull request (there is no PR trigger), and
+# the signing identity lives behind the `release` environment, which must be
+# configured with required reviewers. A fork or a PR therefore cannot reach
+# the OIDC token, the registry credentials, or the environment, and cannot
+# publish or sign an image. Tags are created from `main` only after CI passes.
+#
+# Actions are pinned to full commit SHAs, not mutable major-version tags: a
+# release run must not silently pick up a re-pointed tag.
+#
+# What a release publishes:
+#   - image: ghcr.io/veridatum-labs/earnproof-backend:<tag> (and :sha-<commit>)
+#   - a keyless cosign signature over the image digest
+#   - a SLSA provenance attestation for the image digest
+#   - an `image-digest.txt` artifact holding the digest-pinned reference
+#     deployments must use (tags are never trusted without the digest)
+#
+# Operators verify a published image with the commands in docs/deployment.md
+# and gate a deploy with `npm run image:verify` before `docker run`.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing version tag to release (e.g. v1.2.3)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-image
+  cancel-in-progress: false
+
+jobs:
+  build-sign-verify:
+    runs-on: ubuntu-latest
+    # Protected environment: required reviewers gate every release, and the
+    # OIDC identity below is only minted for runs this environment approves.
+    environment: release
+    permissions:
+      contents: read
+      # Mint the short-lived OIDC token cosign and the attestation action use
+      # as their keyless identity. Scoped to this job only.
+      id-token: write
+      # Push the image to GHCR.
+      packages: write
+      # Record the SLSA provenance attestation.
+      attestations: write
+
+    env:
+      IMAGE: ghcr.io/veridatum-labs/earnproof-backend
+
+    steps:
+      - name: Check out the tagged release
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          persist-credentials: false
+
+      - name: Resolve and validate the release tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${{ github.ref_name }}"
+          fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag '$tag' is not a vX.Y.Z version tag"
+            exit 1
+          fi
+          # A manual dispatch must name a tag that actually exists; a typo
+          # must fail here, not build an image for the wrong ref.
+          git rev-parse --verify "refs/tags/$tag" >/dev/null
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies for the deploy gate
+        run: npm ci
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          # Ephemeral token, minted for this job only. It is never available
+          # to a pull request: this workflow has no PR trigger.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags and labels
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.IMAGE }}
+          # The version tag and a commit tag only. There is deliberately no
+          # `latest` tag: a mutable tag next to a digest invites deploys to
+          # drop the digest, and this repo's policy rejects `latest` outright.
+          tags: |
+            type=ref,event=tag
+            type=sha,prefix=sha-
+          labels: |
+            org.opencontainers.image.title=earnproof-backend
+            org.opencontainers.image.source=https://github.com/veridatum-labs/earnproof-backend
+
+      - name: Build and push the image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            VERSION=${{ steps.tag.outputs.tag }}
+          # Max-mode provenance records the full build (base image digests
+          # included), and the SBOM is attached to the image for audit.
+          provenance: mode=max
+          sbom: true
+
+      - name: Attest SLSA provenance for the image digest
+        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9 # v3
+        with:
+          cosign-release: v2.4.1
+
+      - name: Sign the image digest (keyless, GitHub OIDC)
+        shell: bash
+        env:
+          COSIGN_YES: "1"
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${IMAGE}@${IMAGE_DIGEST}"
+
+      - name: Verify the signature and attestation
+        shell: bash
+        env:
+          COSIGN_YES: "1"
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          identity="https://github.com/veridatum-labs/earnproof-backend/.github/workflows/release-image.yml@refs/tags/${RELEASE_TAG}"
+          cosign verify \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${IMAGE}@${IMAGE_DIGEST}"
+          cosign verify-attestation \
+            --type slsaprovenance \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${IMAGE}@${IMAGE_DIGEST}"
+
+      - name: Verify the deploy gate accepts the pinned reference
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          npm run image:verify -- \
+            --reference "${IMAGE}:${RELEASE_TAG}@${IMAGE_DIGEST}" \
+            --expected-digest "${IMAGE_DIGEST}" \
+            --expected-tag "${RELEASE_TAG}"
+
+      - name: Publish the digest-pinned reference
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # This file is the deploy input: the pinned reference, nothing else.
+          # It is only written after every verification step above passed.
+          printf '%s\n' "${IMAGE}@${IMAGE_DIGEST}" > image-digest.txt
+
+      - name: Upload the digest artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: image-digest-${{ steps.tag.outputs.tag }}
+          path: image-digest.txt
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Summarise the release
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          {
+            echo "## Release ${RELEASE_TAG}"
+            echo ""
+            echo "Pinned image: \`${IMAGE}@${IMAGE_DIGEST}\`"
+            echo ""
+            echo "Signed keylessly (GitHub OIDC) and attested with SLSA provenance; signature, attestation and deploy gate all verified in this run."
+          } >> "$GITHUB_STEP_SUMMARY"

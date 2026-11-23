@@ -24,6 +24,60 @@ export const PERMANENT_CONTRACT_ERROR_PATTERNS: readonly RegExp[] = [
   /access denied/i,
 ];
 
+/**
+ * Substrings of a Stellar submission error that mean the transaction's
+ * sequence number was stale or already used (`tx_bad_seq`). This says nothing
+ * about network health: the node answered, and the answer is "rebuild against
+ * the current sequence". It is retried quickly and never trips the circuit.
+ */
+export const SEQUENCE_CONFLICT_PATTERNS: readonly RegExp[] = [
+  /tx_bad_seq/i,
+  /txBadSeq/,
+  /bad[_ ]seq(uence)?/i,
+];
+
+/** True when a submission error is a stale or reused sequence number. */
+export function isSequenceConflict(message: string): boolean {
+  return SEQUENCE_CONFLICT_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+/**
+ * How a failed anchoring attempt should be retried.
+ * - `permanent`: will repeat identically; quarantine.
+ * - `sequence_conflict`: retry soon against a fresh sequence.
+ * - `transient`: transport or dependency trouble; retry with backoff.
+ */
+export type AnchorFailureKind = "permanent" | "sequence_conflict" | "transient";
+
+/**
+ * A failure raised by this service itself (as opposed to the CLI). Its message
+ * is a fixed, safe string and carries no argument, key, or RPC detail.
+ */
+export class ContractSubmissionError extends Error {
+  constructor(
+    readonly kind: AnchorFailureKind,
+    readonly code: string,
+    message: string,
+    /**
+     * Whether this reflects an unhealthy dependency (RPC down, garbage
+     * response) and so should count toward opening the circuit. A retryable
+     * state problem such as an archived entry does not.
+     */
+    readonly dependencyFault: boolean = kind === "transient",
+  ) {
+    super(message);
+    this.name = "ContractSubmissionError";
+  }
+}
+
+/** Maps any thrown error to a retry kind. */
+export function classifyFailureKind(error: unknown): AnchorFailureKind {
+  if (error instanceof ContractSubmissionError) return error.kind;
+  const message = error instanceof Error ? error.message : String(error);
+  if (isSequenceConflict(message)) return "sequence_conflict";
+  return isPermanentContractError(message) ? "permanent" : "transient";
+}
+
 /** True when a contract error is permanent and must be quarantined, not retried. */
 export function isPermanentContractError(message: string): boolean {
   return PERMANENT_CONTRACT_ERROR_PATTERNS.some((pattern) =>
@@ -40,6 +94,10 @@ export function isPermanentContractError(message: string): boolean {
  * repeated failures that would otherwise exhaust the anchoring workers.
  */
 export function classifyContractError(error: unknown): CallOutcome {
-  const message = error instanceof Error ? error.message : String(error);
-  return isPermanentContractError(message) ? "ignore" : "trip";
+  // Permanent rejections and sequence conflicts are answers from a healthy
+  // dependency, so they never count toward opening the circuit.
+  if (error instanceof ContractSubmissionError) {
+    return error.dependencyFault ? "trip" : "ignore";
+  }
+  return classifyFailureKind(error) === "transient" ? "trip" : "ignore";
 }

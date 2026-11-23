@@ -30,6 +30,10 @@ import {
   WebhookTestEnvelope,
 } from "./webhook-event.types";
 import { WebhookSigningService } from "./webhook-signing.service";
+import {
+  buildDeliveryReceipt,
+  type WebhookDeliveryReceiptInput,
+} from "./webhook-delivery-receipt";
 import { WebhookSecretVersioningService } from "./webhook-secret-versioning.service";
 import {
   SsrfBlockedError,
@@ -374,6 +378,10 @@ export class WebhookDeliveryService implements OnModuleInit {
         continue;
       }
 
+      // A fresh retry chain: its lineage is a new random id, shared by
+      // every later retry row of this chain and bound into each receipt.
+      const lineageId = randomUUID();
+
       const delivery = await this.prisma.webhookDelivery.create({
         data: {
           webhookId: hook.id,
@@ -384,9 +392,23 @@ export class WebhookDeliveryService implements OnModuleInit {
           payloadBody: serialized.body,
           predicateSnapshot: hook.predicate as unknown as Prisma.InputJsonValue,
           attempt: 1,
+          lineageId,
           status: WebhookDeliveryStatus.PENDING,
         },
         select: { id: true },
+      });
+
+      // Issue the versioned idempotency receipt for attempt 1.
+      await this.issueReceipt({
+        deliveryId: delivery.id,
+        webhookId: hook.id,
+        eventId,
+        eventType: domainEvent.event,
+        payloadBody: serialized.body,
+        schemaVersion: serialized.schemaVersion,
+        attempt: 1,
+        lineageId,
+        replayOf: null,
       });
 
       // Initialize circuit breaker for webhook if needed
@@ -452,6 +474,9 @@ export class WebhookDeliveryService implements OnModuleInit {
     // Replay is idempotent per (originalDeliveryId, replayedBy): re-using
     // the same eventId in the envelope means integrators can deduplicate on
     // X-EarnProof-Delivery just like they do for normal retries.
+    // A replay starts a fresh lineage (and a fresh receipt) so its attempt 1
+    // never collides with the original chain's attempt 1.
+    const lineageId = randomUUID();
     const replayDelivery = await this.prisma.webhookDelivery.create({
       data: {
         webhookId: original.webhookId,
@@ -462,12 +487,25 @@ export class WebhookDeliveryService implements OnModuleInit {
         payloadBody: original.payloadBody,
         eventId: original.eventId, // same eventId → integrator deduplicates
         attempt: 1,
+        lineageId,
         status: WebhookDeliveryStatus.PENDING,
         replayOf: originalDeliveryId,
         replayedBy,
         replayKey,
       },
       select: { id: true },
+    });
+
+    await this.issueReceipt({
+      deliveryId: replayDelivery.id,
+      webhookId: original.webhookId,
+      eventId: original.eventId,
+      eventType: original.eventType,
+      payloadBody: original.payloadBody,
+      schemaVersion: original.schemaVersion,
+      attempt: 1,
+      lineageId,
+      replayOf: originalDeliveryId,
     });
 
     this.scheduleDelivery(replayDelivery.id, original.webhookId, 0);
@@ -623,6 +661,33 @@ export class WebhookDeliveryService implements OnModuleInit {
     );
 
     const schemaVersion = delivery.schemaVersion ?? "1";
+
+    // Versioned idempotency receipt for this attempt, sent alongside the
+    // event id so a receiver can tell a retry or replay of the same event
+    // apart from a duplicate send of one attempt: retries share the event
+    // id and lineage and differ by attempt; replays carry a fresh lineage.
+    // Computed from the stored row, never from a secret; omitted (with a
+    // warning) if the row cannot produce one, so a receipt problem can
+    // never block a delivery.
+    let receiptId: string | undefined;
+    try {
+      receiptId = buildDeliveryReceipt({
+        deliveryId: delivery.id,
+        webhookId: delivery.webhookId,
+        eventId: delivery.eventId,
+        eventType: delivery.eventType,
+        payloadBody: body,
+        attempt: delivery.attempt,
+        lineageId: delivery.lineageId ?? delivery.id,
+        replayOf: delivery.replayOf ?? null,
+        schemaVersion,
+      }).receiptId;
+    } catch (err) {
+      this.logger.warn(
+        `Delivery ${deliveryId}: cannot compute receipt id: ${String(err)}`,
+      );
+    }
+
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       "X-EarnProof-Timestamp": String(timestamp),
@@ -630,6 +695,7 @@ export class WebhookDeliveryService implements OnModuleInit {
       "X-EarnProof-Event": delivery.eventType,
       "X-EarnProof-Schema-Version": schemaVersion,
       "X-EarnProof-Signature": signature,
+      ...(receiptId ? { "X-EarnProof-Receipt": receiptId } : {}),
     };
     // Deprecation is announced in delivery metadata, never in the body: the
     // body is the contract under discussion (docs/versioning.md).
@@ -769,6 +835,10 @@ export class WebhookDeliveryService implements OnModuleInit {
 
     // Create a new delivery row for the retry (preserves the original row's
     // first-attempt record and makes each attempt queryable individually).
+    // The retry stays in the same lineage: it inherits the chain's
+    // lineageId (a legacy row with none resolves to its own id), so the
+    // retry's receipt differs from attempt 1 only by `attempt`.
+    const lineageId = delivery.lineageId ?? delivery.id;
     const nextAttempt = delivery.attempt + 1;
     const delay = backoffMs(nextAttempt);
     const nextRetryAt = new Date(Date.now() + delay);
@@ -798,11 +868,24 @@ export class WebhookDeliveryService implements OnModuleInit {
         payloadBody: delivery.payloadBody, // original bytes
         eventId: delivery.eventId, // same eventId across all retries
         attempt: nextAttempt,
+        lineageId,
         status: WebhookDeliveryStatus.PENDING,
         replayOf: delivery.replayOf, // carry through if this is a replay
         nextRetryAt,
       },
       select: { id: true },
+    });
+
+    await this.issueReceipt({
+      deliveryId: retryDelivery.id,
+      webhookId: delivery.webhookId,
+      eventId: delivery.eventId,
+      eventType: delivery.eventType,
+      payloadBody: delivery.payloadBody,
+      schemaVersion: delivery.schemaVersion,
+      attempt: nextAttempt,
+      lineageId,
+      replayOf: delivery.replayOf ?? null,
     });
 
     this.logger.log(
@@ -819,6 +902,43 @@ export class WebhookDeliveryService implements OnModuleInit {
       await this.runDelivery(retryDelivery.id, true);
     } else {
       this.scheduleDelivery(retryDelivery.id, delivery.webhookId, delay);
+    }
+  }
+
+  /**
+   * Persist the versioned idempotency receipt for one delivery attempt.
+   *
+   * Best-effort by design: a receipt is observability metadata and must
+   * never lose or delay a delivery, so a storage failure is logged and the
+   * delivery still goes out. The receipt id is deterministic and
+   * recomputable from the delivery row at any time (see
+   * `buildDeliveryReceipt`), so a missed write is recoverable on read and
+   * the `X-EarnProof-Receipt` header is unaffected.
+   */
+  private async issueReceipt(
+    input: WebhookDeliveryReceiptInput,
+  ): Promise<void> {
+    try {
+      const receipt = buildDeliveryReceipt(input);
+      await this.prisma.webhookDeliveryReceipt.create({
+        data: {
+          receiptId: receipt.receiptId,
+          version: receipt.version,
+          webhookId: receipt.webhookId,
+          deliveryId: receipt.deliveryId,
+          eventId: receipt.eventId,
+          eventType: receipt.eventType,
+          payloadHash: receipt.payloadHash,
+          attempt: receipt.attempt,
+          lineageId: receipt.lineageId,
+          replayOf: receipt.replayOf,
+          schemaVersion: receipt.schemaVersion,
+        },
+      });
+    } catch (err) {
+      this.logger.warn(
+        `Delivery receipt could not be stored for delivery ${input.deliveryId}: ${String(err)}`,
+      );
     }
   }
 

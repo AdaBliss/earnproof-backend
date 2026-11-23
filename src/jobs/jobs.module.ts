@@ -8,6 +8,13 @@ import { IssuerReconciliationService } from "../issuers/issuer-reconciliation.se
 import { IssuersModule } from "../issuers/issuers.module";
 import { PaymentsModule } from "../payments/payments.module";
 import { ContractAnchoringService } from "../proofs/contract-anchoring.service";
+import {
+  SequenceCoordinatorPort,
+  SimulationAuditPort,
+} from "../proofs/soroban/ports";
+import { SorobanRpcClient } from "../proofs/soroban/soroban-rpc.client";
+import { SimulationAuditService } from "../proofs/soroban/simulation-audit.service";
+import { SourceSequenceCoordinator } from "../proofs/soroban/source-sequence-coordinator.service";
 import { ProofReconciliationService } from "../proofs/proof-reconciliation.service";
 import { ProofsModule } from "../proofs/proofs.module";
 import { WebhooksModule } from "../webhooks/webhooks.module";
@@ -37,6 +44,7 @@ import { BulkAdminController } from "./bulk-admin/bulk-admin.controller";
 import { MetricsModule } from "../metrics/metrics.module";
 import { MetricsRollupJob } from "./metrics-rollup.job";
 import { ApiKeyExpirationJob } from "./api-key-expiration.job";
+import { ContractEventGapService } from "./contract-event-gap.service";
 
 @Module({
   imports: [
@@ -59,6 +67,11 @@ import { ApiKeyExpirationJob } from "./api-key-expiration.job";
   providers: [
     ApiKeyExpirationJob,
     ContractAnchoringService,
+    SorobanRpcClient,
+    SimulationAuditService,
+    SourceSequenceCoordinator,
+    { provide: SimulationAuditPort, useExisting: SimulationAuditService },
+    { provide: SequenceCoordinatorPort, useExisting: SourceSequenceCoordinator },
     AnchoringWorkerService,
     PaymentBackfillWorkerService,
     DomainEventOutboxWorkerService,
@@ -82,6 +95,7 @@ import { ApiKeyExpirationJob } from "./api-key-expiration.job";
     RevocationPropagationReconcilerService,
     BulkAdminService,
     MetricsRollupJob,
+    ContractEventGapService,
   ],
   exports: [
     AnchoringWorkerService,
@@ -98,8 +112,7 @@ import { ApiKeyExpirationJob } from "./api-key-expiration.job";
     RevocationPropagationReconcilerService,
     BulkAdminService,
     ApiKeyExpirationJob,
-    CredentialQuarantineExpiryJob,
-    QuarantineCleanupJob,
+    ContractEventGapService,
   ],
 })
 export class JobsModule {}

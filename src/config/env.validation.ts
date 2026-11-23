@@ -1,4 +1,7 @@
+import { validateFeePolicy } from "./fee-policy";
 import { z } from "zod";
+import { isExactCorsOrigin } from "../common/http/cors-origin-policy";
+import { isValidCidr } from "../common/http/ip-address";
 import { DEPLOYMENT_MANIFEST_MAX_BYTES } from "./deployment-manifest";
 
 /**
@@ -121,6 +124,19 @@ const stellarContractId = z.string().regex(
   "CONTRACT_ID must be a valid Stellar contract ID (C followed by 55 alphanumeric chars)",
 );
 
+// ── Helper: comma-separated list of 32-byte hex WASM hashes ──
+const wasmHashList = z
+  .string()
+  .refine(
+    (value) =>
+      value
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+        .every((entry) => /^[a-fA-F0-9]{64}$/.test(entry)),
+    "Expected WASM hashes must be comma-separated 64-character hex values",
+  );
+
 // ── Helper: Stellar public key (issuer address) format ──
 const stellarPublicKey = z.string().regex(
   /^G[A-Z2-7]{55}$/,
@@ -222,6 +238,28 @@ const envSchema = z.object({
   /** HTTP server port (1–65535, but typically 3000–4000) */
   PORT: positiveInt("PORT").default(4000),
 
+  /** Number of trusted reverse-proxy hops between the client and this service. */
+  TRUST_PROXY_HOPS: z.coerce
+    .number()
+    .int("TRUST_PROXY_HOPS must be an integer")
+    .min(0, "TRUST_PROXY_HOPS must not be negative")
+    .max(10, "TRUST_PROXY_HOPS must not exceed 10")
+    .default(0),
+
+  /** Comma-separated CIDR ranges for proxy peers; empty when no proxy is trusted. */
+  TRUSTED_PROXY_CIDRS: z
+    .string()
+    .default("")
+    .transform((value) =>
+      value === "" ? [] : value.split(",").map((cidr) => cidr.trim()),
+    )
+    .refine(
+      (ranges) =>
+        ranges.length <= 20 &&
+        ranges.every((range) => range.length > 0 && isValidCidr(range)),
+      "TRUSTED_PROXY_CIDRS must contain at most 20 valid comma-separated CIDR ranges",
+    ),
+
   /** PostgreSQL connection string (REQUIRED: checked at startup and readiness) */
   DATABASE_URL: z
     .string()
@@ -239,7 +277,14 @@ const envSchema = z.object({
   // ──────────────────────────────────────────────────────────────────────
 
   /** Frontend application URL (used for CORS origin, must be HTTPS in production) */
-  APP_URL: z.string().url("APP_URL must be a valid URL").default("http://localhost:3000"),
+  APP_URL: z
+    .string()
+    .url("APP_URL must be a valid URL")
+    .refine(
+      isExactCorsOrigin,
+      "APP_URL must be one exact HTTP(S) origin without credentials, path, query, or fragment",
+    )
+    .default("http://localhost:3000"),
 
   /** This backend API URL (used for Swagger docs, must be HTTPS in production) */
   API_URL: z.string().url("API_URL must be a valid URL").default("http://localhost:4000"),
@@ -375,6 +420,15 @@ const envSchema = z.object({
     .optional()
     .default("false"),
 
+  /** Fee policy for contract submissions, in stroops (see src/config/fee-policy.ts). */
+  CONTRACT_FEE_ESTIMATE_ENABLED: z.enum(["true", "false"]).optional().default("true"),
+  CONTRACT_FEE_BASE_STROOPS: z.coerce.number().optional().default(100),
+  CONTRACT_FEE_MAX_STROOPS: z.coerce.number().optional().default(100_000),
+  CONTRACT_FEE_SURGE_THRESHOLD_STROOPS: z.coerce.number().optional().default(1_000),
+  CONTRACT_FEE_SURGE_MULTIPLIER: z.coerce.number().optional().default(2),
+  CONTRACT_FEE_REFUSAL_THRESHOLD_STROOPS: z.coerce.number().optional().default(1_000_000),
+  CONTRACT_FEE_ESTIMATE_MAX_AGE_MS: z.coerce.number().optional().default(60_000),
+
   /** Path to Stellar CLI executable */
   STELLAR_CLI_PATH: optionalString(z.string().min(1)),
 
@@ -383,6 +437,33 @@ const envSchema = z.object({
 
   /** Stellar contract ID for proof registry (matches ^C[A-Z2-7]{55}$) */
   PROOF_REGISTRY_CONTRACT_ID: optionalString(stellarContractId),
+
+  /** Soroban RPC endpoint for simulation and the identity gate (optional) */
+  SOROBAN_RPC_URL: optionalString(
+    z.string().url("SOROBAN_RPC_URL must be a valid URL"),
+  ),
+  SOROBAN_RPC_TIMEOUT_MS: boundedInt(100, 60_000, 5_000),
+
+  /** Pre-submission simulation policy */
+  CONTRACT_SIMULATION_ENABLED: z.enum(["true", "false"]).optional().default("true"),
+  CONTRACT_SIMULATION_MAX_RESOURCE_FEE: boundedInt(1, 1_000_000_000_000, 10_000_000),
+  CONTRACT_SIMULATION_MAX_CPU_INSTRUCTIONS: boundedInt(1, 1_000_000_000, 100_000_000),
+  CONTRACT_SIMULATION_MAX_MEMORY_BYTES: boundedInt(1, 1_073_741_824, 41_943_040),
+
+  /** Authorization-entry expiration window, in ledgers from the current one */
+  CONTRACT_AUTH_EXPIRATION_MIN_LEDGERS: boundedInt(0, 1_000_000, 2),
+  CONTRACT_AUTH_EXPIRATION_MAX_LEDGERS: boundedInt(1, 10_000_000, 17_280),
+
+  /** Source-account lease TTL; must exceed one submission attempt (120s) */
+  CONTRACT_SEQUENCE_LEASE_TTL_MS: boundedInt(130_000, 3_600_000, 150_000),
+
+  /** Startup network/contract identity gate */
+  CONTRACT_IDENTITY_CHECK_ENABLED: z.enum(["true", "false"]).optional().default("true"),
+  CONTRACT_IDENTITY_TIMEOUT_MS: boundedInt(500, 60_000, 8_000),
+  CONTRACT_IDENTITY_RECHECK_INTERVAL_MS: boundedInt(1_000, 86_400_000, 300_000),
+  CONTRACT_IDENTITY_RETRY_INTERVAL_MS: boundedInt(1_000, 3_600_000, 10_000),
+  PROOF_REGISTRY_EXPECTED_WASM_HASHES: optionalString(wasmHashList),
+  ISSUER_REGISTRY_EXPECTED_WASM_HASHES: optionalString(wasmHashList),
 
   // ──────────────────────────────────────────────────────────────────────
   // ISSUER REGISTRY (Optional feature)
@@ -710,6 +791,17 @@ function isLocalhostUrl(value: string): boolean {
 function checkCrossVariableInvariants(data: z.infer<typeof envSchema>) {
   const errors: string[] = [];
 
+  if (data.TRUST_PROXY_HOPS === 0 && data.TRUSTED_PROXY_CIDRS.length > 0) {
+    errors.push(
+      "Invalid configuration: TRUSTED_PROXY_CIDRS requires TRUST_PROXY_HOPS greater than 0",
+    );
+  }
+  if (data.TRUST_PROXY_HOPS > 0 && data.TRUSTED_PROXY_CIDRS.length === 0) {
+    errors.push(
+      "Invalid configuration: TRUST_PROXY_HOPS greater than 0 requires TRUSTED_PROXY_CIDRS",
+    );
+  }
+
   // ────────────────────────────────────────────────────────────────────────
   // PRODUCTION-LIKE PROFILE INVARIANTS
   // ────────────────────────────────────────────────────────────────────────
@@ -1007,6 +1099,21 @@ export function validateEnv(config: Record<string, unknown>) {
       "Invalid environment: PROOF_SHARE_TOKEN_DEFAULT_TTL_MINUTES must not exceed PROOF_SHARE_TOKEN_MAX_TTL_MINUTES",
     );
   }
+  // An invalid fee policy must fail at startup, never at first submission.
+  const feeErrors = validateFeePolicy({
+    baseFeeStroops: parsed.data.CONTRACT_FEE_BASE_STROOPS,
+    maxFeeStroops: parsed.data.CONTRACT_FEE_MAX_STROOPS,
+    surgeThresholdStroops: parsed.data.CONTRACT_FEE_SURGE_THRESHOLD_STROOPS,
+    surgeMultiplier: parsed.data.CONTRACT_FEE_SURGE_MULTIPLIER,
+    refusalThresholdStroops: parsed.data.CONTRACT_FEE_REFUSAL_THRESHOLD_STROOPS,
+    estimateMaxAgeMs: parsed.data.CONTRACT_FEE_ESTIMATE_MAX_AGE_MS,
+  });
+  if (feeErrors.length > 0) {
+    throw new Error(
+      `Invalid environment: invalid contract fee policy: ${feeErrors.join("; ")}`,
+    );
+  }
+
   // Check cross-variable invariants after individual field validation
   checkCrossVariableInvariants(parsed.data);
 

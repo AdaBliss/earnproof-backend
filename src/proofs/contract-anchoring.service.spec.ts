@@ -190,6 +190,8 @@ describe("ContractAnchoringService", () => {
           "SOURCE_ACCOUNT",
           "--network",
           "testnet",
+          "--fee",
+          "100",
           "--id",
           "CONTRACT_ID",
           "--",
@@ -403,6 +405,25 @@ describe("ContractAnchoringService", () => {
       const result = await service.getProofStatus("proof_123");
 
       expect(result).toEqual({ checked: true, revoked: true, valid: false });
+    });
+
+    it("fails closed when the CLI returns a non-boolean value instead of reading it as false", async () => {
+      const service = buildService({ "contractAnchoring.required": false });
+      mockExecFile.mockImplementation(
+        (
+          _cmd: string,
+          _args: string[],
+          _opts: unknown,
+          callback: (error: null, stdout: string) => void,
+        ) => callback(null, "{unexpected: schema}"),
+      );
+
+      const result = await service.getProofStatus("proof_123");
+
+      expect(result.checked).toBe(false);
+      expect(result).toMatchObject({ reason: "failed" });
+      // The raw CLI output must not be echoed into the result.
+      expect(JSON.stringify(result)).not.toContain("unexpected");
     });
 
     it("returns a safe failure result without throwing when the CLI errors and anchoring is not required", async () => {

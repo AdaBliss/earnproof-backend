@@ -18,16 +18,36 @@ which is what the application enforces and what the tests assert against.
 
 | Boundary | Enforced by | Rejects with |
 |---|---|---|
-| **Transport** — bytes on the socket | `express.json` limits, in [`bootstrap.ts`](../src/bootstrap.ts) | `413 PAYLOAD_TOO_LARGE` |
+| **Representation** — route-aware media types and UTF-8 charset | Content-type gate, in [`bootstrap.ts`](../src/bootstrap.ts) | `400 INVALID_INPUT` |
+| **Transport** — compressed and expanded bytes | Compressed-body gate and `express.json` limits, in [`bootstrap.ts`](../src/bootstrap.ts) | `413 PAYLOAD_TOO_LARGE` |
 | **Structure** — depth, array length, string length, node count | [`requestShapeMiddleware`](../src/common/middleware/request-shape.middleware.ts) | `413 PAYLOAD_TOO_LARGE` |
 | **Domain** — what each field means | DTO decorators | `422 VALIDATION_ERROR` |
 
-They run in that order, and the order is the design. The transport limit refuses
-an oversized body while it is still bytes arriving on a socket — it is never
-parsed, never validated, never logged, and no handler runs. The structural check
-is the first thing to look at a parsed body, before guards do database work and
-before class-transformer walks it. Only then does the domain get a say, and by
-then the input is small enough that being wrong about it is cheap.
+They run in that order, and the order is the design. Content types and charsets
+are validated before decompression or parsing. Compressed bodies are bounded
+before decompression; decoded bytes are bounded before JSON/form parsing.
+Rejected bodies are never parsed, validated, logged as payloads, or passed to a
+handler. The structural check is the first thing to look at a parsed body,
+before guards do database work and before class-transformer walks it. Only then
+does the domain get a say, and by then the input is small enough that being
+wrong about it is cheap.
+
+## Representation: media type and charset
+
+Body-bearing `POST`, `PUT`, `PATCH`, and `DELETE` requests must use one
+unambiguous `Content-Type`. JSON and URL-encoded bodies remain accepted by
+default; `/api/v1/credentials/verify` and `/api/v1/security/csp-reports` accept
+JSON only. A body without a content type, duplicate or conflicting content
+types, unsupported media types or parameters, and non-UTF-8 charsets are
+rejected before parsing or authorization. Requests without a body may omit the
+header. The supported charsets are `utf-8` and `utf8`; no charset parameter
+means UTF-8.
+
+Rejections increment `request_body_rejections_total{rejection}` using a closed,
+bounded reason vocabulary (`ambiguous_content_type`, `missing_content_type`,
+`unsupported_charset`, and `unsupported_content_type`, in addition to the
+transport-limit reasons below). The metric contains no route, header value, or
+payload data.
 
 ## Transport: body size
 
@@ -35,15 +55,24 @@ then the input is small enough that being wrong about it is cheap.
 has, and small enough that a thousand concurrent oversized requests cannot
 exhaust a small container's memory.
 
-Two routes are tighter, and none is looser:
+Three routes are tighter, and none is looser:
 
 | Route prefix | Limit | Why |
 |---|---|---|
 | `/api/v1/auth` | 8 KB | Unauthenticated, and therefore the cheapest place to attack. A challenge or verification carries an address, an id and a signature. |
 | `/api/v1/credentials/verify` | 40 KB | The one endpoint that legitimately takes a document. Its DTO caps the credential at 32 KB, so a larger body cannot become a valid request. |
+| `/api/v1/security/csp-reports` | 2 KB | Unauthenticated reports contain only a few closed-enum fields and a short version string. |
 
 A test asserts no route limit exceeds the global one; a route limit above it
 would be silently ineffective and would read as protection that is not there.
+
+Compressed JSON and form bodies are bounded by the same route-specific limit
+before decompression. Decoded output is bounded by the existing transport limit
+and by a maximum `MAX_BODY_EXPANSION_RATIO` (100:1). Equality at each limit is
+accepted.
+Transport-limit rejections increment `request_body_rejections_total{rejection}`
+with one of `compressed_too_large`, `expanded_too_large`, or
+`expansion_ratio_exceeded`.
 
 ## Structure
 

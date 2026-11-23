@@ -2,6 +2,10 @@ import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { StructuredLogger } from "../common/logger";
 import { HorizonFault } from "../stellar/horizon-fault";
+import {
+  SorobanRpcResponseError,
+  parseSorobanRpcResponse,
+} from "../common/validation/soroban-rpc.schemas";
 
 /**
  * Contract state checkpoint digest fetched from live contract.
@@ -234,63 +238,20 @@ export class ContractDigestClient {
 
   /**
    * Parse the digest response from contract RPC.
+   *
+   * Validated against a runtime schema so a malformed or oversized response
+   * fails closed with a stable domain error that never echoes the payload.
    * @private
    */
   private parseDigestResponse(response: unknown): ContractStateDigest {
-    if (typeof response !== "object" || response === null) {
-      throw new Error("Response is not an object");
-    }
-
-    const obj = response as Record<string, unknown>;
-
-    // Validate required fields
-    const requiredFields = [
-      "network",
-      "contractId",
-      "checkpointNumber",
-      "digestVersion",
-      "components",
-      "timestamp",
-    ];
-    for (const field of requiredFields) {
-      if (!(field in obj)) {
-        throw new Error(`Missing required field: ${field}`);
-      }
-    }
-
-    // Type-check fields
-    if (typeof obj.network !== "string") {
-      throw new Error("network must be a string");
-    }
-    if (typeof obj.contractId !== "string") {
-      throw new Error("contractId must be a string");
-    }
-    if (typeof obj.checkpointNumber !== "string") {
-      throw new Error("checkpointNumber must be a string");
-    }
-    if (typeof obj.digestVersion !== "string") {
-      throw new Error("digestVersion must be a string");
-    }
-    if (typeof obj.components !== "object" || obj.components === null) {
-      throw new Error("components must be an object");
-    }
-    if (typeof obj.timestamp !== "string") {
-      throw new Error("timestamp must be an ISO-8601 string");
-    }
-
-    // Parse timestamp
-    const timestamp = new Date(obj.timestamp as string);
-    if (isNaN(timestamp.getTime())) {
-      throw new Error("timestamp is not a valid ISO-8601 date");
-    }
-
+    const parsed = parseSorobanRpcResponse("digest", response);
     return {
-      network: obj.network as string,
-      contractId: obj.contractId as string,
-      checkpointNumber: obj.checkpointNumber as string,
-      digestVersion: obj.digestVersion as string,
-      components: obj.components as Record<string, string>,
-      timestamp,
+      network: parsed.network,
+      contractId: parsed.contractId,
+      checkpointNumber: parsed.checkpointNumber,
+      digestVersion: parsed.digestVersion,
+      components: parsed.components,
+      timestamp: new Date(parsed.timestamp),
     };
   }
 
@@ -300,6 +261,11 @@ export class ContractDigestClient {
    * @private
    */
   private classifyFetchError(error: unknown): "TRANSIENT" | "PERMANENT" {
+    // A response that failed schema validation will not improve on retry.
+    if (error instanceof SorobanRpcResponseError) {
+      return "PERMANENT";
+    }
+
     if (error instanceof Error) {
       const message = error.message.toLowerCase();
 

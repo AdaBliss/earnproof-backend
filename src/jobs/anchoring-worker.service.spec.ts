@@ -93,6 +93,7 @@ describe("AnchoringWorkerService", () => {
 
       expect(anchoring.anchorProof).toHaveBeenCalledWith(
         expect.objectContaining({ proofId: "proof_1" }),
+        { signal: expect.any(AbortSignal) },
       );
       // Both intent update and proof update must be issued atomically via $transaction.
       expect(prisma.$transaction).toHaveBeenCalled();
@@ -368,7 +369,9 @@ describe("AnchoringWorkerService", () => {
 
       await worker.processIntent("intent_1");
 
-      expect(anchoring.revokeProof).toHaveBeenCalledWith("proof_1");
+      expect(anchoring.revokeProof).toHaveBeenCalledWith("proof_1", {
+        signal: expect.any(AbortSignal),
+      });
       expect(anchoring.anchorProof).not.toHaveBeenCalled();
     });
   });

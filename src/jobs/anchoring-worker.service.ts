@@ -21,6 +21,7 @@ import {
   isPermanentContractError,
   isSequenceConflict,
 } from "../proofs/contract-error";
+import { parentFromCarrier, withSpan } from "../common/observability/trace-context";
 import {
   SEQUENCE_RECOVERY_BASE_DELAY_MS,
   SEQUENCE_RECOVERY_MAX_ATTEMPTS,
@@ -145,6 +146,13 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
   private draining = false;
 
   /**
+   * Aborted when shutdown's drain budget is exhausted. Its signal is handed to
+   * every contract call, so an in-flight CLI child is killed rather than left
+   * running (and later "succeeding") after the worker has given up waiting.
+   */
+  private readonly shutdownController = new AbortController();
+
+  /**
    * The currently in-flight poll cycle, if any. `onApplicationShutdown`
    * awaits this (bounded by SHUTDOWN_DRAIN_TIMEOUT_MS) instead of tearing
    * the process down mid-batch, so a claimed intent either finishes its
@@ -237,6 +245,7 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
     if (drained) {
       this.logger.log("In-flight poll cycle finished draining");
     } else {
+      this.shutdownController.abort();
       this.logger.warn(
         `In-flight poll cycle did not finish within ${SHUTDOWN_DRAIN_TIMEOUT_MS}ms — ` +
           "any intent still PROCESSING will be reclaimed by resetStaleProcessing " +
@@ -421,7 +430,29 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
     }
   }
 
-  private async executeIntent(
+  /**
+   * Runs an intent inside a span that is a child of the request (or job) that
+   * enqueued it, restored from the persisted trace context. The carrier is
+   * validated again: a corrupt or tampered value starts a fresh trace instead of
+   * failing the intent. Contract calls made below inherit this span.
+   */
+  private executeIntent(
+    intent: Parameters<typeof this.executeIntentInner>[0],
+  ): Promise<void> {
+    if (!intent) return Promise.resolve();
+    return withSpan(
+      "anchoring.execute",
+      {
+        "job.name": "anchoring-worker",
+        "job.operation": intent.operation,
+        "job.attempt": intent.attemptCount + 1,
+      },
+      () => this.executeIntentInner(intent),
+      { parent: parentFromCarrier(intent) ?? null },
+    );
+  }
+
+  private async executeIntentInner(
     intent: Awaited<ReturnType<typeof this.prisma.anchoringIntent.findUnique>> & {
       proof: { commitment: string | null; expiresAt: Date };
     },
@@ -598,8 +629,14 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
   private async submitOnce(intent: ExecutableIntent): Promise<SubmitOutcome> {
     const { id, proofId, operation, proof } = intent;
 
+    const signal = this.shutdownController.signal;
+
     const hold = async (reason: string): Promise<SubmitOutcome | null> => {
-      if (reason === "circuit_open" || reason === "sequence_busy") {
+      if (
+        reason === "circuit_open" ||
+        reason === "sequence_busy" ||
+        reason === "cancelled"
+      ) {
         await this.releaseUnclaimed(id, operation, proofId, reason);
         return { kind: "released" };
       }
@@ -624,7 +661,13 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
         commitment: proof.commitment ?? proofId,
         expiresAt: proof.expiresAt,
       };
-      const result = await this.anchoring.anchorProof(anchorInput);
+      const result = await this.anchoring.anchorProof(anchorInput, { signal });
+
+      // A result that arrived after shutdown aborted the worker must never be
+      // recorded as success. Release the intent for a later retry.
+      if (signal.aborted && result.anchored) {
+        return (await hold("cancelled")) as SubmitOutcome;
+      }
 
       if (!result.anchored) {
         const released = await hold(result.reason);
@@ -643,7 +686,10 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
     }
 
     // REVOKE
-    const result = await this.anchoring.revokeProof(proofId);
+    const result = await this.anchoring.revokeProof(proofId, { signal });
+    if (signal.aborted && result.anchored) {
+      return (await hold("cancelled")) as SubmitOutcome;
+    }
     if (!result.anchored) {
       const released = await hold(result.reason);
       if (released) return released;
@@ -698,7 +744,9 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
       SEQUENCE_RECOVERY_BASE_DELAY_MS;
 
     for (let round = 1; round <= SEQUENCE_RECOVERY_MAX_ATTEMPTS; round++) {
-      const status = await this.anchoring.getProofStatus(proofId);
+      const status = await this.anchoring.getProofStatus(proofId, {
+        signal: this.shutdownController.signal,
+      });
       if (!status.checked) {
         // Without authoritative state a retry could duplicate the submission.
         throw new Error("Sequence recovery paused: on-chain state could not be verified");
@@ -739,7 +787,11 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
     id: string,
     operation: AnchoringOperation,
     proofId: string,
-    cause: "circuit_open" | "sequence_busy" | "fee_refused" = "circuit_open",
+    cause:
+      | "circuit_open"
+      | "sequence_busy"
+      | "fee_refused"
+      | "cancelled" = "circuit_open",
     holdMs = 0,
   ): Promise<void> {
     await this.prisma.anchoringIntent.update({

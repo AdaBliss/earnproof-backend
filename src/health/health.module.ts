@@ -25,6 +25,7 @@ import { CapabilitiesController } from "./capabilities.controller";
     ProtocolPauseService,
     PauseAcknowledgementService,
     ClockSkewMonitorService,
+    ProcessPressureMonitorService,
     SorobanRpcClient,
     ContractIdentityService,
     { provide: Clock, useClass: SystemClock },
@@ -34,6 +35,7 @@ import { CapabilitiesController } from "./capabilities.controller";
     ProtocolPauseService,
     PauseAcknowledgementService,
     ClockSkewMonitorService,
+    ProcessPressureMonitorService,
     ContractIdentityService,
   ],
 })

@@ -159,6 +159,55 @@ a consumer can tell a fresh reading from a stale one.
 in-flight probe rather than issuing N. Without this, a slow dependency plus a high
 poll rate produces precisely the overload the probe was meant to detect.
 
+## Process pressure
+
+A process can be alive and still unable to serve safely: a saturated event loop
+answers late, and a heap near its limit is one allocation from an out-of-memory
+kill. The `process_pressure` readiness probe reports that, so the orchestrator
+stops routing traffic to such a replica.
+
+Two bounded signals are sampled on a fixed interval: p99 event-loop delay
+(`perf_hooks.monitorEventLoopDelay`) and V8 heap used as a ratio of the heap size
+limit. The cost is a few microseconds per sample. Logic lives in
+[`process-pressure.ts`](../src/common/observability/process-pressure.ts) and is
+driven by injected measurements in tests.
+
+**Degrade.** Readiness fails only after `PROCESS_PRESSURE_DEGRADE_AFTER_SAMPLES`
+consecutive samples at or above a degrade threshold. One slow garbage collection
+or one burst never degrades readiness.
+
+**Hysteresis.** Recovery needs `PROCESS_PRESSURE_RECOVER_AFTER_SAMPLES`
+consecutive samples below the lower recover thresholds. A sample between the
+recover and degrade thresholds keeps the current state and restarts the count,
+which stops readiness flapping around a threshold. Recover thresholds are forced
+strictly below degrade thresholds, so the band always exists.
+
+**Public health stays minimal.** The public `/health/ready` probe reports only
+`process_pressure` as `ok`, or `error` with the stable reason
+`process_pressure_degraded`. No delay, heap figure, threshold or signal name is
+included. The measurements, the signals involved (`event_loop_lag`,
+`heap_pressure`), the hysteresis counters and the configured thresholds appear
+only in the authorized diagnostics view. The delay and heap percentage are also
+recorded as the `event_loop_delay_ms` and `heap_used_percent` histograms in the
+metrics registry.
+
+A failed measurement keeps the last verdict rather than flipping readiness on a
+monitoring fault. The sampler is unref'd and never keeps the process alive.
+
+| Variable | Default | Bounds | Purpose |
+|---|---|---|---|
+| `PROCESS_PRESSURE_ENABLED` | `true` (`false` under `NODE_ENV=test`) | | Master switch. When off there is no sampler and no probe. |
+| `PROCESS_PRESSURE_SAMPLE_INTERVAL_MS` | `5000` | 500 to 60000 | Sampling interval. |
+| `PROCESS_PRESSURE_EVENT_LOOP_DEGRADE_MS` | `500` | 10 to 60000 | p99 delay at or above this is a breach. |
+| `PROCESS_PRESSURE_EVENT_LOOP_RECOVER_MS` | `200` | 10 to 60000 | p99 delay must fall below this to count as clear. |
+| `PROCESS_PRESSURE_HEAP_DEGRADE_RATIO` | `0.9` | 0.5 to 0.99 | Heap used / limit at or above this is a breach. |
+| `PROCESS_PRESSURE_HEAP_RECOVER_RATIO` | `0.8` | 0.5 to 0.99 | Heap ratio must fall below this to count as clear. |
+| `PROCESS_PRESSURE_DEGRADE_AFTER_SAMPLES` | `3` | 1 to 120 | Consecutive breaches before readiness degrades. |
+| `PROCESS_PRESSURE_RECOVER_AFTER_SAMPLES` | `6` | 1 to 120 | Consecutive clear samples before readiness recovers. |
+
+With the defaults, readiness degrades after about 15 seconds of sustained
+pressure and recovers after about 30 seconds of sustained health.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -166,6 +215,7 @@ poll rate produces precisely the overload the probe was meant to detect.
 | `HEALTH_PROBE_TIMEOUT_MS` | `2000` | Per-probe timeout. Keep below the orchestrator's probe timeout. |
 | `HEALTH_CACHE_TTL_MS` | `5000` | How long a probe result is reused. |
 | `CLOCK_SKEW_*` | see [clock-skew.md](clock-skew.md) | Clock skew thresholds, unknown-time policy and readiness impact. |
+| `PROCESS_PRESSURE_*` | see [Process pressure](#process-pressure) | Event-loop lag and heap pressure budgets, hysteresis and sampling. |
 
 ## Backwards compatibility
 

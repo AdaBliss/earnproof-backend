@@ -1,4 +1,5 @@
 import { CallOutcome } from "../common/resilience/circuit-breaker";
+import { OperationAbortedError } from "../common/resilience/deadline";
 
 /**
  * Error-message substrings that indicate a *permanent* contract failure.
@@ -94,6 +95,12 @@ export function isPermanentContractError(message: string): boolean {
  * repeated failures that would otherwise exhaust the anchoring workers.
  */
 export function classifyContractError(error: unknown): CallOutcome {
+  // A caller that went away (shutdown, client disconnect) says nothing about the
+  // dependency's health. A deadline that elapsed does: the dependency was too
+  // slow, which is exactly what the breaker exists to count.
+  if (error instanceof OperationAbortedError && error.kind === "cancelled") {
+    return "ignore";
+  }
   // Permanent rejections and sequence conflicts are answers from a healthy
   // dependency, so they never count toward opening the circuit.
   if (error instanceof ContractSubmissionError) {

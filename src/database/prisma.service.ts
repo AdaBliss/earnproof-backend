@@ -6,6 +6,10 @@ import {
   resolveChainKey,
 } from "../audit/audit-chain";
 import { guardTransactionsAgainstAbort } from "../common/request-context/request-abort";
+import {
+  installQueryCounting,
+  queryCountingEnabled,
+} from "../common/observability/query-budget";
 
 /** Row shape read back from `AuditChainCursor` via raw SQL. */
 interface ChainCursorRow {
@@ -23,6 +27,10 @@ export class PrismaService
     super();
     this.installAuditChainWriter();
     this.installRequestAbortGuard();
+    // Opt-in only (QUERY_BUDGET_INSTRUMENTATION=true): production is untouched.
+    if (queryCountingEnabled()) {
+      installQueryCounting(this, Object.values(Prisma.ModelName));
+    }
   }
 
   async onModuleInit() {

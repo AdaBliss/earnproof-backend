@@ -64,6 +64,7 @@ describe("OrganizationsService", () => {
             },
             issuer: {
               count: jest.fn(),
+              groupBy: jest.fn().mockResolvedValue([]),
             },
             auditLog: {
               create: jest.fn(),

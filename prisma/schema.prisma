@@ -1517,6 +1517,11 @@ model WebhookDelivery {
   redrivenAt        DateTime?
   redrivenBy        String?
   redriveReason     String?
+  /// W3C trace context of the span that created this delivery, forwarded as the
+  /// outbound `traceparent`/`tracestate` headers. Retries inherit it so every
+  /// attempt of one event belongs to one trace.
+  traceparent       String?               @db.VarChar(55)
+  tracestate        String?               @db.VarChar(512)
   createdAt         DateTime              @default(now())
 
   @@index([webhookId, createdAt])
@@ -1680,6 +1685,11 @@ model AnchoringIntent {
   /// intent. Null until a decision is made.
   decidedById          String?
   decidedAt            DateTime?
+  /// W3C trace context of the request that enqueued this intent, so the
+  /// worker's span is a child of it across the durable queue. Null when no
+  /// trace was active. Validated again on read; see common/observability.
+  traceparent          String?               @db.VarChar(55)
+  tracestate           String?               @db.VarChar(512)
   createdAt            DateTime              @default(now())
   updatedAt            DateTime              @updatedAt
 

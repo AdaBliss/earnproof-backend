@@ -240,6 +240,7 @@ export class WebhookDeadLetterService {
         const lineageId = randomUUID();
         const row = await tx.webhookDelivery.create({
           data: {
+            ...currentTraceCarrier(),
             webhookId: deadLetter.webhookId,
             eventType: deadLetter.eventType,
             // Same event identity, version, and bytes as the original.

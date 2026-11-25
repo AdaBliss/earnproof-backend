@@ -242,17 +242,26 @@ export class OrganizationsService {
       this.prisma.organization.count({ where }),
     ]);
 
-    const response = await Promise.all(
-      items.map(async (org) => {
-        const issuerCount = await this.prisma.issuer.count({
-          where: { organizationId: org.id },
-        });
-        return {
-          ...this.toResponseDto(org),
-          issuerCount,
-        };
-      }),
-    );
+    // One grouped query for the whole page. A per-organization `count` here was
+    // an N+1: the query count grew with the page size (see docs/query-budgets.md).
+    const issuerCounts = new Map<string, number>();
+    if (items.length > 0) {
+      const grouped = await this.prisma.issuer.groupBy({
+        by: ["organizationId"],
+        where: { organizationId: { in: items.map((org) => org.id) } },
+        _count: { _all: true },
+      });
+      for (const row of grouped) {
+        if (row.organizationId) {
+          issuerCounts.set(row.organizationId, row._count._all);
+        }
+      }
+    }
+
+    const response = items.map((org) => ({
+      ...this.toResponseDto(org),
+      issuerCount: issuerCounts.get(org.id) ?? 0,
+    }));
 
     return {
       items: response,

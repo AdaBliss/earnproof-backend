@@ -24,6 +24,7 @@ import { CapabilitiesController } from "./capabilities.controller";
     DeploymentMetadataService,
     ProtocolPauseService,
     ClockSkewMonitorService,
+    ProcessPressureMonitorService,
     SorobanRpcClient,
     ContractIdentityService,
     { provide: Clock, useClass: SystemClock },
@@ -32,6 +33,7 @@ import { CapabilitiesController } from "./capabilities.controller";
     HealthService,
     ProtocolPauseService,
     ClockSkewMonitorService,
+    ProcessPressureMonitorService,
     ContractIdentityService,
   ],
 })

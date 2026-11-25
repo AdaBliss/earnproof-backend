@@ -11,8 +11,10 @@ import {
 import { StructuredLogger } from "../common/logger";
 import { PrismaService } from "../database/prisma.service";
 import { ContractAnchoringService } from "../proofs/contract-anchoring.service";
+import { boundedDeadlineMs, createDeadline } from "../common/resilience/deadline";
 import { JobExecutionService } from "./execution/job-execution.service";
 import { workerIdentity } from "./execution/worker-identity";
+import { currentTraceCarrier } from "../common/observability/trace-context";
 
 /** Job identity recorded in the execution history for this synchronization job. */
 const RECONCILER_JOB_NAME = "anchoring-reconciler";
@@ -22,6 +24,14 @@ const RECONCILER_JOB_VERSION = "1";
  * Maximum number of proofs to reconcile per cycle to bound execution time.
  */
 const RECONCILE_BATCH_SIZE = 20;
+
+/**
+ * Wall-clock budget for one reconcile run. Each proof costs two bounded contract
+ * reads, so without a run-level deadline a degraded RPC could keep one run alive
+ * for batch-size x read-deadline and overlap the next interval.
+ */
+const RECONCILE_RUN_DEADLINE_BOUNDS = { minMs: 5_000, maxMs: 1_800_000 } as const;
+const DEFAULT_RECONCILE_RUN_DEADLINE_MS = 240_000;
 
 /**
  * Duration to hold the anchoring reconciliation lease (24 hours).
@@ -115,22 +125,46 @@ export class AnchoringReconcilerService {
       orderBy: { updatedAt: "asc" },
     });
 
-    for (const proof of proofs) {
-      await this.reconcileProof(proof);
+    const deadline = createDeadline(
+      boundedDeadlineMs(
+        this.config.get<number>("contractAnchoring.deadlines.reconcileRunMs"),
+        DEFAULT_RECONCILE_RUN_DEADLINE_MS,
+        RECONCILE_RUN_DEADLINE_BOUNDS,
+      ),
+    );
+    try {
+      for (const proof of proofs) {
+        if (deadline.signal.aborted) {
+          this.logger.warn(
+            "Reconcile run deadline reached; remaining proofs deferred to the next run",
+          );
+          break;
+        }
+        await this.reconcileProof(proof, { signal: deadline.signal });
+      }
+    } finally {
+      deadline.dispose();
     }
   }
 
   /**
    * Exposed for testing — reconciles a single proof by ID.
    */
-  async reconcileProof(proof: {
-    id: string;
-    status: ProofStatus;
-    contractTransactionHash: string | null;
-  }): Promise<void> {
+  async reconcileProof(
+    proof: {
+      id: string;
+      status: ProofStatus;
+      contractTransactionHash: string | null;
+    },
+    options?: { signal?: AbortSignal },
+  ): Promise<void> {
     if (!proof.contractTransactionHash) return;
 
-    const onChain = await this.anchoring.getProofStatus(proof.id);
+    const onChain = await this.anchoring.getProofStatus(proof.id, options);
+
+    // Late-result suppression: a status read that finished after the run was
+    // cancelled must not drive a repair (mark revoked, re-enqueue, flag).
+    if (options?.signal?.aborted) return;
 
     if (!onChain.checked) {
       // Could not reach the contract — skip; the worker will retry on its own.
@@ -200,6 +234,7 @@ export class AnchoringReconcilerService {
 
     await this.prisma.anchoringIntent.create({
       data: {
+        ...currentTraceCarrier(),
         proofId,
         operation: AnchoringOperation.REGISTER,
         status: AnchoringStatus.QUARANTINED,
@@ -240,6 +275,7 @@ export class AnchoringReconcilerService {
     } else {
       await this.prisma.anchoringIntent.create({
         data: {
+          ...currentTraceCarrier(),
           proofId,
           operation: AnchoringOperation.REVOKE,
           status: AnchoringStatus.PENDING,

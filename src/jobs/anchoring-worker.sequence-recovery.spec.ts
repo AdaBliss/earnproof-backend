@@ -89,7 +89,9 @@ describe("AnchoringWorkerService sequence recovery", () => {
 
     await worker.processIntent("a");
 
-    expect(anchoring.getProofStatus).toHaveBeenCalledWith("proof_a");
+    expect(anchoring.getProofStatus).toHaveBeenCalledWith("proof_a", {
+      signal: expect.any(AbortSignal),
+    });
     expect(anchoring.anchorProof).toHaveBeenCalledTimes(2);
     expect(prisma.$transaction).toHaveBeenCalledTimes(1);
     expect(prisma.anchoringIntent.update).toHaveBeenCalledWith(

@@ -117,6 +117,7 @@ import {
   SupersessionIncompatibility,
   wouldCreateCycle,
 } from "./proof-renewal.policy";
+import { currentTraceCarrier } from "../common/observability/trace-context";
 
 const SCHEMA_VERSION = "earnproof.minimum-income.v1";
 const PAYMENT_RECEIPT_SCHEMA_VERSION = "earnproof.payment-receipt.v1";
@@ -679,6 +680,7 @@ export class ProofsService {
       if (this.anchoringEnabled) {
         await tx.anchoringIntent.create({
           data: {
+            ...currentTraceCarrier(),
             proofId: created.id,
             operation: AnchoringOperation.REGISTER,
             status: AnchoringStatus.PENDING,
@@ -919,6 +921,7 @@ export class ProofsService {
         if (this.anchoringEnabled) {
           await tx.anchoringIntent.create({
             data: {
+              ...currentTraceCarrier(),
               proofId: created.id,
               operation: AnchoringOperation.REGISTER,
               status: AnchoringStatus.PENDING,
@@ -1217,6 +1220,7 @@ export class ProofsService {
       if (this.anchoringEnabled) {
         await tx.anchoringIntent.create({
           data: {
+            ...currentTraceCarrier(),
             proofId: created.id,
             operation: AnchoringOperation.REGISTER,
             status: AnchoringStatus.PENDING,
@@ -1414,6 +1418,7 @@ export class ProofsService {
       if (this.anchoringEnabled) {
         await tx.anchoringIntent.create({
           data: {
+            ...currentTraceCarrier(),
             proofId: created.id,
             operation: AnchoringOperation.REGISTER,
             status: AnchoringStatus.PENDING,
@@ -1602,6 +1607,7 @@ export class ProofsService {
       if (this.anchoringEnabled) {
         await tx.anchoringIntent.create({
           data: {
+            ...currentTraceCarrier(),
             proofId: created.id,
             operation: AnchoringOperation.REGISTER,
             status: AnchoringStatus.PENDING,
@@ -1750,6 +1756,7 @@ export class ProofsService {
       if (this.anchoringEnabled) {
         await tx.anchoringIntent.create({
           data: {
+            ...currentTraceCarrier(),
             proofId: created.id,
             operation: AnchoringOperation.REGISTER,
             status: AnchoringStatus.PENDING,
@@ -1978,6 +1985,7 @@ export class ProofsService {
       if (this.anchoringEnabled) {
         await tx.anchoringIntent.create({
           data: {
+            ...currentTraceCarrier(),
             proofId: created.id,
             operation: AnchoringOperation.REGISTER,
             status: AnchoringStatus.PENDING,
@@ -2218,6 +2226,7 @@ export class ProofsService {
       if (this.anchoringEnabled) {
         await tx.anchoringIntent.create({
           data: {
+            ...currentTraceCarrier(),
             proofId: created.id,
             operation: AnchoringOperation.REGISTER,
             status: AnchoringStatus.PENDING,
@@ -2417,6 +2426,7 @@ export class ProofsService {
       if (this.anchoringEnabled) {
         await tx.anchoringIntent.create({
           data: {
+            ...currentTraceCarrier(),
             proofId: created.id,
             operation: AnchoringOperation.REGISTER,
             status: AnchoringStatus.PENDING,
@@ -2746,6 +2756,7 @@ export class ProofsService {
       if (this.anchoringEnabled && proof.contractTransactionHash) {
         await tx.anchoringIntent.create({
           data: {
+            ...currentTraceCarrier(),
             proofId: proof.id,
             operation: AnchoringOperation.REVOKE,
             status: AnchoringStatus.PENDING,

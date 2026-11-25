@@ -1,4 +1,5 @@
 import { Module, Global } from "@nestjs/common";
+import { TenantDataAccess } from "./database/tenant-data-access.service";
 import { IdempotencyService } from "./services/idempotency.service";
 import { IdempotentInterceptor } from "./interceptors/idempotent.interceptor";
 import { IdempotentOperationController } from "./idempotency/idempotent-operation.controller";

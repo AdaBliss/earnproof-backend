@@ -1,5 +1,6 @@
 generator client {
   provider = "prisma-client-js"
+  previewFeatures = ["metrics"]
 }
 
 datasource db {
@@ -23,6 +24,20 @@ enum ResourceStatus {
   // Reached only by attestations, when the expiration reconciler moves an
   // ACTIVE attestation past its expiry. Other resources never take this value.
   EXPIRED
+}
+
+/// Contract-backed assurance level of an issuer's accreditation.
+///
+/// Ordered by strength. NONE means no contract-backed accreditation has ever
+/// been observed for the issuer — it is not the same as "unknown": a
+/// projection with NONE must never be read as accredited. Only a contract
+/// read (registry sync or reconciliation) may set this; tenant metadata can
+/// never set or override it.
+enum IssuerAssuranceLevel {
+  NONE
+  BASIC
+  STANDARD
+  ENHANCED
 }
 
 enum PaymentClassification {
@@ -511,6 +526,7 @@ model Organization {
   apiKeyRotations                  ApiKeyRotation[]
   apiKeyCutoverReceipts            ApiKeyCutoverReceipt[]
   invitations                      OrganizationInvitation[]
+  rlsBypassAudits                  RlsBypassAudit[]
 
   @@index([status])
   @@index([archivedAt])
@@ -636,6 +652,23 @@ model Issuer {
   contractTransactionHash String?
   contractSyncedAt        DateTime?
   contractSyncError       String?
+  /// Contract-backed assurance level, observed from the issuer registry
+  /// contract only. The API accepts no assurance input, so tenant metadata
+  /// can never set or override it; only a contract read (sync or
+  /// reconciliation) writes these columns.
+  assuranceLevel             IssuerAssuranceLevel @default(NONE)
+  /// When the contract-backed accreditation expires. Null means an
+  /// accreditation at this level has no expiry (perpetual).
+  accreditationExpiresAt     DateTime?
+  /// When the contract state behind the assurance fields was last observed.
+  /// A projection older than the staleness bound cannot assert active
+  /// accreditation, even if the expiry has not passed.
+  accreditationSyncedAt      DateTime?
+  /// Registry contract the accreditation was observed from (provenance).
+  accreditationContractId    String?
+  /// Transaction that last established the accreditation on-chain, when the
+  /// observation followed a sync submission.
+  accreditationTransactionHash String?
   verifiedAt              DateTime?
   suspendedAt             DateTime?
   revokedAt               DateTime?
@@ -648,12 +681,18 @@ model Issuer {
   policyCommitments       IssuerPolicyCommitment[]
   invoiceSettlements      ProofInvoiceSettlement[]
   signingKeys             IssuerSigningKey[]
+  keyCompromiseIncidents IssuerKeyCompromiseIncident[]
   credentialVerificationKeyTrustPins CredentialVerificationKeyTrustPin[]
 
   @@index([organizationId])
   @@index([status])
   @@index([organizationId, createdAt, id])
   @@index([status, createdAt, id])
+  /// Bounded issuer filters: by assurance level, and by assurance level with
+  /// expiry for the accreditation-expiry reconciliation scan.
+  @@index([status, assuranceLevel])
+  @@index([assuranceLevel, accreditationExpiresAt])
+  @@index([accreditationExpiresAt])
 }
 
 /// A requested change of an issuer's Stellar address, reconciled against the
@@ -1456,11 +1495,21 @@ model WebhookDelivery {
   payloadBody       String                @default("")
   predicateSnapshot Json?                 // Snapshot of predicate at delivery time (null if no predicate)
   attempt           Int                   @default(1)
+  // Retry-chain identifier. One value per chain: the first attempt's
+  // delivery id for a fresh chain, a fresh random id for a replay/redrive
+  // chain. Null only for rows created before receipts existed; those
+  // resolve to their own id. Carried to every retry row, so a receipt can
+  // bind an attempt to its lineage without re-reading the chain.
+  lineageId         String?
   status            WebhookDeliveryStatus @default(PENDING)
   statusCode        Int?
   responseBody      Json?
   durationMs        Int?
   failureReason     String?
+  // DNS pinning fields (#371): per-attempt resolution metadata for diagnostics
+  dnsPinned         Boolean               @default(false) // Whether this attempt used DNS pinning
+  dnsResolutionMs   Int?                  // Time taken to resolve hostname (milliseconds)
+  dnsAddressCount   Int?                  // Number of addresses returned by resolver (not exposing IPs)
   replayOf          String?
   replayedBy        String?
   replayKey         String?               @unique
@@ -1478,6 +1527,51 @@ model WebhookDelivery {
   @@index([eventId])
   @@index([status, nextRetryAt])
   @@index([deadLetteredAt])
+  @@index([lineageId])
+}
+
+/**
+ * Versioned idempotency receipt for one webhook delivery attempt.
+ *
+ * One row per `WebhookDelivery` row (attempt), issued when the delivery is
+ * created. `receiptId` is deterministic — recomputable from the delivery
+ * row alone (see `src/webhooks/webhook-delivery-receipt.ts`) — so a receipt
+ * survives re-derivation and a stored row is never the only copy of the
+ * binding. The row stores the binding fields (event, endpoint, payload
+ * digest, attempt, lineage) so a consumer-presented receipt id resolves to
+ * its delivery without scanning deliveries, and so operators can audit
+ * which attempt a receipt names.
+ *
+ * A receipt holds no signing secret, no payload content (only its SHA-256),
+ * and no HMAC: it identifies a delivery, it cannot authorize one.
+ *
+ * Deliberately relation-free: `webhookId` and `deliveryId` are plain
+ * denormalized references, not Prisma relations. Webhooks are soft-deleted
+ * and deliveries are never deleted, so foreign keys would buy no integrity
+ * here — and relations on this table push the generated client's recursive
+ * types past the TypeScript compiler's default stack (plain `tsc --noEmit`
+ * crashes with a stack overflow). The service always writes both ids from
+ * the delivery row it receipts, and reads resolve the delivery with a
+ * second query.
+ */
+model WebhookDeliveryReceipt {
+  id            String   @id @default(cuid())
+  receiptId     String   @unique
+  version       String   @default("1")
+  webhookId     String
+  deliveryId    String   @unique
+  eventId       String
+  eventType     String
+  payloadHash   String
+  attempt       Int
+  lineageId     String
+  replayOf      String?
+  schemaVersion String   @default("1")
+  createdAt     DateTime @default(now())
+
+  @@index([webhookId, eventId])
+  @@index([lineageId])
+  @@index([eventId])
 }
 
 model AuditLog {
@@ -1531,6 +1625,38 @@ model AuditChainCursor {
   lastSequence BigInt   @default(0)
   lastHash     String?
   updatedAt    DateTime @updatedAt
+}
+
+/// Append-only audit record for privileged row-level-security bypass use.
+///
+/// Every call to `TenantContextService.withBypassContext` writes one row
+/// here, inside the same transaction as the bypassed work, so the record
+/// commits or rolls back with the work it authorizes. There is deliberately
+/// no update or delete path: a bypass that cannot be reconstructed from this
+/// table after the fact is a bypass that should not have happened.
+///
+/// This table itself carries no row-level-security policy: it is the record
+/// of bypasses, so gating it behind the mechanism it audits would hide the
+/// audit trail from exactly the maintenance paths that need to read it. It
+/// is append-only by convention and by the absence of any service that
+/// mutates it; see docs/row-level-security.md.
+model RlsBypassAudit {
+  id             String        @id @default(cuid())
+  /// Bounded caller-supplied justification (1-256 chars, enforced by
+  /// TenantContextService). Never a secret: it is written to the audit log.
+  reason         String
+  /// Who invoked the bypass: a user id, service name, or job name
+  /// (1-128 chars, enforced by TenantContextService).
+  actor          String
+  /// Tenant the maintenance concerned, when the work was scoped to one.
+  /// Null for cross-tenant maintenance (for example a backfill).
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  createdAt      DateTime      @default(now())
+
+  @@index([createdAt])
+  @@index([actor, createdAt])
+  @@index([organizationId, createdAt])
 }
 
 model AnchoringIntent {
@@ -1653,6 +1779,13 @@ model ApprovalRequest {
   /// Canonical hash of `payload`, used so callers can detect a changed
   /// request before approving it.
   payloadHash         String
+  /// Version of the canonicalization/hash scheme that produced
+  /// `payloadHash` (see `src/common/crypto/request-body-hash.ts`). Version
+  /// 1 hashes the canonical form of the payload with secret-bearing keys
+  /// stripped. Verification dispatches on this column and fails closed on
+  /// unknown versions, so the scheme can evolve without invalidating or
+  /// silently reinterpreting older rows.
+  payloadHashVersion  Int               @default(1)
   payload             Json
   requestedById       String
   status              ApprovalRequestStatus @default(PENDING)
@@ -2634,10 +2767,76 @@ model IssuerSigningKey {
   contractSyncedAt DateTime?
   createdAt        DateTime                @default(now())
   updatedAt        DateTime                @updatedAt
+  compromiseIncidents IssuerKeyCompromiseIncident[]
 
   @@unique([issuerId, keyId])
   @@index([issuerId, state])
   @@index([commitmentHash])
+}
+
+// ---------------------------------------------------------------------------
+// Issuer Signing Key Compromise Incidents (#388)
+// ---------------------------------------------------------------------------
+
+/// Authorized incident state for a compromised issuer signing key.
+/// One incident per (issuer, key): a compromised key is terminal and can
+/// never be silently restored, so a second incident for the same key is
+/// impossible by construction. The incident is the durable, observable
+/// record of the response: which trust pins were revoked, which records
+/// were found affected, and the deterministic evidence hash produced when
+/// the incident is contained.
+enum IssuerKeyCompromiseIncidentState {
+  OPEN
+  CONTAINED
+  RESOLVED
+}
+
+model IssuerKeyCompromiseIncident {
+  id               String                             @id @default(cuid())
+  issuerId         String
+  issuer           Issuer                             @relation(fields: [issuerId], references: [id])
+  signingKeyId     String
+  signingKey       IssuerSigningKey                   @relation(fields: [signingKeyId], references: [id])
+  /// Denormalized keyId (stable public identifier of the signing key).
+  keyId            String
+  state            IssuerKeyCompromiseIncidentState   @default(OPEN)
+  /// Operator-supplied reason. Never contains key material.
+  reason           String                             @db.VarChar(1024)
+  reportedByUserId String
+  compromisedAt    DateTime
+  /// Commitment hash of the key at compromise time; the containment job
+  /// verifies it is unchanged before marking the incident contained.
+  commitmentHash   String
+  /// ACTIVE trust pins revoked as part of the response. Revoking them is
+  /// what makes the compromised key fail verification policy.
+  trustPinsRevoked Int                                @default(0)
+  /// QUARANTINED credentials already isolated under this keyId.
+  affectedQuarantines Int                             @default(0)
+  /// Proofs whose issuer policy snapshot names this keyId.
+  affectedProofs   Int                                @default(0)
+  /// True when any discovery source hit its bounded cap; counts are then
+  /// lower bounds, not exact totals.
+  discoveryTruncated Boolean                         @default(false)
+  /// Deterministic evidence fingerprint, set at containment:
+  /// "sha256:<hex>" of the canonical incident evidence document.
+  evidenceHash     String?
+  containedAt      DateTime?
+  resolvedAt       DateTime?
+  resolvedByUserId String?
+  resolutionNote   String?                            @db.VarChar(1024)
+  /// SecurityNotification row created for the issuer organization, if any.
+  notificationId   String?
+  /// Set when the key's commitment was last confirmed against the contract
+  /// (via the key reconciliation path). Null when no on-chain sync is on
+  /// record; the incident never claims a contract check it did not perform.
+  contractReconciledAt       DateTime?
+  contractReconciliationNote String?                 @db.VarChar(512)
+  createdAt        DateTime                           @default(now())
+  updatedAt        DateTime                           @updatedAt
+
+  @@unique([issuerId, keyId])
+  @@index([state, createdAt])
+  @@index([issuerId, state])
 }
 
 // ---------------------------------------------------------------------------
@@ -2778,9 +2977,102 @@ model ProtocolSchema {
   contractId         String?
   createdAt          DateTime              @default(now())
   updatedAt          DateTime              @updatedAt
+  
+  // Schema replacement notices
+  replacementNoticesAsPredecessor SchemaReplacementNotice[] @relation("SchemaReplacementPredecessor")
+  replacementNoticesAsSuccessor   SchemaReplacementNotice[] @relation("SchemaReplacementSuccessor")
 
   @@index([proofType, status])
   @@index([network, status])
+}
+
+// ---------------------------------------------------------------------------
+// Project Schema Activation Notices and Replacements (#395)
+// ---------------------------------------------------------------------------
+
+enum SchemaReplacementStatus {
+  PENDING
+  ACKNOWLEDGED
+  ACTIONED
+  SUPERSEDED
+}
+
+enum SchemaReplacementAcknowledgementStatus {
+  PENDING_ACTION
+  ACTED
+  DEFERRED
+}
+
+/// Notice of schema replacement for projects. Tracks predecessor → successor 
+/// transitions with bounded acknowledgements and audit trail.
+/// Enables operators to announce deprecations and track project adoption of replacements.
+model SchemaReplacementNotice {
+  id                       String   @id @default(cuid())
+  predecessorSchemaId      String
+  predecessorSchema        ProtocolSchema @relation("SchemaReplacementPredecessor", fields: [predecessorSchemaId], references: [id], onDelete: Restrict)
+  successorSchemaId        String
+  successorSchema          ProtocolSchema @relation("SchemaReplacementSuccessor", fields: [successorSchemaId], references: [id], onDelete: Restrict)
+  
+  /// Lifecycle: PENDING → ACKNOWLEDGED/ACTIONED → SUPERSEDED
+  status                   SchemaReplacementStatus @default(PENDING)
+  
+  /// Governance and timeline
+  initiatedBy              String
+  initiatedAt              DateTime @default(now())
+  deprecationDeadline      DateTime
+  sunsetDeadline           DateTime?
+  
+  /// Project acknowledgements of the replacement
+  acknowledgements         SchemaReplacementAcknowledgement[]
+  
+  /// Audit and metadata
+  reason                   String? /// Free-form reason for replacement
+  metadata                 Json?
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+
+  /// Unique: only one active replacement per predecessor-successor pair
+  @@unique([predecessorSchemaId, successorSchemaId, status])
+  /// Indexes for common queries
+  @@index([status, deprecationDeadline])
+  @@index([predecessorSchemaId, status])
+  @@index([successorSchemaId, status])
+  @@index([initiatedAt])
+}
+
+/// Project acknowledgement of a schema replacement notice.
+/// Bounded acknowledgements track which projects have accepted the replacement
+/// and what action they have taken.
+model SchemaReplacementAcknowledgement {
+  id             String   @id @default(cuid())
+  noticeId       String
+  notice         SchemaReplacementNotice @relation(fields: [noticeId], references: [id], onDelete: Cascade)
+  
+  /// Project/Organization acknowledging the replacement
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  /// Acknowledgement details
+  acknowledgedBy String /// Actor ID acknowledging the replacement
+  acknowledgedAt DateTime @default(now())
+  status         SchemaReplacementAcknowledgementStatus @default(PENDING_ACTION)
+  
+  /// Action tracking: what did the project do?
+  actionTaken    String? /// e.g., "MIGRATED_PROOFS", "DEPRECATED_LOCALLY", null if pending
+  actionAt       DateTime?
+  
+  /// Notes for audit trail
+  note           String?
+  
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  /// Only one acknowledgement per notice per organization
+  @@unique([noticeId, organizationId])
+  /// Indexes for queries
+  @@index([noticeId, status])
+  @@index([organizationId, status])
+  @@index([acknowledgedAt])
 }
 
 // ---------------------------------------------------------------------------
@@ -3074,6 +3366,7 @@ enum SecurityNotificationType {
   CIRCUIT_BREAKER_TRIPPED
   DISPUTE_FILED
   SYSTEM_SECURITY_ALERT
+  ISSUER_SIGNING_KEY_COMPROMISED
 }
 
 enum SecurityNotificationSeverity {

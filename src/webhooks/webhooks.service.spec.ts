@@ -6,6 +6,7 @@ import {
 import { ResourceStatus } from "@prisma/client";
 import { encryptProtectedAmount } from "../common/crypto/protected-amount";
 import { WebhookDeliveryService } from "./webhook-delivery.service";
+import { buildDeliveryReceipt } from "./webhook-delivery-receipt";
 import { WebhookVerificationService } from "./webhook-verification.service";
 import { WebhooksService } from "./webhooks.service";
 import { unlimitedQuotas } from "../testing/quotas";
@@ -418,6 +419,13 @@ describe("WebhooksService", () => {
             {
               id: "d1",
               eventType: "proof.created",
+              eventId: "evt_1",
+              schemaVersion: "1",
+              payloadBody:
+                '{"specVersion":"1","id":"evt_1","event":"proof.created","schemaVersion":"1"}',
+              attempt: 1,
+              lineageId: "d1",
+              replayOf: null,
               status: "SUCCESS",
               createdAt: new Date("2026-08-24T12:30:00.000Z"),
             },
@@ -437,6 +445,23 @@ describe("WebhooksService", () => {
       const result = await service.listDeliveries("org_1", "webhook_1");
       expect(result.data).toHaveLength(1);
       expect(result.pageInfo).toEqual({ hasMore: false, nextCursor: null });
+      // Each row carries its versioned idempotency receipt id …
+      expect(result.data[0].receiptId).toBe(
+        buildDeliveryReceipt({
+          deliveryId: "d1",
+          webhookId: "webhook_1",
+          eventId: "evt_1",
+          eventType: "proof.created",
+          payloadBody:
+            '{"specVersion":"1","id":"evt_1","event":"proof.created","schemaVersion":"1"}',
+          schemaVersion: "1",
+          attempt: 1,
+          lineageId: "d1",
+          replayOf: null,
+        }).receiptId,
+      );
+      // … but never the payload bytes it was hashed from.
+      expect(result.data[0]).not.toHaveProperty("payloadBody");
       // Secrets must not be present
       const resultJson = JSON.stringify(result);
       expect(resultJson).not.toContain("secretEncrypted");
@@ -465,6 +490,202 @@ describe("WebhooksService", () => {
         service.listDeliveries("org_1", "webhook_1", { cursor: "garbage" }),
       ).rejects.toThrow(BadRequestException);
       expect(prisma.webhookDelivery.findMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("delivery receipts", () => {
+    const BODY =
+      '{"specVersion":"1","id":"evt_1","event":"proof.created","schemaVersion":"1"}';
+    const deliveryRow = {
+      id: "delivery_1",
+      webhookId: "webhook_1",
+      eventId: "evt_1",
+      eventType: "proof.created",
+      payloadBody: BODY,
+      schemaVersion: "1",
+      attempt: 1,
+      lineageId: "delivery_1",
+      replayOf: null,
+      status: "SUCCESS",
+      deliveredAt: new Date("2026-08-24T12:30:01.000Z"),
+      createdAt: new Date("2026-08-24T12:30:00.000Z"),
+    };
+    const expectedReceipt = buildDeliveryReceipt({
+      deliveryId: deliveryRow.id,
+      webhookId: deliveryRow.webhookId,
+      eventId: deliveryRow.eventId,
+      eventType: deliveryRow.eventType,
+      payloadBody: BODY,
+      schemaVersion: "1",
+      attempt: 1,
+      lineageId: "delivery_1",
+      replayOf: null,
+    });
+
+    function makeService(prisma: unknown) {
+      return new WebhooksService(
+        prisma as never,
+        makeDeliveryService(),
+        makeCircuitBreaker() as never,
+        makeVerificationService(),
+        makeConfig() as never,
+        unlimitedQuotas() as never,
+      );
+    }
+
+    function ownedWebhookPrisma(overrides: Record<string, unknown> = {}) {
+      return {
+        webhook: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: "webhook_1",
+            organizationId: "org_1",
+            status: ResourceStatus.ACTIVE,
+          }),
+        },
+        webhookDelivery: {
+          findUnique: jest.fn().mockResolvedValue({ ...deliveryRow }),
+        },
+        webhookDeliveryReceipt: {
+          findUnique: jest.fn().mockResolvedValue(null),
+        },
+        ...overrides,
+      };
+    }
+
+    it("returns the stored receipt for an owned delivery", async () => {
+      const stored = {
+        ...expectedReceipt,
+        createdAt: new Date("2026-08-24T12:30:00.000Z"),
+      };
+      const prisma = ownedWebhookPrisma({
+        webhookDeliveryReceipt: {
+          findUnique: jest.fn().mockResolvedValue(stored),
+        },
+      });
+      const service = makeService(prisma);
+
+      const result = await service.getDeliveryReceipt(
+        "org_1",
+        "webhook_1",
+        "delivery_1",
+      );
+
+      expect(result.receiptId).toBe(expectedReceipt.receiptId);
+      expect(result.source).toBe("stored");
+      expect(result.status).toBe("SUCCESS");
+      expect(result.payloadHash).toBe(expectedReceipt.payloadHash);
+      expect(JSON.stringify(result)).not.toContain("secret");
+    });
+
+    it("re-derives the receipt when no stored row exists (legacy delivery)", async () => {
+      const prisma = ownedWebhookPrisma();
+      const service = makeService(prisma);
+
+      const result = await service.getDeliveryReceipt(
+        "org_1",
+        "webhook_1",
+        "delivery_1",
+      );
+
+      expect(result.receiptId).toBe(expectedReceipt.receiptId);
+      expect(result.source).toBe("computed");
+      expect(result.status).toBe("SUCCESS");
+      expect(result.createdAt).toEqual(deliveryRow.createdAt);
+    });
+
+    it("returns 404 for a delivery belonging to another webhook", async () => {
+      const prisma = ownedWebhookPrisma({
+        webhookDelivery: {
+          findUnique: jest
+            .fn()
+            .mockResolvedValue({ ...deliveryRow, webhookId: "webhook_2" }),
+        },
+      });
+      const service = makeService(prisma);
+
+      await expect(
+        service.getDeliveryReceipt("org_1", "webhook_1", "delivery_1"),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it("throws Forbidden for a webhook of another organisation", async () => {
+      const prisma = ownedWebhookPrisma({
+        webhook: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: "webhook_1",
+            organizationId: "org_2",
+            status: ResourceStatus.ACTIVE,
+          }),
+        },
+      });
+      const service = makeService(prisma);
+
+      await expect(
+        service.getDeliveryReceipt("org_1", "webhook_1", "delivery_1"),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it("resolves a receipt id to its delivery attempt", async () => {
+      const stored = {
+        ...expectedReceipt,
+        createdAt: new Date("2026-08-24T12:30:00.000Z"),
+      };
+      const prisma = ownedWebhookPrisma({
+        webhookDeliveryReceipt: {
+          findUnique: jest.fn().mockResolvedValue(stored),
+        },
+      });
+      const service = makeService(prisma);
+
+      const result = await service.getReceiptById(
+        "org_1",
+        "webhook_1",
+        expectedReceipt.receiptId,
+      );
+
+      expect(result.deliveryId).toBe("delivery_1");
+      expect(result.source).toBe("stored");
+      expect(result.status).toBe("SUCCESS");
+      expect(
+        (prisma.webhookDeliveryReceipt.findUnique as jest.Mock).mock.calls[0][0]
+          .where,
+      ).toEqual({ receiptId: expectedReceipt.receiptId });
+    });
+
+    it("returns 404 for a receipt naming another endpoint", async () => {
+      const stored = {
+        ...expectedReceipt,
+        webhookId: "webhook_2",
+        createdAt: new Date("2026-08-24T12:30:00.000Z"),
+      };
+      const prisma = ownedWebhookPrisma({
+        webhookDeliveryReceipt: {
+          findUnique: jest.fn().mockResolvedValue(stored),
+        },
+      });
+      const service = makeService(prisma);
+
+      // Another tenant's receipt must look exactly like a missing one.
+      await expect(
+        service.getReceiptById(
+          "org_1",
+          "webhook_1",
+          expectedReceipt.receiptId,
+        ),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it("returns 404 for a malformed receipt id without querying", async () => {
+      const findUnique = jest.fn();
+      const prisma = ownedWebhookPrisma({
+        webhookDeliveryReceipt: { findUnique },
+      });
+      const service = makeService(prisma);
+
+      await expect(
+        service.getReceiptById("org_1", "webhook_1", "not-a-receipt"),
+      ).rejects.toThrow(NotFoundException);
+      expect(findUnique).not.toHaveBeenCalled();
     });
   });
 

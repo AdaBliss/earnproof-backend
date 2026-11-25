@@ -287,6 +287,7 @@ describe("MetricsRegistry", () => {
       // API availability and latency
       expect(names).toContain(METRIC_NAMES.httpRequestsTotal);
       expect(names).toContain(METRIC_NAMES.httpRequestDurationMs);
+      expect(names).toContain(METRIC_NAMES.requestBodyRejectionsTotal);
       // Sync freshness
       expect(names).toContain(METRIC_NAMES.horizonSyncLagSeconds);
       // Anchoring backlog
@@ -295,6 +296,9 @@ describe("MetricsRegistry", () => {
       expect(names).toContain(METRIC_NAMES.webhookDeliveriesTotal);
       // Database health
       expect(names).toContain(METRIC_NAMES.databaseProbesTotal);
+      // Database pool saturation
+      expect(names).toContain(METRIC_NAMES.databasePoolTimeoutsTotal);
+      expect(names).toContain(METRIC_NAMES.databasePoolWaitDurationMs);
       // Verification outcomes
       expect(names).toContain(METRIC_NAMES.verificationsTotal);
     });

@@ -3,9 +3,10 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from "@nestjs/common";
-import { Prisma, ResourceStatus } from "@prisma/client";
+import { IssuerAssuranceLevel, Prisma, ResourceStatus } from "@prisma/client";
 import { createHash } from "crypto";
 import { AuthenticatedUser } from "../auth/auth.types";
 import { sha256 } from "../common/crypto/hash";
@@ -18,6 +19,13 @@ import { PageInfo } from "../common/pagination/pagination.dto";
 import { PrismaService } from "../database/prisma.service";
 import { ConflictException as OptimisticLockConflictException } from "../common/exceptions/domain.exceptions";
 import { IssuerRegistryService } from "./issuer-registry.service";
+import {
+  DEFAULT_ACCREDITATION_CLOCK_SKEW_MS,
+  DEFAULT_ACCREDITATION_MAX_AGE_MS,
+  accreditationStatusWhereInput,
+  computeEffectiveAccreditationStatus,
+  isAccreditationStale,
+} from "./issuer-assurance";
 import { CreateIssuerDto } from "./dto/create-issuer.dto";
 import {
   IssuerPublicResponseDto,
@@ -42,6 +50,8 @@ const VALID_TRANSITIONS: Record<ResourceStatus, ResourceStatus[]> = {
 
 @Injectable()
 export class IssuersService {
+  private readonly logger = new Logger(IssuersService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly issuerRegistryService: IssuerRegistryService,
@@ -285,17 +295,7 @@ export class IssuersService {
 
   async getIssuerPublic(issuerId: string): Promise<IssuerPublicResponseDto> {
     const issuer = await this.getIssuerById(issuerId);
-
-    // For public endpoint, only expose allowlisted metadata
-    const publicMetadata = this.allowlistedMetadata(issuer.publicMetadata);
-
-    return {
-      id: issuer.id,
-      stellarAddress: issuer.stellarAddress,
-      trustStatus: this.computeTrustStatus(issuer),
-      publicMetadata,
-      createdAt: issuer.createdAt,
-    };
+    return this.toPublicResponseDto(issuer, new Date());
   }
 
   async listIssuers(query: ListIssuersDto): Promise<{
@@ -304,18 +304,15 @@ export class IssuersService {
     limit: number;
     pageInfo: PageInfo;
   }> {
+    const now = new Date();
     const limit = Math.min(query.limit || 20, 100);
     const cursorWhere = cursorWhereFragment(query.cursor, "createdAt");
+    const filterWhere = this.issuerFilterWhere(query, now);
 
     const where: Prisma.IssuerWhereInput = {
       ...(cursorWhere as Prisma.IssuerWhereInput),
+      ...filterWhere,
     };
-    if (query.status) {
-      where.status = query.status;
-    }
-    if (query.organizationId) {
-      where.organizationId = query.organizationId;
-    }
 
     const [rows, total] = await Promise.all([
       this.prisma.issuer.findMany({
@@ -323,12 +320,12 @@ export class IssuersService {
         take: limit + 1,
         orderBy: cursorOrderBy("createdAt"),
       }),
-      this.prisma.issuer.count({ where: { status: where.status, organizationId: where.organizationId } }),
+      this.prisma.issuer.count({ where: filterWhere }),
     ]);
     const { data, pageInfo } = buildPage(rows, limit, "createdAt");
 
     return {
-      items: data.map((issuer) => this.toResponseDto(issuer)),
+      items: data.map((issuer) => this.toResponseDto(issuer, now)),
       total,
       limit,
       pageInfo,
@@ -341,18 +338,22 @@ export class IssuersService {
     limit: number;
     pageInfo: PageInfo;
   }> {
+    const now = new Date();
     const limit = Math.min(query.limit || 20, 100);
     const cursorWhere = cursorWhereFragment(query.cursor, "createdAt");
 
-    // Public endpoint only shows active/trusted issuers
-    const where: Prisma.IssuerWhereInput = {
-      status: ResourceStatus.ACTIVE,
-      ...(cursorWhere as Prisma.IssuerWhereInput),
-    };
+    // Public endpoint only shows active/trusted issuers. The caller's
+    // `status` is ignored here (as before); `assuranceLevel` and
+    // `accreditationStatus` narrow within the ACTIVE set.
+    const filterWhere = this.issuerFilterWhere(
+      { ...query, status: ResourceStatus.ACTIVE },
+      now,
+    );
 
-    if (query.organizationId) {
-      where.organizationId = query.organizationId;
-    }
+    const where: Prisma.IssuerWhereInput = {
+      ...(cursorWhere as Prisma.IssuerWhereInput),
+      ...filterWhere,
+    };
 
     const [rows, total] = await Promise.all([
       this.prisma.issuer.findMany({
@@ -360,28 +361,47 @@ export class IssuersService {
         take: limit + 1,
         orderBy: cursorOrderBy("createdAt"),
       }),
-      this.prisma.issuer.count({
-        where: { status: ResourceStatus.ACTIVE, organizationId: where.organizationId },
-      }),
+      this.prisma.issuer.count({ where: filterWhere }),
     ]);
     const { data, pageInfo } = buildPage(rows, limit, "createdAt");
 
     return {
-      items: data.map((issuer) => {
-        const publicMetadata = this.allowlistedMetadata(issuer.publicMetadata);
-
-        return {
-          id: issuer.id,
-          stellarAddress: issuer.stellarAddress,
-          trustStatus: this.computeTrustStatus(issuer),
-          publicMetadata,
-          createdAt: issuer.createdAt,
-        };
-      }),
+      items: data.map((issuer) => this.toPublicResponseDto(issuer, now)),
       total,
       limit,
       pageInfo,
     };
+  }
+
+  /**
+   * Exact-match filters for issuer listings, without the cursor fragment
+   * (so the same object can count the filtered set).
+   *
+   * The effective-accreditation fragment is combined under `AND`: it carries
+   * its own implied `status`, so a caller-supplied `status` that disagrees
+   * with it matches nothing instead of one filter silently winning. No
+   * free-text or unbounded filter is accepted.
+   */
+  private issuerFilterWhere(
+    query: ListIssuersDto,
+    now: Date,
+  ): Prisma.IssuerWhereInput {
+    const where: Prisma.IssuerWhereInput = {};
+    if (query.status) {
+      where.status = query.status;
+    }
+    if (query.organizationId) {
+      where.organizationId = query.organizationId;
+    }
+    if (query.assuranceLevel) {
+      where.assuranceLevel = query.assuranceLevel;
+    }
+    if (query.accreditationStatus) {
+      where.AND = [
+        accreditationStatusWhereInput(query.accreditationStatus, now),
+      ];
+    }
+    return where;
   }
 
   async syncIssuerStatus(
@@ -422,6 +442,21 @@ export class IssuersService {
                 result.state === "failed" ? result.error : result.reason,
             },
     });
+
+    // A successful sync is the moment the contract is known to have accepted
+    // the issuer's state, so re-read the contract-backed assurance right away
+    // and adopt it. Best-effort and fail-closed: if the read is disabled or
+    // fails, the stored assurance is left untouched — the sync itself already
+    // succeeded, and an unobserved accreditation must never be asserted from
+    // tenant metadata or a stale projection.
+    let assuranceRefreshed = false;
+    if (result.state === "synced") {
+      assuranceRefreshed = await this.refreshAssuranceFromContract(
+        issuerId,
+        result.transactionHash,
+      );
+    }
+
     await this.createAuditLog(user, "SYNC_STATUS", "Issuer", issuerId, {
       state,
       status: issuer.status,
@@ -429,6 +464,7 @@ export class IssuersService {
         ? {
             operation: result.operation,
             transactionHash: result.transactionHash,
+            assuranceRefreshed,
           }
         : { reason: result.reason }),
     });
@@ -442,6 +478,7 @@ export class IssuersService {
         ? {
             operation: result.operation,
             transactionHash: result.transactionHash,
+            assuranceRefreshed,
           }
         : {
             reason: result.reason,
@@ -472,10 +509,62 @@ export class IssuersService {
     return "PENDING";
   }
 
+  /**
+   * Adopt the contract-backed assurance for an issuer after a successful
+   * sync, from a fresh contract read. Returns whether the stored assurance
+   * was refreshed. Never writes tenant-supplied values: the only inputs are
+   * the registry read and the sync's transaction hash. A missing, disabled,
+   * or failed read leaves the stored assurance untouched (fail closed).
+   */
+  private async refreshAssuranceFromContract(
+    issuerId: string,
+    transactionHash: string,
+  ): Promise<boolean> {
+    try {
+      // Older test doubles of the registry stub only `sync`; a missing read
+      // is the same as a disabled registry — nothing to adopt.
+      if (
+        typeof this.issuerRegistryService.readIssuerAssurance !== "function"
+      ) {
+        return false;
+      }
+      const assurance =
+        await this.issuerRegistryService.readIssuerAssurance(issuerId);
+      if (assurance.state !== "found") {
+        this.logger.warn(
+          `Issuer assurance not refreshed for ${issuerId}: registry read ${assurance.state}`,
+        );
+        return false;
+      }
+      await this.prisma.issuer.update({
+        where: { id: issuerId },
+        data: {
+          assuranceLevel: assurance.assuranceLevel,
+          accreditationExpiresAt: assurance.accreditationExpiresAt,
+          accreditationSyncedAt: assurance.observedAt,
+          accreditationContractId: assurance.contractId,
+          accreditationTransactionHash: transactionHash,
+        },
+      });
+      return true;
+    } catch (error) {
+      this.logger.warn(
+        `Issuer assurance refresh failed for ${issuerId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return false;
+    }
+  }
+
   private allowlistedMetadata(metadata: unknown): Record<string, string> {
     if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
       return {};
     }
+    // Allowlist only: assurance and accreditation are contract-backed facts
+    // and are never accepted from tenant metadata, so keys such as
+    // `assuranceLevel` or `accreditationExpiresAt` in publicMetadata are
+    // dropped here rather than stored.
     const source = metadata as Record<string, unknown>;
     return Object.fromEntries(
       ["name", "description", "logoUrl"]
@@ -494,13 +583,31 @@ export class IssuersService {
     return /^G[A-Z2-7]{55}$/.test(address);
   }
 
-  private toResponseDto(issuer: any): IssuerResponseDto {
+  private toResponseDto(issuer: any, now: Date = new Date()): IssuerResponseDto {
     return {
       id: issuer.id,
       organizationId: issuer.organizationId,
       stellarAddress: issuer.stellarAddress,
       status: issuer.status,
       revision: issuer.revision,
+      assuranceLevel:
+        issuer.assuranceLevel ?? IssuerAssuranceLevel.NONE,
+      accreditationExpiresAt: issuer.accreditationExpiresAt ?? null,
+      accreditationSyncedAt: issuer.accreditationSyncedAt ?? null,
+      accreditationContractId: issuer.accreditationContractId ?? null,
+      accreditationTransactionHash:
+        issuer.accreditationTransactionHash ?? null,
+      effectiveAccreditationStatus: computeEffectiveAccreditationStatus(
+        issuer,
+        now,
+        DEFAULT_ACCREDITATION_CLOCK_SKEW_MS,
+      ),
+      accreditationStale: isAccreditationStale(
+        issuer,
+        now,
+        DEFAULT_ACCREDITATION_CLOCK_SKEW_MS,
+        DEFAULT_ACCREDITATION_MAX_AGE_MS,
+      ),
       metadataHash: issuer.metadataHash,
       publicMetadata: this.allowlistedMetadata(issuer.publicMetadata),
       contractSyncState: issuer.contractSyncState,
@@ -511,6 +618,39 @@ export class IssuersService {
       revokedAt: issuer.revokedAt,
       createdAt: issuer.createdAt,
       updatedAt: issuer.updatedAt,
+    };
+  }
+
+  /**
+   * Public view of an issuer. Only allowlisted metadata is exposed, and the
+   * provenance detail (which contract was read, and the establishing
+   * transaction) stays admin-only; the accreditation itself — level, expiry,
+   * effective status, staleness — is public, queryable state.
+   */
+  private toPublicResponseDto(
+    issuer: any,
+    now: Date = new Date(),
+  ): IssuerPublicResponseDto {
+    return {
+      id: issuer.id,
+      stellarAddress: issuer.stellarAddress,
+      trustStatus: this.computeTrustStatus(issuer),
+      assuranceLevel:
+        issuer.assuranceLevel ?? IssuerAssuranceLevel.NONE,
+      accreditationExpiresAt: issuer.accreditationExpiresAt ?? null,
+      effectiveAccreditationStatus: computeEffectiveAccreditationStatus(
+        issuer,
+        now,
+        DEFAULT_ACCREDITATION_CLOCK_SKEW_MS,
+      ),
+      accreditationStale: isAccreditationStale(
+        issuer,
+        now,
+        DEFAULT_ACCREDITATION_CLOCK_SKEW_MS,
+        DEFAULT_ACCREDITATION_MAX_AGE_MS,
+      ),
+      publicMetadata: this.allowlistedMetadata(issuer.publicMetadata),
+      createdAt: issuer.createdAt,
     };
   }
 

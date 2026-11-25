@@ -1,13 +1,22 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from "@nestjs/common";
 import { ApprovalRequest, ApprovalRequestStatus, Prisma } from "@prisma/client";
 import { randomUUID } from "crypto";
-import { canonicalize } from "../common/crypto/canonicalize";
-import { sha256 } from "../common/crypto/hash";
+import {
+  CURRENT_PAYLOAD_HASH_VERSION,
+  SUPPORTED_PAYLOAD_HASH_VERSIONS,
+  RequestBodyTooLargeError,
+  UncanonicalizableRequestBodyError,
+  UnsupportedPayloadHashVersionError,
+  hashRequestBody,
+  verifyRequestBodyHash,
+} from "../common/crypto/request-body-hash";
 import { AuthenticatedUser } from "../auth/auth.types";
 import { PrismaService } from "../database/prisma.service";
 import { CreateApprovalRequestDto } from "./dto/create-approval-request.dto";
@@ -21,13 +30,33 @@ export type LeaseClaimResult =
 
 @Injectable()
 export class ApprovalsService {
+  private readonly logger = new Logger(ApprovalsService.name);
+
   constructor(private readonly prisma: PrismaService) {}
 
   async create(
     user: AuthenticatedUser,
     dto: CreateApprovalRequestDto,
   ): Promise<ApprovalRequest> {
-    const payloadHash = sha256(canonicalize(dto.payload));
+    // Versioned hash of the reviewed payload. Secret-bearing keys are
+    // stripped before hashing, so the hash can neither leak a secret nor be
+    // used to brute-force a low-entropy one; the stripped key paths are
+    // recorded in the audit entry so the redaction is observable.
+    // Oversized or uncanonicalizable payloads are a client error, not a
+    // server error.
+    let hashed;
+    try {
+      hashed = hashRequestBody(dto.payload);
+    } catch (error) {
+      if (
+        error instanceof RequestBodyTooLargeError ||
+        error instanceof UncanonicalizableRequestBodyError
+      ) {
+        throw new BadRequestException(error.message);
+      }
+      throw error;
+    }
+    const payloadHash = hashed.hash;
     const ttlMinutes = dto.ttlMinutes ?? DEFAULT_TTL_MINUTES;
     const expiresAt = new Date(Date.now() + ttlMinutes * 60_000);
 
@@ -36,6 +65,7 @@ export class ApprovalsService {
         operationType: dto.operationType,
         payload: dto.payload as Prisma.InputJsonValue,
         payloadHash,
+        payloadHashVersion: hashed.version,
         requestedById: user.id,
         expiresAt,
       },
@@ -44,6 +74,8 @@ export class ApprovalsService {
     await this.audit(user, "approval.requested", request.id, {
       operationType: dto.operationType,
       payloadHash,
+      payloadHashVersion: hashed.version,
+      redactedKeys: hashed.redactedKeys,
       expiresAt,
     });
 
@@ -98,6 +130,10 @@ export class ApprovalsService {
       );
     }
 
+    // Fail closed on a hash version this code does not know: an
+    // unrecognized version must never be treated as a match.
+    this.assertSupportedPayloadHashVersion(existing);
+
     if (existing.payloadHash !== dto.expectedPayloadHash) {
       throw new ConflictException(
         "expectedPayloadHash does not match the request's current payload — refresh and retry",
@@ -138,6 +174,8 @@ export class ApprovalsService {
 
     await this.audit(user, `approval.${outcome.toLowerCase()}`, id, {
       reason: dto.reason,
+      payloadHash: existing.payloadHash,
+      payloadHashVersion: existing.payloadHashVersion,
     });
 
     return updated;
@@ -170,7 +208,10 @@ export class ApprovalsService {
     }
 
     const updated = await this.get(id);
-    await this.audit(user, "approval.cancelled", id, {});
+    await this.audit(user, "approval.cancelled", id, {
+      payloadHash: existing.payloadHash,
+      payloadHashVersion: existing.payloadHashVersion,
+    });
     return updated;
   }
 
@@ -181,8 +222,23 @@ export class ApprovalsService {
    * (including retries after the lease is already held) sees `claimed: false`
    * with the current row so it can decide whether to wait, no-op, or report
    * the conflict upward.
+   *
+   * Before the lease is granted, the stored payload is re-hashed and
+   * compared with the hash the approver reviewed. This binds execution to
+   * the approved payload: if the stored payload was altered after the
+   * decision, the claim is refused instead of executing a payload nobody
+   * approved. Rows approved before secret redaction existed are still
+   * accepted via their legacy unredacted hash.
    */
   async claimForExecution(id: string): Promise<LeaseClaimResult> {
+    const request = await this.get(id);
+
+    if (request.status !== ApprovalRequestStatus.APPROVED) {
+      return { claimed: false, request };
+    }
+
+    this.assertStoredPayloadMatches(request);
+
     const leaseToken = randomUUID();
 
     const result = await this.prisma.approvalRequest.updateMany({
@@ -208,6 +264,13 @@ export class ApprovalsService {
    * Mark execution complete for the lease obtained from
    * {@link claimForExecution}. Idempotent: calling it again with the same
    * lease token after it already completed is a no-op, not an error.
+   *
+   * The transition is recorded in the audit trail (`approval.executed`)
+   * with the versioned payload hash, so the audit evidence covers the
+   * whole chain: request → decision → execution, all bound to the same
+   * hash. The audit write is awaited and fail-closed like the other audit
+   * writes in this service; the idempotent repeat path writes nothing,
+   * because the first call already recorded the event.
    */
   async completeExecution(id: string, leaseToken: string): Promise<ApprovalRequest> {
     const now = new Date();
@@ -236,6 +299,20 @@ export class ApprovalsService {
           "Execution lease mismatch — this caller does not hold the active lease",
         );
       }
+    } else {
+      await this.prisma.auditLog.create({
+        data: {
+          actorId: null,
+          actorType: "System",
+          action: "approval.executed",
+          resourceType: "ApprovalRequest",
+          resourceId: id,
+          metadata: {
+            payloadHash: current.payloadHash,
+            payloadHashVersion: current.payloadHashVersion,
+          } as Prisma.InputJsonValue,
+        },
+      });
     }
 
     return current;
@@ -251,6 +328,45 @@ export class ApprovalsService {
       data: { status: ApprovalRequestStatus.EXPIRED },
     });
     return result.count;
+  }
+
+  /**
+   * Fail closed when a stored request carries a payload-hash version this
+   * code does not know. Rows predating versioning carry the default (1).
+   */
+  private assertSupportedPayloadHashVersion(request: ApprovalRequest): void {
+    const version = request.payloadHashVersion ?? CURRENT_PAYLOAD_HASH_VERSION;
+    if (!SUPPORTED_PAYLOAD_HASH_VERSIONS.includes(version)) {
+      throw new ConflictException(
+        `Unsupported payload hash version ${version} — request cannot be decided`,
+      );
+    }
+  }
+
+  /**
+   * Recompute the versioned hash over a stored request's payload and fail
+   * closed when it no longer matches the hash recorded at request time.
+   * Unknown versions fail closed; rows approved before secret redaction
+   * existed are accepted via their legacy unredacted hash.
+   */
+  private assertStoredPayloadMatches(request: ApprovalRequest): void {
+    try {
+      const matches = verifyRequestBodyHash(request, request.payload, {
+        allowLegacyUnredacted: true,
+      });
+      if (!matches) {
+        throw new ConflictException(
+          "Stored payload no longer matches the approved payload hash — execution refused",
+        );
+      }
+    } catch (error) {
+      if (error instanceof UnsupportedPayloadHashVersionError) {
+        throw new ConflictException(
+          `Unsupported payload hash version ${request.payloadHashVersion} — execution refused`,
+        );
+      }
+      throw error;
+    }
   }
 
   private audit(

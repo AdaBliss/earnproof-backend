@@ -39,7 +39,11 @@ export class FsExportArtifactStore implements ExportArtifactStore {
 
   async write(jobId: string, content: Buffer): Promise<string> {
     const location = this.locationFor(jobId);
-    await mkdir(dirname(location), { recursive: true });
+    // 0o700: the staging directory is readable only by the owning process
+    // user. The container runs on a read-only root filesystem with /tmp as
+    // its only writable path (a tmpfs mount), so this directory is created
+    // on demand under $TMPDIR rather than baked into the image.
+    await mkdir(dirname(location), { recursive: true, mode: 0o700 });
     // 0o600: readable only by the owning process user. The archive is tenant
     // data at rest; a world-readable temp file would undo the encryption's point
     // for anyone already on the host.

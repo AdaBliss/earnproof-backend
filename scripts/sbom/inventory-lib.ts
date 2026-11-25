@@ -26,6 +26,7 @@ export interface LockPackage {
   optional?: boolean;
   peer?: boolean;
   resolved?: string;
+  integrity?: string;
 }
 
 export interface PackageLock {

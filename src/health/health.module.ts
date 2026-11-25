@@ -10,20 +10,17 @@ import { DeploymentMetadataService } from "./deployment-metadata.service";
 import { HealthController } from "./health.controller";
 import { IncidentsController } from "./incidents.controller";
 import { HealthService } from "./health.service";
+import { DatabasePoolMonitorService } from "./database-pool-monitor.service";
 import { ProtocolPauseController } from "./protocol-pause.controller";
 import { ProtocolPauseService } from "./protocol-pause.service";
-import { PauseAcknowledgementController } from "./pause-acknowledgement.controller";
-import { PauseAcknowledgementService } from "./pause-acknowledgement.service";
+import { CapabilitiesController } from "./capabilities.controller";
 
 @Module({
   imports: [ApiKeysModule, DatabaseModule, ContractsModule],
-  controllers: [
-    HealthController,
-    ProtocolPauseController,
-    PauseAcknowledgementController,
-  ],
+  controllers: [HealthController, ProtocolPauseController, CapabilitiesController],
   providers: [
     HealthService,
+    DatabasePoolMonitorService,
     DeploymentMetadataService,
     ProtocolPauseService,
     PauseAcknowledgementService,

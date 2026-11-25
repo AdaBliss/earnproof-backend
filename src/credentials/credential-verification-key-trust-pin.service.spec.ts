@@ -32,6 +32,7 @@ describe("CredentialVerificationKeyTrustPinService", () => {
           provide: PrismaService,
           useValue: {
             issuer: { findUnique: jest.fn() },
+            issuerSigningKey: { findUnique: jest.fn() },
             credentialVerificationKeyTrustPin: {
               create: jest.fn(),
               findUnique: jest.fn(),
@@ -232,6 +233,104 @@ describe("CredentialVerificationKeyTrustPinService", () => {
 
       // Act & Assert
       await expect(service.createTrustPin(dto)).rejects.toThrow(BadRequestException);
+    });
+
+    it("rejects a pin for a COMPROMISED signing key (no silent restore)", async () => {
+      // Arrange
+      const mockIssuer = { id: issuerId, organizationId: orgId };
+      jest.spyOn(prisma.issuer, "findUnique").mockResolvedValue(mockIssuer as any);
+      jest
+        .spyOn(prisma.issuerSigningKey, "findUnique")
+        .mockResolvedValue({ state: "COMPROMISED" } as any);
+
+      const dto: CreateCredentialVerificationKeyTrustPinDto = {
+        organizationId: orgId,
+        issuerId,
+        network: "testnet",
+        keyId: "key-1",
+        trustedKeySnapshot: {
+          alg: "EdDSA",
+          crv: "Ed25519",
+          kid: "key-1",
+          kty: "OKP",
+          x: "dGVzdC1wdWJsaWMta2V5",
+          use: "sig",
+          status: "active",
+        },
+        effectiveAt: new Date().toISOString(),
+      };
+
+      // Act & Assert
+      await expect(service.createTrustPin(dto)).rejects.toThrow(
+        BadRequestException,
+      );
+      expect(
+        prisma.credentialVerificationKeyTrustPin.create,
+      ).not.toHaveBeenCalled();
+    });
+
+    it("rejects a pin for a REVOKED signing key", async () => {
+      // Arrange
+      const mockIssuer = { id: issuerId, organizationId: orgId };
+      jest.spyOn(prisma.issuer, "findUnique").mockResolvedValue(mockIssuer as any);
+      jest
+        .spyOn(prisma.issuerSigningKey, "findUnique")
+        .mockResolvedValue({ state: "REVOKED" } as any);
+
+      const dto: CreateCredentialVerificationKeyTrustPinDto = {
+        organizationId: orgId,
+        issuerId,
+        network: "testnet",
+        keyId: "key-1",
+        trustedKeySnapshot: {
+          alg: "EdDSA",
+          crv: "Ed25519",
+          kid: "key-1",
+          kty: "OKP",
+          x: "dGVzdC1wdWJsaWMta2V5",
+          use: "sig",
+          status: "active",
+        },
+        effectiveAt: new Date().toISOString(),
+      };
+
+      // Act & Assert
+      await expect(service.createTrustPin(dto)).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it("allows a pin when no signing-key row exists (legacy pins)", async () => {
+      // Arrange
+      const mockIssuer = { id: issuerId, organizationId: orgId };
+      jest.spyOn(prisma.issuer, "findUnique").mockResolvedValue(mockIssuer as any);
+      jest.spyOn(prisma.issuerSigningKey, "findUnique").mockResolvedValue(null);
+      jest.spyOn(prisma.credentialVerificationKeyTrustPin, "findFirst").mockResolvedValue(null);
+      const createdPin = buildTrustPin("test1", orgId, issuerId);
+      jest.spyOn(prisma.credentialVerificationKeyTrustPin, "create").mockResolvedValue(createdPin as any);
+
+      const dto: CreateCredentialVerificationKeyTrustPinDto = {
+        organizationId: orgId,
+        issuerId,
+        network: "testnet",
+        keyId: "key-1",
+        trustedKeySnapshot: {
+          alg: "EdDSA",
+          crv: "Ed25519",
+          kid: "key-1",
+          kty: "OKP",
+          x: "dGVzdC1wdWJsaWMta2V5LW1hdGVyaWFsLWJhc2U2NHVybA",
+          use: "sig",
+          status: "active",
+        },
+        effectiveAt: new Date().toISOString(),
+      };
+
+      // Act
+      const result = await service.createTrustPin(dto);
+
+      // Assert
+      expect(result.id).toBe(createdPin.id);
     });
   });
 
@@ -448,6 +547,64 @@ describe("CredentialVerificationKeyTrustPinService", () => {
 
       // Assert
       expect(result).toBe(false);
+    });
+
+    it("returns false for a COMPROMISED signing key even with an ACTIVE pin", async () => {
+      // Arrange: the pin lookup would pass, but the key itself is compromised.
+      const pin = activeTrustPin("test1", orgId, issuerId);
+      jest.spyOn(prisma.credentialVerificationKeyTrustPin, "findFirst").mockResolvedValue(pin as any);
+      jest
+        .spyOn(prisma.issuerSigningKey, "findUnique")
+        .mockResolvedValue({ state: "COMPROMISED" } as any);
+
+      // Act
+      const result = await service.isKeyTrusted(orgId, issuerId, "testnet", "key-1");
+
+      // Assert
+      expect(result).toBe(false);
+    });
+
+    it("returns false for a REVOKED signing key even with an ACTIVE pin", async () => {
+      // Arrange
+      const pin = activeTrustPin("test1", orgId, issuerId);
+      jest.spyOn(prisma.credentialVerificationKeyTrustPin, "findFirst").mockResolvedValue(pin as any);
+      jest
+        .spyOn(prisma.issuerSigningKey, "findUnique")
+        .mockResolvedValue({ state: "REVOKED" } as any);
+
+      // Act
+      const result = await service.isKeyTrusted(orgId, issuerId, "testnet", "key-1");
+
+      // Assert
+      expect(result).toBe(false);
+    });
+
+    it("returns true for an ACTIVE signing key with an ACTIVE pin", async () => {
+      // Arrange
+      const pin = activeTrustPin("test1", orgId, issuerId);
+      jest.spyOn(prisma.credentialVerificationKeyTrustPin, "findFirst").mockResolvedValue(pin as any);
+      jest
+        .spyOn(prisma.issuerSigningKey, "findUnique")
+        .mockResolvedValue({ state: "ACTIVE" } as any);
+
+      // Act
+      const result = await service.isKeyTrusted(orgId, issuerId, "testnet", "key-1");
+
+      // Assert
+      expect(result).toBe(true);
+    });
+
+    it("returns true for an ACTIVE pin when no signing-key row exists (legacy pins)", async () => {
+      // Arrange
+      const pin = activeTrustPin("test1", orgId, issuerId);
+      jest.spyOn(prisma.credentialVerificationKeyTrustPin, "findFirst").mockResolvedValue(pin as any);
+      jest.spyOn(prisma.issuerSigningKey, "findUnique").mockResolvedValue(null);
+
+      // Act
+      const result = await service.isKeyTrusted(orgId, issuerId, "testnet", "key-1");
+
+      // Assert
+      expect(result).toBe(true);
     });
   });
 

@@ -40,4 +40,14 @@ export class SyncIssuerStatusResponseDto {
 
   @ApiProperty({ nullable: true })
   operation?: string;
+
+  @ApiProperty({
+    description:
+      "Whether the contract-backed assurance was re-read from the registry " +
+      "and adopted by this sync. False when the sync succeeded but the " +
+      "assurance read was disabled or failed; the stored assurance is then " +
+      "left untouched rather than asserted from a stale projection.",
+    nullable: true,
+  })
+  assuranceRefreshed?: boolean;
 }

@@ -5,6 +5,12 @@ import {
 } from "@nestjs/common";
 import { ResourceStatus } from "@prisma/client";
 import { AuthenticatedUser } from "../auth/auth.types";
+import {
+  assertTenantIdMatches,
+  TenantContext,
+  tenantContextFromRequest,
+  tenantWhere,
+} from "../common/database/tenant-context";
 import { PrismaService } from "../database/prisma.service";
 import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { ConflictException } from "../common/exceptions/domain.exceptions";
@@ -134,14 +140,53 @@ export class OrganizationsService {
     organizationId: string,
   ): Promise<OrganizationResponseDto> {
     const org = await this.getVisibleOrganization(user, organizationId);
+    // Defense in depth behind the membership check above: the count query
+    // is scoped by the tenant predicate, never by a bare caller value.
+    const tenant = tenantContextFromRequest(user, organizationId);
     const issuerCount = await this.prisma.issuer.count({
-      where: { organizationId },
+      where: tenantWhere(tenant, {}, {
+        operation: "getOrganization",
+        resourceType: "Issuer",
+      }),
     });
 
     return {
       ...this.toResponseDto(org),
       issuerCount,
     };
+  }
+
+  /**
+   * Tenant-scoped direct-service read for callers that bypass the
+   * controller guards (other services, background jobs). The caller must
+   * supply an explicit tenant context; a missing context, or a context
+   * for a different organization, fails closed before any data is read,
+   * and a row owned by another tenant is reported as not found.
+   */
+  async getTenantScopedOrganization(
+    context: TenantContext | null | undefined,
+    organizationId: string,
+  ) {
+    assertTenantIdMatches(organizationId, context, {
+      operation: "getTenantScopedOrganization",
+      resourceType: "Organization",
+    });
+    const org = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+    });
+    if (!org) {
+      throw new NotFoundException(
+        `Organization with ID "${organizationId}" not found`,
+      );
+    }
+    // Defense in depth: the row read back must be the tenant that was
+    // requested (an Organization row carries its tenant in `id`, not in
+    // an `organizationId` column).
+    assertTenantIdMatches(org.id, context, {
+      operation: "getTenantScopedOrganization",
+      resourceType: "Organization",
+    });
+    return org;
   }
 
   /**

@@ -1,5 +1,9 @@
-import { ResourceStatus } from "@prisma/client";
-import { IssuerRegistryService, parseIssuerAddress } from "./issuer-registry.service";
+import { IssuerAssuranceLevel, ResourceStatus } from "@prisma/client";
+import {
+  IssuerRegistryService,
+  parseIssuerAddress,
+  parseIssuerAssurance,
+} from "./issuer-registry.service";
 
 describe("IssuerRegistryService", () => {
   const input = {
@@ -139,5 +143,201 @@ describe("IssuerRegistryService address rotation", () => {
     ["", undefined],
   ])("parses %p", (stdout, expected) => {
     expect(parseIssuerAddress(stdout)).toBe(expected);
+  });
+});
+
+describe("IssuerRegistryService assurance reads", () => {
+  const issuerAddress = "GBFXVVSIVZHCSLMZ23N7QDOSFKMCXFQZ7S3KBXCGYZTZZBDSJ2SPCZYZ";
+
+  class ScriptedRegistry extends IssuerRegistryService {
+    calls: string[][] = [];
+    constructor(private readonly respond: (args: string[]) => string) {
+      super({
+        get: (key: string) =>
+          ({
+            "issuerRegistry.enabled": true,
+            "issuerRegistry.source": "registry-admin",
+            "issuerRegistry.contractId": "CCONTRACT",
+            "stellar.network": "testnet",
+          })[key],
+      } as never);
+    }
+    protected async execute(args: string[]): Promise<string> {
+      this.calls.push(args);
+      return this.respond(args);
+    }
+  }
+
+  it("reads assurance and expiry from the contract record, with provenance", async () => {
+    const registry = new ScriptedRegistry(() =>
+      JSON.stringify({
+        issuer_address: issuerAddress,
+        assurance_level: "STANDARD",
+        accreditation_expires_at: "2027-01-01T00:00:00.000Z",
+      }),
+    );
+
+    const result = await registry.readIssuerAssurance("issuer_1");
+
+    expect(result).toEqual({
+      state: "found",
+      issuerAddress,
+      assuranceLevel: IssuerAssuranceLevel.STANDARD,
+      accreditationExpiresAt: new Date("2027-01-01T00:00:00.000Z"),
+      contractId: "CCONTRACT",
+      network: "testnet",
+      observedAt: expect.any(Date),
+    });
+    // Same read-only get_issuer call as the address read: no signing source.
+    expect(registry.calls[0]).toEqual([
+      "contract",
+      "invoke",
+      "--network",
+      "testnet",
+      "--id",
+      "CCONTRACT",
+      "--",
+      "get_issuer",
+      "--issuer_id_hash",
+      expect.stringMatching(/^[a-f0-9]{64}$/),
+    ]);
+    expect(registry.calls[0]).not.toContain("--source");
+  });
+
+  it("treats a missing expiry as a perpetual accreditation, not an absence", async () => {
+    const registry = new ScriptedRegistry(() =>
+      JSON.stringify({
+        issuer_address: issuerAddress,
+        assurance_level: "ENHANCED",
+      }),
+    );
+
+    await expect(registry.readIssuerAssurance("issuer_1")).resolves.toEqual(
+      expect.objectContaining({
+        state: "found",
+        assuranceLevel: IssuerAssuranceLevel.ENHANCED,
+        accreditationExpiresAt: null,
+      }),
+    );
+  });
+
+  it("accepts an epoch-seconds expiry", async () => {
+    const registry = new ScriptedRegistry(() =>
+      JSON.stringify({
+        issuer_address: issuerAddress,
+        assurance_level: "BASIC",
+        accreditation_expires_at: 1798761600,
+      }),
+    );
+
+    await expect(registry.readIssuerAssurance("issuer_1")).resolves.toEqual(
+      expect.objectContaining({
+        state: "found",
+        assuranceLevel: IssuerAssuranceLevel.BASIC,
+        accreditationExpiresAt: new Date(1798761600 * 1_000),
+      }),
+    );
+  });
+
+  it("is disabled until the contract, source and flag are all configured", async () => {
+    const registry = new IssuerRegistryService({ get: jest.fn() } as never);
+
+    await expect(registry.readIssuerAssurance("issuer_1")).resolves.toMatchObject({
+      state: "disabled",
+    });
+  });
+
+  it("reports a failed CLI call instead of throwing", async () => {
+    const registry = new ScriptedRegistry(() => {
+      throw new Error("Error(Contract, #7): issuer not found");
+    });
+
+    await expect(registry.readIssuerAssurance("issuer_1")).resolves.toMatchObject({
+      state: "failed",
+    });
+  });
+
+  it("fails the read when the contract record carries no assurance level", async () => {
+    const registry = new ScriptedRegistry(() =>
+      JSON.stringify({ issuer_address: issuerAddress }),
+    );
+
+    await expect(registry.readIssuerAssurance("issuer_1")).resolves.toMatchObject({
+      state: "failed",
+    });
+  });
+
+  it("fails the read on an unrecognized assurance level instead of guessing", async () => {
+    const registry = new ScriptedRegistry(() =>
+      JSON.stringify({
+        issuer_address: issuerAddress,
+        assurance_level: "PLATINUM",
+        accreditation_expires_at: "2027-01-01T00:00:00.000Z",
+      }),
+    );
+
+    await expect(registry.readIssuerAssurance("issuer_1")).resolves.toMatchObject({
+      state: "failed",
+    });
+  });
+
+  it("fails the read on an unparseable expiry instead of guessing", async () => {
+    const registry = new ScriptedRegistry(() =>
+      JSON.stringify({
+        issuer_address: issuerAddress,
+        assurance_level: "STANDARD",
+        accreditation_expires_at: "not-a-date",
+      }),
+    );
+
+    await expect(registry.readIssuerAssurance("issuer_1")).resolves.toMatchObject({
+      state: "failed",
+    });
+  });
+
+  it.each([
+    [
+      JSON.stringify({
+        issuer_address: issuerAddress,
+        assurance_level: "standard",
+        accreditation_expires_at: "2027-01-01T00:00:00.000Z",
+      }),
+      {
+        issuerAddress,
+        assuranceLevel: IssuerAssuranceLevel.STANDARD,
+        accreditationExpiresAt: new Date("2027-01-01T00:00:00.000Z"),
+      },
+    ],
+    [
+      JSON.stringify({
+        issuer_address: issuerAddress,
+        assurance_level: "NONE",
+      }),
+      {
+        issuerAddress,
+        assuranceLevel: IssuerAssuranceLevel.NONE,
+        accreditationExpiresAt: null,
+      },
+    ],
+    [JSON.stringify({ issuer_address: issuerAddress }), undefined],
+    [
+      JSON.stringify({
+        issuer_address: issuerAddress,
+        assurance_level: "GOLD",
+      }),
+      undefined,
+    ],
+    [
+      JSON.stringify({
+        issuer_address: issuerAddress,
+        assurance_level: "STANDARD",
+        accreditation_expires_at: "yesterday",
+      }),
+      undefined,
+    ],
+    ["{}", undefined],
+    ["", undefined],
+  ])("parses assurance %p", (stdout, expected) => {
+    expect(parseIssuerAssurance(stdout)).toEqual(expected);
   });
 });

@@ -33,6 +33,27 @@ Liveness should fail only for conditions a restart can actually fix.
 healthy, and `503` otherwise. Load balancers use this to decide whether to route
 traffic to an instance.
 
+The public response carries the aggregate verdict only:
+
+```json
+{
+  "status": "ready",
+  "service": "earnproof-api",
+  "timestamp": "2025-01-15T12:00:00.000Z",
+  "requestId": "9f2c1a7b4e5d4a3b8c6d7e8f90a1b2c3"
+}
+```
+
+`status` is `ready` or `not_ready`. `requestId` is the opaque correlation
+reference echoed from the `X-Request-ID` header when the request carried one;
+it identifies the answer in server-side logs. The response names no
+dependency, carries no reason code, probe duration, or diagnostic detail —
+an unauthenticated caller learns only whether the service can serve work
+and how to ask an operator about this specific answer. The `503` is the
+standard error envelope (with the same correlation reference), not a
+per-dependency payload: which dependency blocked readiness, and why, is
+visible only on the authorized diagnostics endpoint.
+
 Required dependencies (these gate the verdict):
 
 - `database` — a `SELECT 1` round-trip.
@@ -48,8 +69,8 @@ anchoring, and webhook delivery appear only in diagnostics. Marking an optional
 dependency as required is how a Horizon outage takes an entire API offline —
 including the many routes that never touch Horizon.
 
-The `503` body is the readiness payload itself, not a generic error envelope, so
-an operator can see *which* dependency blocked readiness.
+The required dependencies gate the verdict internally, but their names and
+reason codes never appear in the public response — see [Redaction](#redaction).
 
 ## Diagnostics
 
@@ -89,12 +110,21 @@ operational situations, and collapsing them hides a real misconfiguration.
 
 ## Redaction
 
-Non-`ok` results carry a stable `reason` code, never a raw error.
+Non-`ok` results carry a stable `reason` code, never a raw error — and only
+on the authorized diagnostics endpoint.
 
 This is a privacy and security boundary, not cosmetics. A driver connection error
 routinely embeds the full DSN — including the password. Health output is
 unauthenticated for `live` and `ready`, and even the authorized diagnostics output
 ends up pasted into tickets and chat.
+
+The public readiness probe goes further than stable reason codes: it reveals
+no dependency at all. Dependency names, kinds, statuses, reason codes, probe
+durations, cache ages, circuit detail, and clock-skew snapshots are
+diagnostics-only. The split is enforced at the controller boundary by a
+projection that builds the public response field by field from the aggregate
+verdict, so a new dependency or a new detail field cannot leak through the
+public probe by being added to the internal result.
 
 The rules the implementation enforces:
 

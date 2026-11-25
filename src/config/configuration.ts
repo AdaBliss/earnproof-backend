@@ -62,6 +62,10 @@ function loadCredentialSigningKeyVerifyUntil(): Record<number, string> {
 export const configuration = () => ({
   nodeEnv: process.env.NODE_ENV ?? "development",
   port: Number(process.env.PORT ?? 4000),
+  trustProxyHops: Number(process.env.TRUST_PROXY_HOPS ?? 0),
+  trustedProxyCidrs: process.env.TRUSTED_PROXY_CIDRS
+    ? process.env.TRUSTED_PROXY_CIDRS.split(",").map((cidr) => cidr.trim())
+    : [],
   databaseUrl: process.env.DATABASE_URL,
   redisUrl: process.env.REDIS_URL,
   appUrl: process.env.APP_URL ?? "http://localhost:3000",
@@ -123,6 +127,9 @@ export const configuration = () => ({
   paymentEncryptionKeyVersion: Number(
     process.env.PAYMENT_ENCRYPTION_KEY_VERSION ?? 0,
   ),
+  envelopeEncryption: {
+    provider: process.env.ENVELOPE_ENCRYPTION_PROVIDER ?? "local",
+  },
   verificationEventRetentionDays: Number(
     process.env.VERIFICATION_EVENT_RETENTION_DAYS ?? 90,
   ),
@@ -266,6 +273,29 @@ export const configuration = () => ({
     // every replica and load balancer, so without caching the probe load scales
     // with poll rate rather than with anything meaningful.
     cacheTtlMs: Number(process.env.HEALTH_CACHE_TTL_MS ?? 5000),
+  },
+  // Database connection-pool saturation monitoring. See
+  // docs/runbooks/database-pool-saturation.md. Thresholds are validated and
+  // clamped by the monitor itself, so a misconfigured value degrades to a
+  // safe default instead of failing boot.
+  databasePool: {
+    enabled: process.env.DB_POOL_MONITOR_ENABLED !== "false",
+    warnUtilization: Number(process.env.DB_POOL_WARN_UTILIZATION ?? 0.7),
+    criticalUtilization: Number(
+      process.env.DB_POOL_CRITICAL_UTILIZATION ?? 0.9,
+    ),
+    warnWaitMs: Number(process.env.DB_POOL_WARN_WAIT_MS ?? 100),
+    criticalWaitMs: Number(process.env.DB_POOL_CRITICAL_WAIT_MS ?? 500),
+    sustainSamples: Number(process.env.DB_POOL_SUSTAIN_SAMPLES ?? 3),
+    clearSamples: Number(process.env.DB_POOL_CLEAR_SAMPLES ?? 2),
+    sampleTimeoutMs: Number(process.env.DB_POOL_SAMPLE_TIMEOUT_MS ?? 2000),
+    minSampleIntervalMs: Number(
+      process.env.DB_POOL_MIN_SAMPLE_INTERVAL_MS ?? 1000,
+    ),
+    maxWaitSamples: Number(process.env.DB_POOL_MAX_WAIT_SAMPLES ?? 120),
+    runbook:
+      process.env.DB_POOL_RUNBOOK ??
+      "docs/runbooks/database-pool-saturation.md",
   },
   // Server vs network clock skew monitoring (#328). See docs/clock-skew.md.
   // The monitor only measures; it never adjusts a clock.
@@ -448,5 +478,67 @@ export const configuration = () => ({
       .map((value) => value.trim())
       .filter(Boolean),
     routes: [],
+  },
+});
+
+  //Configuration addition
+  apiDeprecation: {
+    allowedDocumentationOrigins: (
+      process.env.API_DEPRECATION_ALLOWED_DOCUMENTATION_ORIGINS ??
+      ""
+    )
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
+
+    routes: [],
+  },
+  database: {
+    workloadTimeouts: {
+      interactive: {
+        statementTimeoutMs: Number(
+          process.env.DATABASE_TIMEOUT_INTERACTIVE_STATEMENT_MS ?? 10_000,
+        ),
+        idleInTransactionTimeoutMs: Number(
+          process.env.DATABASE_TIMEOUT_INTERACTIVE_IDLE_MS ?? 30_000,
+        ),
+        lockTimeoutMs: Number(
+          process.env.DATABASE_TIMEOUT_INTERACTIVE_LOCK_MS ?? 5_000,
+        ),
+      },
+      job: {
+        statementTimeoutMs: Number(
+          process.env.DATABASE_TIMEOUT_JOB_STATEMENT_MS ?? 120_000,
+        ),
+        idleInTransactionTimeoutMs: Number(
+          process.env.DATABASE_TIMEOUT_JOB_IDLE_MS ?? 300_000,
+        ),
+        lockTimeoutMs: Number(
+          process.env.DATABASE_TIMEOUT_JOB_LOCK_MS ?? 30_000,
+        ),
+      },
+      migration: {
+        statementTimeoutMs: Number(
+          process.env.DATABASE_TIMEOUT_MIGRATION_STATEMENT_MS ?? 3600_000,
+        ),
+        idleInTransactionTimeoutMs: Number(
+          process.env.DATABASE_TIMEOUT_MIGRATION_IDLE_MS ?? 3600_000,
+        ),
+        lockTimeoutMs: Number(
+          process.env.DATABASE_TIMEOUT_MIGRATION_LOCK_MS ?? 300_000,
+        ),
+      },
+      report: {
+        statementTimeoutMs: Number(
+          process.env.DATABASE_TIMEOUT_REPORT_STATEMENT_MS ?? 600_000,
+        ),
+        idleInTransactionTimeoutMs: Number(
+          process.env.DATABASE_TIMEOUT_REPORT_IDLE_MS ?? 900_000,
+        ),
+        lockTimeoutMs: Number(
+          process.env.DATABASE_TIMEOUT_REPORT_LOCK_MS ?? 60_000,
+        ),
+      },
+    },
   },
 });

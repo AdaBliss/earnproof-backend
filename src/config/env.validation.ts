@@ -1,5 +1,7 @@
 import { validateFeePolicy } from "./fee-policy";
 import { z } from "zod";
+import { isExactCorsOrigin } from "../common/http/cors-origin-policy";
+import { isValidCidr } from "../common/http/ip-address";
 import { DEPLOYMENT_MANIFEST_MAX_BYTES } from "./deployment-manifest";
 
 /**
@@ -236,6 +238,28 @@ const envSchema = z.object({
   /** HTTP server port (1–65535, but typically 3000–4000) */
   PORT: positiveInt("PORT").default(4000),
 
+  /** Number of trusted reverse-proxy hops between the client and this service. */
+  TRUST_PROXY_HOPS: z.coerce
+    .number()
+    .int("TRUST_PROXY_HOPS must be an integer")
+    .min(0, "TRUST_PROXY_HOPS must not be negative")
+    .max(10, "TRUST_PROXY_HOPS must not exceed 10")
+    .default(0),
+
+  /** Comma-separated CIDR ranges for proxy peers; empty when no proxy is trusted. */
+  TRUSTED_PROXY_CIDRS: z
+    .string()
+    .default("")
+    .transform((value) =>
+      value === "" ? [] : value.split(",").map((cidr) => cidr.trim()),
+    )
+    .refine(
+      (ranges) =>
+        ranges.length <= 20 &&
+        ranges.every((range) => range.length > 0 && isValidCidr(range)),
+      "TRUSTED_PROXY_CIDRS must contain at most 20 valid comma-separated CIDR ranges",
+    ),
+
   /** PostgreSQL connection string (REQUIRED: checked at startup and readiness) */
   DATABASE_URL: z
     .string()
@@ -253,7 +277,14 @@ const envSchema = z.object({
   // ──────────────────────────────────────────────────────────────────────
 
   /** Frontend application URL (used for CORS origin, must be HTTPS in production) */
-  APP_URL: z.string().url("APP_URL must be a valid URL").default("http://localhost:3000"),
+  APP_URL: z
+    .string()
+    .url("APP_URL must be a valid URL")
+    .refine(
+      isExactCorsOrigin,
+      "APP_URL must be one exact HTTP(S) origin without credentials, path, query, or fragment",
+    )
+    .default("http://localhost:3000"),
 
   /** This backend API URL (used for Swagger docs, must be HTTPS in production) */
   API_URL: z.string().url("API_URL must be a valid URL").default("http://localhost:4000"),
@@ -590,6 +621,32 @@ const envSchema = z.object({
   HEALTH_CACHE_TTL_MS: nonnegativeInt("HEALTH_CACHE_TTL_MS").default(5000),
 
   // ──────────────────────────────────────────────────────────────────────
+  // DATABASE POOL SATURATION MONITORING — thresholds, hysteresis, runbook
+  // ──────────────────────────────────────────────────────────────────────
+
+  DB_POOL_MONITOR_ENABLED: z.enum(["true", "false"]).optional().default("true"),
+  DB_POOL_WARN_UTILIZATION: z.coerce
+    .number()
+    .min(0.05)
+    .max(0.9)
+    .optional()
+    .default(0.7),
+  DB_POOL_CRITICAL_UTILIZATION: z.coerce
+    .number()
+    .min(0.1)
+    .max(0.99)
+    .optional()
+    .default(0.9),
+  DB_POOL_WARN_WAIT_MS: boundedInt(1, 60_000, 100),
+  DB_POOL_CRITICAL_WAIT_MS: boundedInt(2, 60_000, 500),
+  DB_POOL_SUSTAIN_SAMPLES: boundedInt(1, 10, 3),
+  DB_POOL_CLEAR_SAMPLES: boundedInt(1, 10, 2),
+  DB_POOL_SAMPLE_TIMEOUT_MS: boundedInt(100, 30_000, 2_000),
+  DB_POOL_MIN_SAMPLE_INTERVAL_MS: boundedInt(0, 60_000, 1_000),
+  DB_POOL_MAX_WAIT_SAMPLES: boundedInt(10, 1_000, 120),
+  DB_POOL_RUNBOOK: optionalString(z.string().min(1)),
+
+  // ──────────────────────────────────────────────────────────────────────
   // CLOCK SKEW MONITORING (#328) — measures only, never adjusts a clock
   // ──────────────────────────────────────────────────────────────────────
 
@@ -760,6 +817,17 @@ function isLocalhostUrl(value: string): boolean {
 function checkCrossVariableInvariants(data: z.infer<typeof envSchema>) {
   const errors: string[] = [];
 
+  if (data.TRUST_PROXY_HOPS === 0 && data.TRUSTED_PROXY_CIDRS.length > 0) {
+    errors.push(
+      "Invalid configuration: TRUSTED_PROXY_CIDRS requires TRUST_PROXY_HOPS greater than 0",
+    );
+  }
+  if (data.TRUST_PROXY_HOPS > 0 && data.TRUSTED_PROXY_CIDRS.length === 0) {
+    errors.push(
+      "Invalid configuration: TRUST_PROXY_HOPS greater than 0 requires TRUSTED_PROXY_CIDRS",
+    );
+  }
+
   // ────────────────────────────────────────────────────────────────────────
   // PRODUCTION-LIKE PROFILE INVARIANTS
   // ────────────────────────────────────────────────────────────────────────
@@ -910,6 +978,19 @@ function checkCrossVariableInvariants(data: z.infer<typeof envSchema>) {
   if (data.CLOCK_SKEW_MAX_SAMPLE_AGE_MS < data.CLOCK_SKEW_INTERVAL_MS) {
     errors.push(
       "Invalid configuration: CLOCK_SKEW_MAX_SAMPLE_AGE_MS must be at least CLOCK_SKEW_INTERVAL_MS",
+    );
+  }
+
+  // Invariant: pool saturation thresholds must order warn below critical,
+  // or the warning band would be empty and the hysteresis meaningless.
+  if (data.DB_POOL_WARN_UTILIZATION >= data.DB_POOL_CRITICAL_UTILIZATION) {
+    errors.push(
+      "Invalid configuration: DB_POOL_WARN_UTILIZATION must be below DB_POOL_CRITICAL_UTILIZATION",
+    );
+  }
+  if (data.DB_POOL_WARN_WAIT_MS >= data.DB_POOL_CRITICAL_WAIT_MS) {
+    errors.push(
+      "Invalid configuration: DB_POOL_WARN_WAIT_MS must be below DB_POOL_CRITICAL_WAIT_MS",
     );
   }
 

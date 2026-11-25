@@ -1,0 +1,56 @@
+# Release — publish the SBOM with release provenance
+#
+# Runs on version tags and manual dispatch only. It regenerates the
+# machine-readable SBOM, enforces the release gate, and uploads the SBOM
+# and its provenance record as workflow artifacts. It never pushes a tag,
+# never publishes to a registry, and never runs a deployment.
+#
+# The gate is deliberately strict: any dependency whose source is unknown
+# (no `resolved` URL in the lockfile, an unapproved registry host, or a
+# non-https source) or whose recorded source has no integrity hash fails
+# the release. As of the commit that introduced this workflow, the
+# lockfile does not record a source for most packages, so this workflow
+# will fail until the lockfile is regenerated (see
+# docs/dependencies.md — "Publishing the SBOM with release provenance").
+# That failure is the gate working, not the gate being broken: a release
+# must not ship an SBOM that cannot say where its dependencies came from.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      # Regenerates scripts/sbom/sbom.cyclonedx.json and
+      # scripts/sbom/provenance.json from the current lockfile and source
+      # commit. Publish records the truth about dependency sources; the
+      # gate below decides whether that truth is shippable.
+      - run: npm run sbom:publish
+      # Fails on SBOM drift, unknown dependency sources, missing integrity
+      # hashes, secrets in the published artifacts, out-of-bounds SBOMs,
+      # and provenance hashes that do not match the lockfile and SBOM.
+      - run: npm run sbom:release-gate
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ github.ref_name }}
+          path: |
+            scripts/sbom/sbom.cyclonedx.json
+            scripts/sbom/provenance.json
+          if-no-files-found: error
+          retention-days: 90
